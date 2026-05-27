@@ -9,6 +9,10 @@ services:
     startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     envVars:
+      # Pin Python (default is 3.14 which has no pydantic-core wheel)
+      - key: PYTHON_VERSION
+        value: 3.11.10
+
       # Non-secret runtime config
       - key: ENV
         value: production
