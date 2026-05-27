@@ -162,17 +162,15 @@ class CallHandler:
                 await save_state(self._state)
                 return await self._synthesize(response_text)
 
-            # Low confidence → clarify
+            # Low confidence → don't clarify, hand to the LLM summary path
+            # so the caller gets a real answer from hospital data instead of
+            # cycling through "could you repeat?" → transfer.
             if intent_result.needs_clarification:
-                self._state.increment_clarification()
-                if self._state.should_transfer(settings.MAX_CLARIFICATION_ATTEMPTS):
-                    return await self._do_transfer()
-                if self._state.clarification_count > 1:
-                    response_text = self._narrowing_question(intent_result)
-                else:
-                    response_text = self._composer.clarification(
-                        attempt=self._state.clarification_count - 1
-                    )
+                logger.info("freeform_fallback", transcript=stt_result.transcript[:100])
+                knowledge_result = self._knowledge.answer_freeform(
+                    stt_result.transcript
+                )
+                response_text = knowledge_result.text_ml or self._composer.fallback()
                 await save_state(self._state)
                 return await self._synthesize(response_text)
 

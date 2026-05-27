@@ -46,6 +46,13 @@ class KnowledgeResult:
 
 
 # ── Department keyword → dept_name normaliser ─────────────────────────────────
+#
+# Two purposes:
+#   1. Map dialect terms ("kaan", "hridayam") to canonical names so we can
+#      look them up in the actual department list.
+#   2. Cover services the hospital DOESN'T offer (dentist, derma, etc.) so
+#      we can recognise them and deny clearly instead of falling through to
+#      "I didn't understand → connect to receptionist".
 
 _DEPT_KEYWORDS: dict[str, str] = {
     # general
@@ -69,6 +76,22 @@ _DEPT_KEYWORDS: dict[str, str] = {
     "gynaecology": "gynaecology", "gynecology": "gynaecology",
     "gynae": "gynaecology", "obs": "gynaecology", "delivery": "gynaecology",
     "prasavam": "gynaecology", "maternity": "gynaecology", "women": "gynaecology",
+    # ── Services this hospital does NOT offer — listed so we can deny clearly
+    "dentist": "dental", "dental": "dental", "tooth": "dental",
+    "teeth": "dental", "pallu": "dental", "danthavaidyan": "dental",
+    "derma": "dermatology", "skin": "dermatology", "dermatology": "dermatology",
+    "neuro": "neurology", "neurology": "neurology", "brain": "neurology",
+    "stroke": "neurology",
+    "eye": "ophthalmology", "ophthal": "ophthalmology", "ophthalmology": "ophthalmology",
+    "kannu": "ophthalmology",
+    "psychiatry": "psychiatry", "mental": "psychiatry", "psychology": "psychiatry",
+    "urology": "urology", "kidney": "urology", "mutra": "urology",
+    "oncology": "oncology", "cancer": "oncology", "arbudham": "oncology",
+    "gastro": "gastroenterology", "stomach": "gastroenterology",
+    "vayar": "gastroenterology",
+    "pulmonology": "pulmonology", "lung": "pulmonology", "asthma": "pulmonology",
+    "physio": "physiotherapy", "physiotherapy": "physiotherapy",
+    "ayurveda": "ayurveda", "ayurvedam": "ayurveda",
 }
 
 
@@ -78,10 +101,84 @@ def resolve_dept_keyword(keyword: str) -> Optional[str]:
 
 # ── Main service ──────────────────────────────────────────────────────────────
 
+_DOW_EN = {0: "Sun", 1: "Mon", 2: "Tue", 3: "Wed", 4: "Thu", 5: "Fri", 6: "Sat"}
+
+
+def build_hospital_summary(ctx: HospitalContext) -> str:
+    """
+    Build a compact English summary of the hospital for the LLM.
+    Used as context for free-form caller questions instead of FAQ matching.
+    """
+    lines: list[str] = []
+    lines.append(f"HOSPITAL: {ctx.name} ({ctx.name_ml}).")
+    if ctx.address:
+        lines.append(f"ADDRESS: {ctx.address}.")
+    if ctx.phone:
+        lines.append(f"MAIN PHONE: {ctx.phone}.")
+
+    # Hours
+    if ctx.hours:
+        h = ctx.hours
+        order = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+        hr_parts = []
+        for d in order:
+            if d in h and h[d]:
+                hr_parts.append(f"{d.capitalize()} {h[d][0]}-{h[d][1]}")
+        lines.append("OPENING HOURS: " + "; ".join(hr_parts) + ". Emergency 24x7.")
+
+    # Departments
+    if ctx.departments:
+        dept_lines = []
+        for d in ctx.departments:
+            extra = f" ({d.floor}, {d.location_hint})" if d.floor else ""
+            dept_lines.append(f"{d.name}{extra} ext {d.phone_ext}")
+        lines.append("DEPARTMENTS AVAILABLE: " + " | ".join(dept_lines) + ".")
+
+    # Services NOT available (anything in _DEPT_KEYWORDS that doesn't map to a real dept)
+    available_canonical = {d.name.lower() for d in ctx.departments}
+    not_offered = set()
+    for kw, canon in _DEPT_KEYWORDS.items():
+        if canon.lower() not in available_canonical and not any(
+            canon.lower() in d.name.lower() for d in ctx.departments
+        ):
+            not_offered.add(canon)
+    if not_offered:
+        lines.append("SERVICES NOT OFFERED HERE: " + ", ".join(sorted(not_offered)) + ".")
+
+    # Doctors with schedules
+    if ctx.doctors:
+        lines.append("DOCTORS:")
+        for d in ctx.doctors:
+            sched_parts = [
+                f"{_DOW_EN.get(s.dow, '?')} {s.start}-{s.end}" for s in d.slots
+            ]
+            sched = "; ".join(sched_parts) if sched_parts else "no schedule"
+            qual = f", {d.qualifications}" if d.qualifications else ""
+            lines.append(f"- {d.name} ({d.dept_name}{qual}): {sched}")
+
+    # Billing
+    if ctx.billing:
+        lines.append("PRICING:")
+        for b in ctx.billing:
+            price = (f"₹{int(b.price_min)}"
+                     if b.price_min == b.price_max
+                     else f"₹{int(b.price_min)}-{int(b.price_max)}")
+            lines.append(f"- {b.item} = {price}"
+                         + (f" ({b.notes})" if b.notes else ""))
+
+    # Emergency
+    if ctx.emergency:
+        em_parts = [f"{e.label} {e.phone}" for e in ctx.emergency]
+        lines.append("EMERGENCY CONTACTS: " + " | ".join(em_parts) + ".")
+
+    return "\n".join(lines)
+
+
 class HospitalKnowledgeService:
 
     def __init__(self, ctx: HospitalContext):
         self.ctx = ctx
+        self._summary = build_hospital_summary(ctx)
 
     def answer(
         self,
@@ -143,12 +240,24 @@ class HospitalKnowledgeService:
                              f"{slot.start} മുതൽ {slot.end} വരെ available ആണ്."),
                     data={"doctor": doc.name, "start": slot.start, "end": slot.end},
                 )
-            else:
+            # Doctor exists but not today — find next available slot
+            next_slot = self._next_slot_after(doc, dow)
+            if next_slot:
+                next_dow, ns = next_slot
+                next_label = _DAY_ML.get(next_dow, "")
                 return KnowledgeResult(
                     intent=INTENT_DOCTOR_AVAILABILITY, found=True,
-                    text_ml=f"ക്ഷമിക്കണം, {doc.name_ml or doc.name} doctor {day_label}-ൽ available അല്ല.",
-                    data={"doctor": doc.name, "available": False},
+                    text_ml=(f"{doc.name_ml or doc.name} doctor {day_label}-ൽ "
+                             f"available അല്ല. അടുത്തത് {next_label} "
+                             f"{ns.start} മുതൽ {ns.end} വരെ available ആണ്."),
+                    data={"doctor": doc.name, "available": False,
+                          "next_day": next_label, "next_start": ns.start},
                 )
+            return KnowledgeResult(
+                intent=INTENT_DOCTOR_AVAILABILITY, found=True,
+                text_ml=f"ക്ഷമിക്കണം, {doc.name_ml or doc.name} doctor {day_label}-ൽ available അല്ല.",
+                data={"doctor": doc.name, "available": False},
+            )
 
         # By department
         if dept_kw:
@@ -160,10 +269,8 @@ class HospitalKnowledgeService:
                     text_ml=f"ക്ഷമിക്കണം, {dept_kw} department ഈ hospital-ൽ ലഭ്യമല്ല.",
                     missing="dept_not_found",
                 )
-            avail = [
-                d for d in self.ctx.doctors_for_dept(dept.name)
-                if self._slot_for_dow(d, dow)
-            ]
+            dept_docs = self.ctx.doctors_for_dept(dept.name)
+            avail = [d for d in dept_docs if self._slot_for_dow(d, dow)]
             if avail:
                 names = ", ".join(d.name_ml or d.name for d in avail[:3])
                 return KnowledgeResult(
@@ -172,12 +279,27 @@ class HospitalKnowledgeService:
                              f"{len(avail)} doctor available ആണ്: {names}."),
                     data={"dept": dept.name, "count": len(avail)},
                 )
-            else:
+            # No doctors today — find earliest upcoming slot across the dept
+            earliest_next: Optional[tuple[int, SlotInfo, DoctorInfo]] = None
+            for d in dept_docs:
+                ns = self._next_slot_after(d, dow)
+                if ns and (earliest_next is None or ns[0] < earliest_next[0]):
+                    earliest_next = (ns[0], ns[1], d)
+            if earliest_next:
+                ndow, ns, doc = earliest_next
+                next_label = _DAY_ML.get(ndow, "")
                 return KnowledgeResult(
                     intent=INTENT_DOCTOR_AVAILABILITY, found=True,
-                    text_ml=(f"ക്ഷമിക്കണം, {dept.name_ml or dept.name}-ൽ "
-                             f"{day_label}-ൽ doctors available അല്ല."),
+                    text_ml=(f"{dept.name_ml or dept.name}-ൽ {day_label}-ൽ "
+                             f"doctors available അല്ല. {next_label}-ൽ "
+                             f"{doc.name_ml or doc.name} doctor "
+                             f"{ns.start} മുതൽ {ns.end} വരെ ഉണ്ടാകും."),
                 )
+            return KnowledgeResult(
+                intent=INTENT_DOCTOR_AVAILABILITY, found=True,
+                text_ml=(f"ക്ഷമിക്കണം, {dept.name_ml or dept.name}-ൽ "
+                         f"ഇപ്പോൾ doctors-ന്റെ schedule ലഭ്യമല്ല."),
+            )
 
         return KnowledgeResult(
             intent=INTENT_DOCTOR_AVAILABILITY, found=False,
@@ -382,4 +504,65 @@ class HospitalKnowledgeService:
         for s in doc.slots:
             if s.dow == dow:
                 return s
+        return None
+
+    # ── Free-form LLM answer using hospital summary ───────────────────────────
+
+    def answer_freeform(self, question: str) -> KnowledgeResult:
+        """
+        Answer any caller question by giving the LLM (Groq llama-3.1-8b)
+        the full hospital summary and the user's question. Used when the
+        structured intent path didn't match — the LLM reads the summary
+        and answers from those details, refusing if data isn't there.
+        """
+        try:
+            from groq import Groq
+            client = Groq(api_key=settings.GROQ_API_KEY)
+            prompt = (
+                "You are the phone receptionist for a Kerala hospital. "
+                "Answer the caller's question using ONLY the facts in the "
+                "HOSPITAL SUMMARY below. Rules:\n"
+                "- If a service/doctor is not in the summary, say it is NOT "
+                "  available at this hospital. Do not invent.\n"
+                "- Match the caller's language: Malayalam-Manglish reply for "
+                "  Malayalam/Manglish input, English for English input.\n"
+                "- Keep the reply to ONE short sentence — this is a voice call.\n"
+                "- Never start with 'Sorry' unless you are actually denying.\n\n"
+                f"HOSPITAL SUMMARY:\n{self._summary}\n\n"
+                f"Caller: {question}\nReceptionist:"
+            )
+            resp = client.chat.completions.create(
+                model=settings.GROQ_MODEL_FAST,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=settings.GROQ_MAX_TOKENS,
+                timeout=settings.GROQ_TIMEOUT_S,
+                temperature=0.2,
+            )
+            text = resp.choices[0].message.content.strip()
+            return KnowledgeResult(
+                intent="freeform",
+                found=bool(text),
+                text_ml=text or "",
+                data={"source": "groq_summary"},
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"answer_freeform failed: {e}")
+            return KnowledgeResult(
+                intent="freeform", found=False,
+                text_ml="ക്ഷമിക്കണം, ഈ വിവരം ഇപ്പോൾ എനിക്ക് നൽകാൻ കഴിയില്ല.",
+            )
+
+    @staticmethod
+    def _next_slot_after(doc: DoctorInfo, dow: int):
+        """
+        Find the doctor's earliest upcoming slot in the next 7 days
+        starting from (dow + 1). Returns (dow, slot) or None.
+        DB DOW convention: 0=Sun, 6=Sat.
+        """
+        for offset in range(1, 8):
+            check_dow = (dow + offset) % 7
+            for s in doc.slots:
+                if s.dow == check_dow:
+                    return (check_dow, s)
         return None
