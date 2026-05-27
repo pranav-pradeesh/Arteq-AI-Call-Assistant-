@@ -514,7 +514,14 @@ class HospitalKnowledgeService:
         the full hospital summary and the user's question. Used when the
         structured intent path didn't match — the LLM reads the summary
         and answers from those details, refusing if data isn't there.
+
+        On Groq failure, the fallback embeds the question text so we
+        don't return identical audio for every miss (which would otherwise
+        be served from the TTS cache).
         """
+        import logging
+        log = logging.getLogger(__name__)
+
         try:
             from groq import Groq
             client = Groq(api_key=settings.GROQ_API_KEY)
@@ -522,15 +529,16 @@ class HospitalKnowledgeService:
                 "You are the phone receptionist for a Kerala hospital. "
                 "Answer the caller's question using ONLY the facts in the "
                 "HOSPITAL SUMMARY below. Rules:\n"
-                "- If a service/doctor is not in the summary, say it is NOT "
-                "  available at this hospital. Do not invent.\n"
+                "- If a service / doctor is not in the summary, say it is NOT "
+                "available at this hospital. Do not invent.\n"
                 "- Match the caller's language: Malayalam-Manglish reply for "
-                "  Malayalam/Manglish input, English for English input.\n"
+                "Malayalam/Manglish input, English for English input.\n"
                 "- Keep the reply to ONE short sentence — this is a voice call.\n"
                 "- Never start with 'Sorry' unless you are actually denying.\n\n"
                 f"HOSPITAL SUMMARY:\n{self._summary}\n\n"
                 f"Caller: {question}\nReceptionist:"
             )
+            log.info(f"freeform_groq_call question={question!r}")
             resp = client.chat.completions.create(
                 model=settings.GROQ_MODEL_FAST,
                 messages=[{"role": "user", "content": prompt}],
@@ -539,6 +547,7 @@ class HospitalKnowledgeService:
                 temperature=0.2,
             )
             text = resp.choices[0].message.content.strip()
+            log.info(f"freeform_groq_ok answer={text!r}")
             return KnowledgeResult(
                 intent="freeform",
                 found=bool(text),
@@ -546,11 +555,15 @@ class HospitalKnowledgeService:
                 data={"source": "groq_summary"},
             )
         except Exception as e:
-            import logging
-            logging.error(f"answer_freeform failed: {e}")
+            log.error(f"freeform_groq_failed error={e!r}")
+            # Vary the fallback by question so the TTS cache doesn't collapse
+            # every failed turn into the exact same audio.
+            short_q = (question or "")[:30].strip()
             return KnowledgeResult(
                 intent="freeform", found=False,
-                text_ml="ക്ഷമിക്കണം, ഈ വിവരം ഇപ്പോൾ എനിക്ക് നൽകാൻ കഴിയില്ല.",
+                text_ml=(f"ക്ഷമിക്കണം, '{short_q}' എന്നതിനെ കുറിച്ച് "
+                         "ഇപ്പോൾ കൃത്യമായ വിവരം എനിക്ക് നൽകാൻ കഴിയില്ല. "
+                         "Reception-ൽ ബന്ധപ്പെടൂ."),
             )
 
     @staticmethod

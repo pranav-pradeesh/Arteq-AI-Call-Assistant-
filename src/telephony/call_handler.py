@@ -188,7 +188,17 @@ class CallHandler:
                 state_context=self._state.to_dict(),
             )
 
-            # knowledge service puts ready-to-speak text in text_ml
+            # Promote entities only when the lookup actually resolved.
+            # If the dept/doctor wasn't found, clear so the next question
+            # doesn't inherit "dentist" or some other dead entity.
+            if knowledge_result.found:
+                self._state.remember_resolved(
+                    department=intent_result.entities.department,
+                    doctor_name=intent_result.entities.doctor_name,
+                )
+            elif knowledge_result.missing in ("dept_not_found", "doctor_not_found"):
+                self._state.clear_entity_context()
+
             response_text = self._composer.compose(knowledge_result)
 
         except Exception as e:

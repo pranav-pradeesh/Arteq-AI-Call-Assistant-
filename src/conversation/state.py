@@ -59,8 +59,13 @@ class ConversationState:
 
     def update_from_result(self, intent_result: IntentResult) -> None:
         """
-        Update rolling context from a new intent classification.
-        Preserves prior context when new result is less specific.
+        Update turn-level context from a new intent classification.
+
+        Entities are NOT promoted to last_department / last_doctor_name
+        here — we wait until the knowledge layer confirms they actually
+        resolved in this hospital. Otherwise a denied entity like
+        'dentist' would leak into every follow-up question and silently
+        reroute it through the missing department.
         """
         self.turn_count += 1
         self.total_intent_ms += intent_result.processing_ms
@@ -68,15 +73,25 @@ class ConversationState:
         if intent_result.intent and intent_result.intent != "unknown":
             self.last_intent = intent_result.intent
 
-        # Only update entity context when we have new information
-        if intent_result.entities.department:
-            self.last_department = intent_result.entities.department
-
-        if intent_result.entities.doctor_name:
-            self.last_doctor_name = intent_result.entities.doctor_name
-
+        # Day is safe to remember even if other things didn't resolve.
         if intent_result.entities.day_reference:
             self.last_day_reference = intent_result.entities.day_reference
+
+    def remember_resolved(
+        self,
+        department: Optional[str] = None,
+        doctor_name: Optional[str] = None,
+    ) -> None:
+        """Promote entities to rolling context only after a successful lookup."""
+        if department:
+            self.last_department = department
+        if doctor_name:
+            self.last_doctor_name = doctor_name
+
+    def clear_entity_context(self) -> None:
+        """Drop sticky entities (call this when last lookup failed)."""
+        self.last_department = None
+        self.last_doctor_name = None
 
     def increment_clarification(self) -> None:
         self.clarification_count += 1
