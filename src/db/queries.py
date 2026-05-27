@@ -11,6 +11,7 @@ day_of_week convention (matches existing data):
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -19,6 +20,21 @@ import asyncpg
 import pytz
 
 from src.config.settings import settings
+
+
+def _maybe_json(value: Any) -> Any:
+    """asyncpg returns JSON columns (and json_agg output) as raw strings.
+    Decode if needed; pass through if already a list/dict."""
+    if value is None:
+        return None
+    if isinstance(value, (list, dict)):
+        return value
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except Exception:
+            return value
+    return value
 
 INDIA_TZ = pytz.timezone("Asia/Kolkata")
 
@@ -225,10 +241,10 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         )
         doctors = []
         for r in doc_rows:
-            raw_slots = r["slots"] or []
+            raw_slots = _maybe_json(r["slots"]) or []
             slots = [
-                SlotInfo(s["dow"], s["start"], s["end"], s.get("room", "") or "")
-                for s in raw_slots
+                SlotInfo(s["dow"], s["start"], s["end"], (s.get("room") or "") if isinstance(s, dict) else "")
+                for s in raw_slots if isinstance(s, dict)
             ]
             doctors.append(DoctorInfo(
                 str(r["id"]), r["name"], r["name_ml"] or "",
@@ -257,7 +273,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         )
         faqs = [
             FaqRow(r["category"], r["question"], r["answer"],
-                   r["answer_ml"] or "", list(r["tags"] or []))
+                   r["answer_ml"] or "", list(_maybe_json(r["tags"]) or []))
             for r in faq_rows
         ]
 
@@ -279,7 +295,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         name_ml=h["name_ml"] or "",
         address=h["address"] or "",
         phone=h["phone"] or "",
-        hours=dict(h["hours"]) if h["hours"] else {},
+        hours=_maybe_json(h["hours"]) or {},
         departments=departments,
         doctors=doctors,
         billing=billing,

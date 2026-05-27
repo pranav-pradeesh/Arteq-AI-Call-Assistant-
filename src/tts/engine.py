@@ -48,7 +48,22 @@ class SarvamTTS:
         sample_rate: int = 8000,
     ) -> Optional[TTSResult]:
         t_start = time.monotonic()
-        try:
+        model = settings.SARVAM_TTS_MODEL
+
+        # bulbul:v2 expects {"inputs":[...]}, bulbul:v3 expects {"text": "..."}.
+        if model.startswith("bulbul:v3") or model == "bulbul:v3":
+            payload = {
+                "text": text,
+                "target_language_code": language,
+                "speaker": self.voice,
+                "pitch": 0,
+                "pace": 1.0,
+                "loudness": 1.5,
+                "speech_sample_rate": sample_rate,
+                "enable_preprocessing": True,
+                "model": model,
+            }
+        else:
             payload = {
                 "inputs": [text],
                 "target_language_code": language,
@@ -58,12 +73,26 @@ class SarvamTTS:
                 "loudness": 1.5,
                 "speech_sample_rate": sample_rate,
                 "enable_preprocessing": True,
-                "model": settings.SARVAM_TTS_MODEL,
+                "model": model,
             }
+
+        try:
             resp = await self._client.post(self.TTS_ENDPOINT, json=payload)
-            resp.raise_for_status()
-            audios = resp.json().get("audios", [])
+            if resp.status_code >= 400:
+                # Log Sarvam's actual error body so we can diagnose schema/voice errors
+                body = resp.text[:500]
+                logger.error(
+                    "sarvam_tts_http_error",
+                    status=resp.status_code,
+                    body=body,
+                    model=model,
+                    voice=self.voice,
+                )
+                return None
+            data = resp.json()
+            audios = data.get("audios", [])
             if not audios:
+                logger.error("sarvam_tts_empty", response=str(data)[:200])
                 return None
             audio_bytes = base64.b64decode(audios[0])
             return TTSResult(
@@ -71,7 +100,7 @@ class SarvamTTS:
                 latency_ms=int((time.monotonic() - t_start) * 1000),
             )
         except Exception as e:
-            logger.error("sarvam_tts_error", error=str(e))
+            logger.error("sarvam_tts_error", error=str(e), model=model, voice=self.voice)
             return None
 
     async def close(self) -> None:
