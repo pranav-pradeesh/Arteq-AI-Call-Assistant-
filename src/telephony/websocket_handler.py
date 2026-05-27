@@ -21,6 +21,7 @@ Audio format:
 from __future__ import annotations
 
 import asyncio
+import audioop
 import base64
 import io
 import json
@@ -135,7 +136,12 @@ async def handle_exotel_stream(
                     utterance_chunks = 0
                     speech_chunks = 0
 
-                    wav_bytes = _pcm_to_wav(pcm, sample_rate=8000)
+                    # Upsample 8 kHz → 16 kHz: Sarvam Saarika recognises
+                    # speech much better at 16 kHz than 8 kHz telephony rate.
+                    pcm_16k, _ = audioop.ratecv(pcm, 2, 1, 8000, 16000, None)
+                    rms = audioop.rms(pcm_16k, 2)
+                    logger.info("stt_input", bytes=len(pcm_16k), rms=rms)
+                    wav_bytes = _pcm_to_wav(pcm_16k, sample_rate=16000)
                     response_pcm = await handler.process_audio_turn(wav_bytes)
 
                     if response_pcm:

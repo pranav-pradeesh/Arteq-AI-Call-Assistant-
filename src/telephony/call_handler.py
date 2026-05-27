@@ -115,8 +115,10 @@ class CallHandler:
 
         try:
             # ── STT ──────────────────────────────────────────────────────────
+            # Use auto-detect ("unknown") — callers mix English/Malayalam
+            # ("op timing എപ്പോഴാ?"). Forcing ml-IN drops English words.
             stt_start = time.monotonic()
-            stt_result = await self._stt.transcribe(audio_bytes, language="ml-IN")
+            stt_result = await self._stt.transcribe(audio_bytes, language="unknown")
             stt_ms = int((time.monotonic() - stt_start) * 1000)
             self._state.total_stt_ms += stt_ms
 

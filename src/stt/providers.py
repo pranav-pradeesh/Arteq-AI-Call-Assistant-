@@ -54,9 +54,13 @@ class SarvamSTT:
     async def transcribe_chunk(
         self,
         audio_bytes: bytes,
-        language: str = "ml-IN",
+        language: str = "unknown",
         model: str = "saarika:v2.5",
     ) -> STTResult | STTError:
+        """
+        language: 'unknown' enables Sarvam's auto-detect (best for Manglish);
+        otherwise pass 'ml-IN', 'en-IN', 'hi-IN', etc.
+        """
         t_start = time.monotonic()
         try:
             response = await self._client.post(
@@ -64,11 +68,30 @@ class SarvamSTT:
                 files={"file": ("audio.wav", audio_bytes, "audio/wav")},
                 data={"model": model, "language_code": language},
             )
-            response.raise_for_status()
+            if response.status_code >= 400:
+                logger.error(
+                    "sarvam_stt_http_error",
+                    status=response.status_code,
+                    body=response.text[:500],
+                    model=model,
+                    language=language,
+                )
+                return STTError(
+                    provider="sarvam",
+                    error_code=f"HTTP_{response.status_code}",
+                    message=response.text[:200],
+                    recoverable=response.status_code in (429, 503, 504),
+                )
             payload = response.json()
             latency_ms = int((time.monotonic() - t_start) * 1000)
             transcript = payload.get("transcript", "")
             confidence = _estimate_confidence(transcript, payload)
+            logger.info(
+                "sarvam_stt_ok",
+                transcript=transcript[:120],
+                lang_detected=payload.get("language_code"),
+                latency_ms=latency_ms,
+            )
             return STTResult(
                 transcript=transcript,
                 confidence=confidence,
