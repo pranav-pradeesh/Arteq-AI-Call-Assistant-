@@ -168,9 +168,16 @@ async def handle_twilio_stream(
 
 
 async def _send_audio(websocket: WebSocket, audio_bytes: bytes) -> None:
-    """Send audio back to the caller via WebSocket."""
+    """Send audio back to the caller via WebSocket.
+
+    Sarvam TTS returns WAV (PCM16 8kHz); Exotel's Voicebot stream expects
+    raw mulaw 8kHz base64 chunks. Convert before sending.
+    """
+    if not audio_bytes:
+        return
     try:
-        payload = base64.b64encode(audio_bytes).decode("ascii")
+        mulaw_bytes = _wav_to_mulaw(audio_bytes)
+        payload = base64.b64encode(mulaw_bytes).decode("ascii")
         msg = json.dumps({
             "event": "media",
             "media": {"payload": payload}
@@ -178,6 +185,35 @@ async def _send_audio(websocket: WebSocket, audio_bytes: bytes) -> None:
         await websocket.send_text(msg)
     except Exception as e:
         logger.error("ws_send_audio_error", error=str(e))
+
+
+def _wav_to_mulaw(wav_bytes: bytes) -> bytes:
+    """Strip WAV header, downsample if needed, encode PCM16 → mulaw 8kHz."""
+    import audioop
+    import io
+    import wave
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            pcm = wf.readframes(wf.getnframes())
+            sample_width = wf.getsampwidth()  # bytes per sample
+            framerate = wf.getframerate()
+            channels = wf.getnchannels()
+
+        # Force mono
+        if channels == 2:
+            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
+
+        # Force 8 kHz
+        if framerate != 8000:
+            pcm, _ = audioop.ratecv(pcm, sample_width, 1, framerate, 8000, None)
+
+        # Encode to mulaw (PCM16 → mulaw)
+        if sample_width != 2:
+            pcm = audioop.lin2lin(pcm, sample_width, 2)
+        return audioop.lin2ulaw(pcm, 2)
+    except wave.Error:
+        # Not a WAV — assume already mulaw
+        return wav_bytes
 
 
 async def _send_clear(websocket: WebSocket) -> None:

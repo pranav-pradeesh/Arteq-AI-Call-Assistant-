@@ -50,15 +50,13 @@ class SarvamTTS:
         t_start = time.monotonic()
         model = settings.SARVAM_TTS_MODEL
 
-        # bulbul:v2 expects {"inputs":[...]}, bulbul:v3 expects {"text": "..."}.
-        if model.startswith("bulbul:v3") or model == "bulbul:v3":
+        # bulbul:v3 rejects pitch/loudness; older versions accept them.
+        if model.startswith("bulbul:v3"):
             payload = {
                 "text": text,
                 "target_language_code": language,
                 "speaker": self.voice,
-                "pitch": 0,
                 "pace": 1.0,
-                "loudness": 1.5,
                 "speech_sample_rate": sample_rate,
                 "enable_preprocessing": True,
                 "model": model,

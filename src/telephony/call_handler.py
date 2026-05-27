@@ -71,6 +71,8 @@ class CallHandler:
         self._composer: Optional[ResponseComposer] = None
         self._stt = CompositeSTT()
         self._tts = CompositeTTS()
+        self._consecutive_failures = 0
+        self._call_dead = False
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -212,10 +214,17 @@ class CallHandler:
     # ── Helpers ───────────────────────────────────────────────────────────────
 
     async def _synthesize(self, text: str) -> bytes:
-        if not text:
+        if not text or self._call_dead:
             return b""
         audio = await self._tts.synthesize(text, language="ml-IN")
-        return audio or b""
+        if not audio:
+            self._consecutive_failures += 1
+            if self._consecutive_failures >= 5:
+                logger.error("circuit_break_tts", call_id=self.call_id)
+                self._call_dead = True
+            return b""
+        self._consecutive_failures = 0
+        return audio
 
     async def _do_transfer(self) -> bytes:
         if self._state:
