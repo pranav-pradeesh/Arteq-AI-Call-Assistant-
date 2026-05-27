@@ -1,143 +1,94 @@
 """
-Redis cache layer.
+Cache shim — backs the Redis API with in-memory store.
 
-Key naming convention:
-  tenant:<slug>:config          → serialized TenantConfig (TTL: CACHE_TTL_SECONDS)
-  tenant:<slug>:version         → config version number (TTL: none)
-  branch:<branch_id>:full       → full branch data including depts/doctors
-  call:<call_id>:state          → conversation state (TTL: 3600s / 1 hour)
-
-O(1) access pattern for all hot paths.
+REDIS_URL is empty in this deployment, so we delegate to MemoryCache.
+All function signatures are identical to the Redis version so no other
+module needs to change.
 """
-
 from __future__ import annotations
 
 import json
 from typing import Any, Optional
 
-import redis.asyncio as aioredis
+from src.cache.store import (
+    hospital_cache,
+    session_cache,
+    HOSPITAL_CACHE_TTL,
+    SESSION_TTL,
+)
 
-from src.config.settings import settings
-
-_redis_client: aioredis.Redis | None = None
+_DEFAULT_TTL = 300
 
 
-async def get_redis() -> aioredis.Redis:
-    """Return singleton Redis client."""
-    global _redis_client
-    if _redis_client is None:
-        _redis_client = aioredis.from_url(
-            settings.REDIS_URL,
-            encoding="utf-8",
-            decode_responses=True,
-            socket_keepalive=True,
-            socket_connect_timeout=2,
-            retry_on_timeout=True,
-        )
-    return _redis_client
+# ── Compatibility stub (health check calls get_redis().ping()) ───────────────
+
+class _FakeRedis:
+    async def ping(self) -> bool:
+        return True
+
+
+async def get_redis() -> _FakeRedis:
+    return _FakeRedis()
 
 
 async def close_redis() -> None:
-    global _redis_client
-    if _redis_client:
-        await _redis_client.aclose()
-        _redis_client = None
+    pass
 
 
-# ─── Generic helpers ──────────────────────────────────────────────────────────
-
+# ── Generic helpers ───────────────────────────────────────────────────────────
 
 async def cache_get(key: str) -> Optional[Any]:
-    """
-    Get a JSON-serialized value from cache.
-    Returns None on cache miss or Redis error (fail-open).
-    """
-    try:
-        client = await get_redis()
-        raw = await client.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
-    except Exception:
-        # Cache miss is acceptable — caller must handle it
-        return None
+    return session_cache.get(key)
 
 
-async def cache_set(key: str, value: Any, ttl: int = settings.CACHE_TTL_SECONDS) -> bool:
-    """
-    Store a JSON-serializable value in cache with TTL.
-    Returns True on success, False on error (fail-open).
-    """
-    try:
-        client = await get_redis()
-        serialized = json.dumps(value, default=str)
-        await client.set(key, serialized, ex=ttl)
-        return True
-    except Exception:
-        return False
+async def cache_set(key: str, value: Any, ttl: int = _DEFAULT_TTL) -> bool:
+    session_cache.set(key, value, ttl=ttl)
+    return True
 
 
 async def cache_delete(key: str) -> None:
-    """Delete a key. Used for cache invalidation after dashboard updates."""
-    try:
-        client = await get_redis()
-        await client.delete(key)
-    except Exception:
-        pass
+    session_cache.delete(key)
 
 
 async def cache_delete_pattern(pattern: str) -> int:
-    """
-    Delete all keys matching pattern.
-    Use sparingly — SCAN-based, not O(1).
-    Returns count of deleted keys.
-    """
-    try:
-        client = await get_redis()
-        deleted = 0
-        async for key in client.scan_iter(pattern, count=100):
-            await client.delete(key)
-            deleted += 1
-        return deleted
-    except Exception:
-        return 0
+    prefix = pattern.rstrip("*")
+    session_cache.delete_prefix(prefix)
+    return 0
 
 
-# ─── Conversation state (short-lived call context) ────────────────────────────
+# ── Conversation state ────────────────────────────────────────────────────────
 
-
-CALL_STATE_TTL = 3600  # 1 hour max call lifetime
+CALL_STATE_TTL = SESSION_TTL
 
 
 async def get_call_state(call_id: str) -> Optional[dict]:
-    return await cache_get(f"call:{call_id}:state")
+    return session_cache.get(f"call:{call_id}:state")
 
 
 async def set_call_state(call_id: str, state: dict) -> bool:
-    return await cache_set(f"call:{call_id}:state", state, ttl=CALL_STATE_TTL)
+    session_cache.set(f"call:{call_id}:state", state, ttl=CALL_STATE_TTL)
+    return True
 
 
 async def delete_call_state(call_id: str) -> None:
-    await cache_delete(f"call:{call_id}:state")
+    session_cache.delete(f"call:{call_id}:state")
 
 
-# ─── Tenant config cache ──────────────────────────────────────────────────────
-
+# ── Hospital/tenant config cache ──────────────────────────────────────────────
 
 def tenant_config_key(slug: str) -> str:
     return f"tenant:{slug}:config"
 
 
 async def get_tenant_config_cache(slug: str) -> Optional[dict]:
-    return await cache_get(tenant_config_key(slug))
+    return hospital_cache.get(tenant_config_key(slug))
 
 
 async def set_tenant_config_cache(slug: str, config: dict) -> bool:
-    return await cache_set(tenant_config_key(slug), config, ttl=settings.CACHE_TTL_SECONDS)
+    hospital_cache.set(tenant_config_key(slug), config, ttl=HOSPITAL_CACHE_TTL)
+    return True
 
 
 async def invalidate_tenant_cache(slug: str) -> None:
-    """Called when dashboard updates hospital data."""
-    await cache_delete(tenant_config_key(slug))
-    # Also clear all branch caches for this tenant
-    await cache_delete_pattern(f"branch:*:{slug}:*")
+    hospital_cache.delete(tenant_config_key(slug))
+    hospital_cache.delete_prefix(f"branch:{slug}:")

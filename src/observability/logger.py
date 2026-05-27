@@ -23,7 +23,7 @@ def configure_logging() -> None:
     """Configure structlog for the application. Called once at startup."""
     log_level = getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO)
 
-    if settings.is_production:
+    if settings.ENV not in ("dev", "development", "local"):
         # JSON output for log aggregation (Datadog, CloudWatch, etc.)
         processors = [
             structlog.contextvars.merge_contextvars,

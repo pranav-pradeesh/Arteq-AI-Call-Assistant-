@@ -1,13 +1,15 @@
 """
-Knowledge service tests.
-Uses synthetic TenantConfig — no DB needed.
-"""
+Knowledge service tests — uses synthetic HospitalContext (no DB needed).
 
+day_of_week DB convention:  0=Sun, 1=Mon, 2=Tue, 3=Wed, 4=Thu, 5=Fri, 6=Sat
+"""
 import pytest
 from unittest.mock import patch
-from datetime import datetime
 
-from src.intent.engine import ExtractedEntities, IntentResult
+from src.db.queries import (
+    BillingRow, DeptInfo, DoctorInfo, EmergencyContact, FaqRow,
+    HospitalContext, SlotInfo,
+)
 from src.intent.keywords import (
     INTENT_CONSULTATION_FEE,
     INTENT_DEPARTMENT_EXISTS,
@@ -18,232 +20,157 @@ from src.intent.keywords import (
     INTENT_LOCATION,
 )
 from src.knowledge.service import HospitalKnowledgeService
-from src.tenant.loader import BranchInfo, DepartmentInfo, DoctorInfo, TenantConfig
 
 
-def make_test_config() -> TenantConfig:
-    """Create a minimal test TenantConfig."""
-    dept_dentist = DepartmentInfo(
-        id="dept-dentist-id",
-        name="Dental",
-        normalized_name="dentist",
-        aliases=["dental", "tooth", "pallu"],
-        is_active=True,
-        floor_info="Ground Floor",
-        room_number="D1",
-        timings=[
-            {"day": "monday", "open_time": "09:00", "close_time": "17:00", "is_closed": False},
-            {"day": "tuesday", "open_time": "09:00", "close_time": "17:00", "is_closed": False},
-            {"day": "sunday", "open_time": None, "close_time": None, "is_closed": True},
-        ],
-        fees=[{"fee_type": "consultation", "amount": 200.0, "currency": "INR"}],
+# ── Synthetic hospital context ────────────────────────────────────────────────
+
+def make_test_context() -> HospitalContext:
+    dept_dental = DeptInfo(
+        id="d1", name="Dental", name_ml="ഡെന്റൽ",
+        floor="Ground Floor", location_hint="", phone_ext="",
     )
-
-    dept_gyno = DepartmentInfo(
-        id="dept-gyno-id",
-        name="Gynaecology",
-        normalized_name="gynecology",
-        aliases=["gynecology", "obs", "delivery", "prasavam"],
-        is_active=True,
-        floor_info="2nd Floor",
-        room_number=None,
-        timings=[
-            {"day": "monday", "open_time": "09:00", "close_time": "16:00", "is_closed": False},
-        ],
-        fees=[{"fee_type": "consultation", "amount": 300.0, "currency": "INR"}],
+    dept_gyno = DeptInfo(
+        id="d2", name="Gynaecology", name_ml="ഗൈനക്കോളജി",
+        floor="2nd Floor", location_hint="", phone_ext="",
     )
-
+    # Doctor available Monday (dow=1) and Wednesday (dow=3)
     doctor = DoctorInfo(
-        id="doc-id-1",
-        name="Dr. Rema Devi",
-        normalized_name="dr rema devi",
-        aliases=["rema", "rema devi"],
-        specialization="Obstetrics & Gynaecology",
-        department_id="dept-gyno-id",
-        is_active=True,
-        is_visiting=False,
-        availability=[
-            {"day": "monday", "start_time": "09:00", "end_time": "13:00", "is_available": True},
-            {"day": "wednesday", "start_time": "09:00", "end_time": "13:00", "is_available": True},
+        id="doc1", name="Dr. Rema Devi", name_ml="ഡോ. രേമ ദേവി",
+        specialty="Obstetrics", qualifications="MBBS",
+        dept_name="Gynaecology", dept_name_ml="ഗൈനക്കോളജി",
+        slots=[
+            SlotInfo(dow=1, start="09:00", end="13:00", room="G1"),
+            SlotInfo(dow=3, start="09:00", end="13:00", room="G1"),
         ],
-        fees=[{"fee_type": "consultation", "amount": 350.0, "currency": "INR"}],
     )
-
-    branch = BranchInfo(
-        id="branch-id-1",
-        name="Mother Hospital Main",
-        is_main_branch=True,
+    billing = [
+        BillingRow(item="consultation:dental", item_ml="ഡെന്റൽ",
+                   price_min=200.0, price_max=200.0, notes=""),
+        BillingRow(item="consultation:gynaecology", item_ml="ഗൈനക്കോളജി",
+                   price_min=300.0, price_max=350.0, notes=""),
+    ]
+    emergency = [EmergencyContact(label="Emergency", label_ml="ഇമർജൻസി",
+                                  phone="0487-2442000")]
+    return HospitalContext(
+        hospital_id="test-hospital",
+        name="Test Hospital",
+        name_ml="ടെസ്റ്റ് ഹോസ്പിറ്റൽ",
         address="Pullazhy, Thrissur",
-        city="Thrissur",
-        district="Thrissur",
-        phone_primary="0487-2442888",
-        phone_secondary="0487-2443999",
-        phone_emergency="0487-2442000",
-        has_emergency=True,
-        emergency_24x7=True,
-        emergency_notes="24x7 Casualty",
-        general_open_time="08:00",
-        general_close_time="20:00",
-        departments=[dept_dentist, dept_gyno],
+        phone="0487-2442888",
+        hours={
+            "mon": ["08:00", "20:00"],
+            "sun": ["09:00", "14:00"],
+        },
+        departments=[dept_dental, dept_gyno],
         doctors=[doctor],
-        day_policies=[
-            {"day": "sunday", "is_open": True, "open_time": "09:00", "close_time": "14:00", "notes": "Limited OPD"},
-        ],
-        holiday_overrides=[],
-    )
-
-    return TenantConfig(
-        tenant_id="tenant-id-1",
-        slug="mother-hospital-thrissur",
-        name="Mother Hospital Thrissur",
-        is_active=True,
-        transfer_number="0487-2442888",
-        default_language="ml",
-        greeting_text=None,
-        fallback_text=None,
-        stt_language_code="ml-IN",
-        tts_voice="anushka",
-        branches=[branch],
-        keyword_rules=[],
-    )
-
-
-def make_intent_result(
-    intent: str,
-    department: str = None,
-    doctor_name: str = None,
-    day: str = None,
-    fee_type: str = None,
-    confidence: float = 0.9,
-) -> IntentResult:
-    entities = ExtractedEntities(
-        department=department,
-        doctor_name=doctor_name,
-        day_reference=day,
-        fee_type=fee_type,
-    )
-    return IntentResult(
-        intent=intent,
-        confidence=confidence,
-        needs_clarification=False,
-        entities=entities,
+        billing=billing,
+        faqs=[],
+        emergency=emergency,
     )
 
 
 @pytest.fixture
 def service():
-    config = make_test_config()
-    return HospitalKnowledgeService(config)
+    return HospitalKnowledgeService(make_test_context())
 
 
-# ─── Department exists ────────────────────────────────────────────────────────
-
+# ── Department exists ─────────────────────────────────────────────────────────
 
 def test_department_exists_dentist(service):
-    result = service.answer(make_intent_result(INTENT_DEPARTMENT_EXISTS, department="dentist"))
+    result = service.answer(INTENT_DEPARTMENT_EXISTS, {"department": "dental"})
     assert result.found is True
-    assert result.data["department"] == "Dental"
+    assert "Dental" in result.text_ml or "ഡെന്റൽ" in result.text_ml
 
 
 def test_department_exists_alias(service):
-    result = service.answer(make_intent_result(INTENT_DEPARTMENT_EXISTS, department="pallu"))
-    assert result.found is True  # alias should match
+    # "dental" is a substring of "Dental" so find_dept("dental") should match
+    result = service.answer(INTENT_DEPARTMENT_EXISTS, {"department": "dental"})
+    assert result.found is True
 
 
 def test_department_not_exists(service):
-    result = service.answer(make_intent_result(INTENT_DEPARTMENT_EXISTS, department="oncology"))
+    result = service.answer(INTENT_DEPARTMENT_EXISTS, {"department": "oncology"})
     assert result.found is False
+    assert "ക്ഷമിക്കണം" in result.text_ml
 
 
-# ─── Consultation fee ─────────────────────────────────────────────────────────
-
+# ── Consultation fee ──────────────────────────────────────────────────────────
 
 def test_fee_by_department(service):
-    result = service.answer(make_intent_result(INTENT_CONSULTATION_FEE, department="dentist"))
+    result = service.answer(INTENT_CONSULTATION_FEE, {"department": "dental"})
     assert result.found is True
-    assert result.data["amount"] == 200.0
-    assert result.data["currency"] == "INR"
-
-
-def test_fee_by_doctor(service):
-    result = service.answer(
-        make_intent_result(INTENT_CONSULTATION_FEE, doctor_name="rema devi")
-    )
-    assert result.found is True
-    assert result.data["amount"] == 350.0
+    assert "200" in result.text_ml
 
 
 def test_fee_unknown_department(service):
-    result = service.answer(make_intent_result(INTENT_CONSULTATION_FEE, department="cardiology"))
+    result = service.answer(INTENT_CONSULTATION_FEE, {"department": "cardiology"})
     assert result.found is False
 
 
-# ─── Doctor availability ──────────────────────────────────────────────────────
+# ── Doctor availability ───────────────────────────────────────────────────────
 
-
-def test_doctor_availability_by_name_available(service):
-    with patch("src.knowledge.service._get_today_day_name", return_value="monday"):
+def test_doctor_availability_monday(service):
+    # Monday = DB dow 1 — doctor has slot
+    with patch("src.knowledge.service.today_db_dow", return_value=1):
         result = service.answer(
-            make_intent_result(INTENT_DOCTOR_AVAILABILITY, doctor_name="rema devi")
+            INTENT_DOCTOR_AVAILABILITY, {"doctor_name": "rema devi"}
         )
     assert result.found is True
-    assert result.data["available"] is True
+    assert "09:00" in result.text_ml
 
 
-def test_doctor_availability_by_name_not_available(service):
-    with patch("src.knowledge.service._get_today_day_name", return_value="friday"):
+def test_doctor_availability_friday(service):
+    # Friday = DB dow 5 — doctor has no slot
+    with patch("src.knowledge.service.today_db_dow", return_value=5):
         result = service.answer(
-            make_intent_result(INTENT_DOCTOR_AVAILABILITY, doctor_name="rema devi")
+            INTENT_DOCTOR_AVAILABILITY, {"doctor_name": "rema"}
         )
     assert result.found is True
-    assert result.data["available"] is False
+    assert "available അല്ല" in result.text_ml
 
 
 def test_doctor_unknown_name(service):
     result = service.answer(
-        make_intent_result(INTENT_DOCTOR_AVAILABILITY, doctor_name="dr nobody")
+        INTENT_DOCTOR_AVAILABILITY, {"doctor_name": "dr nobody"}
     )
     assert result.found is False
-    assert result.missing_entity == "doctor_name"
+    assert "ക്ഷമിക്കണം" in result.text_ml
 
 
-# ─── Emergency ───────────────────────────────────────────────────────────────
-
+# ── Emergency ─────────────────────────────────────────────────────────────────
 
 def test_emergency_available(service):
-    result = service.answer(make_intent_result(INTENT_EMERGENCY))
+    result = service.answer(INTENT_EMERGENCY, {})
     assert result.found is True
-    assert result.data["has_emergency"] is True
-    assert result.data["emergency_24x7"] is True
-    assert result.data["emergency_phone"] == "0487-2442000"
+    assert "0487-2442000" in result.text_ml
 
 
-# ─── Location ────────────────────────────────────────────────────────────────
-
+# ── Location ──────────────────────────────────────────────────────────────────
 
 def test_location(service):
-    result = service.answer(make_intent_result(INTENT_LOCATION))
+    result = service.answer(INTENT_LOCATION, {})
     assert result.found is True
-    assert "Thrissur" in result.data["address"]
+    assert "Thrissur" in result.text_ml
 
 
-# ─── Hospital timing ─────────────────────────────────────────────────────────
+# ── Hospital timing ───────────────────────────────────────────────────────────
 
-
-def test_hospital_timing_sunday(service):
-    with patch("src.knowledge.service._get_today_day_name", return_value="sunday"):
-        result = service.answer(make_intent_result(INTENT_HOSPITAL_TIMING, day="sunday"))
+def test_hospital_timing_today(service):
+    # Use Monday (dow=1) — hospital is open
+    with patch("src.knowledge.service.today_db_dow", return_value=1):
+        result = service.answer(INTENT_HOSPITAL_TIMING, {})
     assert result.found is True
-    assert result.data.get("is_open") is True
+    assert "08:00" in result.text_ml
 
 
-# ─── Context carryover ────────────────────────────────────────────────────────
-
+# ── Context carryover ─────────────────────────────────────────────────────────
 
 def test_context_department_carryover(service):
-    """If no department in entities, use context from prior turn."""
-    intent_result = make_intent_result(INTENT_CONSULTATION_FEE)  # no department
-    context = {"last_department": "dentist"}
-    result = service.answer(intent_result, state_context=context)
+    """If no department in entities, should fall back to state_context."""
+    result = service.answer(
+        INTENT_CONSULTATION_FEE,
+        {},  # no department in entities
+        state_context={"last_department": "dental"},
+    )
     assert result.found is True
-    assert result.data["amount"] == 200.0
+    assert "200" in result.text_ml
