@@ -1,0 +1,376 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Arteq Hospital Voice Agent — Dashboard</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
+<style>
+  [x-cloak] { display: none !important; }
+  body { font-family: 'Inter', 'Segoe UI', sans-serif; }
+</style>
+</head>
+<body class="bg-gray-50 min-h-screen" x-data="dashboard()" x-init="init()">
+
+<!-- Top Nav -->
+<nav class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shadow-sm">
+  <div class="flex items-center gap-3">
+    <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+      <span class="text-white text-xs font-bold">A</span>
+    </div>
+    <span class="font-semibold text-gray-900">Arteq Voice Agent</span>
+    <span class="text-gray-400">|</span>
+    <span class="text-sm text-blue-600 font-medium" x-text="tenantName || 'Loading...'"></span>
+  </div>
+  <div class="flex items-center gap-4">
+    <div class="flex items-center gap-2">
+      <span class="w-2 h-2 rounded-full" :class="systemOnline ? 'bg-green-500' : 'bg-red-500'"></span>
+      <span class="text-sm text-gray-600" x-text="systemOnline ? 'System Online' : 'System Offline'"></span>
+    </div>
+    <button @click="logout()" class="text-sm text-gray-500 hover:text-gray-700">Logout</button>
+  </div>
+</nav>
+
+<!-- Main Layout -->
+<div class="flex min-h-screen">
+
+  <!-- Sidebar -->
+  <aside class="w-56 bg-white border-r border-gray-200 min-h-screen pt-4">
+    <nav class="px-3 space-y-1">
+      <template x-for="item in navItems" :key="item.id">
+        <button
+          @click="activeSection = item.id"
+          class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+          :class="activeSection === item.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50'"
+        >
+          <span x-text="item.icon"></span>
+          <span x-text="item.label"></span>
+        </button>
+      </template>
+    </nav>
+  </aside>
+
+  <!-- Content -->
+  <main class="flex-1 p-6">
+
+    <!-- ── Overview ── -->
+    <div x-show="activeSection === 'overview'" x-cloak>
+      <h1 class="text-xl font-semibold text-gray-900 mb-6">📊 Dashboard Overview</h1>
+      <div class="grid grid-cols-4 gap-4 mb-6">
+        <template x-for="stat in stats" :key="stat.label">
+          <div class="bg-white rounded-xl border border-gray-200 p-4">
+            <div class="text-2xl font-bold text-blue-600" x-text="stat.value"></div>
+            <div class="text-sm text-gray-500 mt-1" x-text="stat.label"></div>
+          </div>
+        </template>
+      </div>
+
+      <div class="bg-white rounded-xl border border-gray-200 p-4">
+        <h2 class="font-medium text-gray-900 mb-3">Recent Calls</h2>
+        <div x-show="calls.length === 0" class="text-sm text-gray-400 py-4 text-center">No calls yet</div>
+        <div class="space-y-2">
+          <template x-for="call in calls.slice(0, 10)" :key="call.call_id">
+            <div class="flex items-center justify-between py-2 border-b border-gray-50 text-sm">
+              <div class="flex items-center gap-3">
+                <span class="px-2 py-0.5 rounded text-xs font-medium"
+                  :class="{
+                    'bg-green-100 text-green-700': call.outcome === 'answered',
+                    'bg-yellow-100 text-yellow-700': call.outcome === 'transferred',
+                    'bg-red-100 text-red-700': call.outcome === 'dropped',
+                    'bg-gray-100 text-gray-700': !call.outcome
+                  }"
+                  x-text="call.outcome || 'unknown'"></span>
+                <span class="text-gray-600" x-text="call.intent || '-'"></span>
+              </div>
+              <div class="flex items-center gap-4 text-gray-400">
+                <span x-text="call.total_latency_ms ? call.total_latency_ms + 'ms' : '-'"></span>
+                <span x-text="call.clarifications + ' clarif.'"></span>
+                <span x-text="call.start ? new Date(call.start).toLocaleTimeString() : ''"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Hospital Info ── -->
+    <div x-show="activeSection === 'hospital'" x-cloak>
+      <h1 class="text-xl font-semibold text-gray-900 mb-6">🏥 Hospital Settings</h1>
+      <div class="bg-white rounded-xl border border-gray-200 p-6 max-w-2xl">
+        <div class="space-y-4">
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Hospital Name</label>
+            <input x-model="hospitalProfile.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Hospital name">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Transfer Number (for human handoff)</label>
+            <input x-model="hospitalProfile.transfer_number" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="+91 XXXXXXXXXX">
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Greeting Message (Malayalam)</label>
+            <textarea x-model="hospitalProfile.greeting_text" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Custom Malayalam greeting..."></textarea>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-gray-700 mb-1">Fallback Message</label>
+            <textarea x-model="hospitalProfile.fallback_text" rows="2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Message when system can't answer..."></textarea>
+          </div>
+          <button @click="saveHospitalProfile()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+            Save Changes
+          </button>
+          <div x-show="saveMsg" class="text-green-600 text-sm" x-text="saveMsg"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── Departments ── -->
+    <div x-show="activeSection === 'departments'" x-cloak>
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">🏗️ Departments</h1>
+        <button @click="showAddDept = true" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-blue-700">+ Add Department</button>
+      </div>
+      <div class="bg-white rounded-xl border border-gray-200">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Floor</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Aliases</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="dept in departments" :key="dept.id">
+              <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 font-medium text-gray-900" x-text="dept.name"></td>
+                <td class="px-4 py-3 text-gray-500" x-text="dept.floor_info || '-'"></td>
+                <td class="px-4 py-3">
+                  <span class="px-2 py-0.5 rounded text-xs" :class="dept.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" x-text="dept.is_active ? 'Active' : 'Inactive'"></span>
+                </td>
+                <td class="px-4 py-3 text-gray-400 text-xs" x-text="(dept.aliases || []).slice(0, 3).join(', ')"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Doctors ── -->
+    <div x-show="activeSection === 'doctors'" x-cloak>
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">👨‍⚕️ Doctors</h1>
+        <button @click="showAddDoctor = true" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-blue-700">+ Add Doctor</button>
+      </div>
+      <div class="bg-white rounded-xl border border-gray-200">
+        <table class="w-full text-sm">
+          <thead class="bg-gray-50 border-b border-gray-200">
+            <tr>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Specialization</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Visiting</th>
+            </tr>
+          </thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="doc in doctors" :key="doc.id">
+              <tr class="hover:bg-gray-50">
+                <td class="px-4 py-3 font-medium text-gray-900" x-text="doc.name"></td>
+                <td class="px-4 py-3 text-gray-500" x-text="doc.specialization || '-'"></td>
+                <td class="px-4 py-3">
+                  <span class="px-2 py-0.5 rounded text-xs" :class="doc.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" x-text="doc.is_active ? 'Active' : 'Inactive'"></span>
+                </td>
+                <td class="px-4 py-3 text-gray-400" x-text="doc.is_visiting ? 'Visiting' : 'Regular'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── Holidays ── -->
+    <div x-show="activeSection === 'holidays'" x-cloak>
+      <h1 class="text-xl font-semibold text-gray-900 mb-6">📅 Holiday & Closing Days</h1>
+      <div class="bg-white rounded-xl border border-gray-200 p-6 max-w-lg">
+        <h2 class="font-medium text-gray-900 mb-4">Add Holiday/Closure</h2>
+        <div class="space-y-3">
+          <input x-model="newHoliday.date" type="date" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <input x-model="newHoliday.reason" type="text" placeholder="Reason (e.g., Onam)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <div class="flex items-center gap-3">
+            <label class="flex items-center gap-2 text-sm">
+              <input x-model="newHoliday.is_closed" type="checkbox" class="rounded">
+              <span>Fully Closed</span>
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input x-model="newHoliday.emergency_only" type="checkbox" class="rounded">
+              <span>Emergency Only</span>
+            </label>
+          </div>
+          <button @click="addHoliday()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
+            Add Holiday
+          </button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ── System Status ── -->
+    <div x-show="activeSection === 'system'" x-cloak>
+      <h1 class="text-xl font-semibold text-gray-900 mb-6">⚙️ System Status</h1>
+      <div class="grid grid-cols-2 gap-4 max-w-2xl">
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+          <div class="text-sm font-medium text-gray-700 mb-2">STT Provider</div>
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-green-500"></span>
+            <span class="text-sm">Sarvam AI Saarika (Primary)</span>
+          </div>
+          <div class="text-xs text-gray-400 mt-1">Malayalam-optimized, Low-latency</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+          <div class="text-sm font-medium text-gray-700 mb-2">TTS Provider</div>
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full bg-green-500"></span>
+            <span class="text-sm">Sarvam AI Bulbul (Primary)</span>
+          </div>
+          <div class="text-xs text-gray-400 mt-1">Natural Malayalam voice</div>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+          <div class="text-sm font-medium text-gray-700 mb-2">WebSocket Endpoint</div>
+          <code class="text-xs text-blue-600 break-all" x-text="wsEndpoint"></code>
+        </div>
+        <div class="bg-white rounded-xl border border-gray-200 p-4">
+          <div class="text-sm font-medium text-gray-700 mb-2">Cache Status</div>
+          <div class="flex items-center gap-2">
+            <span class="w-2 h-2 rounded-full" :class="systemOnline ? 'bg-green-500' : 'bg-red-500'"></span>
+            <span class="text-sm" x-text="systemOnline ? 'Redis Connected' : 'Redis Error'"></span>
+          </div>
+        </div>
+      </div>
+      <div class="mt-4">
+        <button @click="clearCache()" class="bg-yellow-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-yellow-600">
+          🔄 Clear Tenant Cache (force config reload)
+        </button>
+        <div x-show="cacheCleared" class="text-green-600 text-sm mt-2">Cache cleared. Next call will reload from database.</div>
+      </div>
+    </div>
+
+  </main>
+</div>
+
+<script>
+function dashboard() {
+  return {
+    activeSection: 'overview',
+    tenantName: 'Mother Hospital Thrissur',
+    tenantSlug: 'mother-hospital-thrissur',
+    systemOnline: true,
+    token: localStorage.getItem('arteq_token'),
+    stats: [
+      { label: 'Total Calls (7d)', value: '—' },
+      { label: 'Avg Latency', value: '—ms' },
+      { label: 'Transfers', value: '—' },
+      { label: 'Clarifications/Call', value: '—' },
+    ],
+    calls: [],
+    departments: [],
+    doctors: [],
+    hospitalProfile: {},
+    newHoliday: { date: '', reason: '', is_closed: true, emergency_only: false },
+    saveMsg: '',
+    cacheCleared: false,
+    wsEndpoint: '',
+    navItems: [
+      { id: 'overview', icon: '📊', label: 'Overview' },
+      { id: 'hospital', icon: '🏥', label: 'Hospital Info' },
+      { id: 'departments', icon: '🏗️', label: 'Departments' },
+      { id: 'doctors', icon: '👨‍⚕️', label: 'Doctors' },
+      { id: 'holidays', icon: '📅', label: 'Holidays' },
+      { id: 'system', icon: '⚙️', label: 'System' },
+    ],
+
+    async init() {
+      this.wsEndpoint = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/call/${this.tenantSlug}`;
+      await this.loadHealth();
+      await this.loadAnalytics();
+      await this.loadRecentCalls();
+    },
+
+    async apiFetch(path, options = {}) {
+      const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+      if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
+      const r = await fetch(path, { ...options, headers });
+      if (!r.ok) throw new Error(`API error: ${r.status}`);
+      return r.json();
+    },
+
+    async loadHealth() {
+      try {
+        const h = await this.apiFetch('/api/v1/health');
+        this.systemOnline = h.status === 'healthy' || h.status === 'degraded';
+      } catch { this.systemOnline = false; }
+    },
+
+    async loadAnalytics() {
+      try {
+        const data = await this.apiFetch(`/api/v1/admin/analytics/${this.tenantSlug}/summary?days=7`);
+        this.stats = [
+          { label: 'Total Calls (7d)', value: data.total_calls || '0' },
+          { label: 'Avg Latency', value: (data.avg_latency_ms || 0).toFixed(0) + 'ms' },
+          { label: 'Transfers', value: data.total_transfers || '0' },
+          { label: 'Clarifications/Call', value: data.avg_clarifications_per_call || '0.0' },
+        ];
+      } catch { /* analytics not critical */ }
+    },
+
+    async loadRecentCalls() {
+      try {
+        this.calls = await this.apiFetch(`/api/v1/admin/analytics/${this.tenantSlug}/calls?limit=20`);
+      } catch {}
+    },
+
+    async loadDepartments() {
+      try {
+        const branches = await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/branches`);
+        if (branches.length > 0) {
+          this.departments = await this.apiFetch(`/api/v1/admin/departments/${this.tenantSlug}/branch/${branches[0].id}`);
+        }
+      } catch {}
+    },
+
+    async saveHospitalProfile() {
+      try {
+        await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/profile`, {
+          method: 'PUT', body: JSON.stringify(this.hospitalProfile)
+        });
+        this.saveMsg = '✓ Saved! Cache cleared automatically.';
+        setTimeout(() => this.saveMsg = '', 3000);
+      } catch { this.saveMsg = 'Error saving.'; }
+    },
+
+    async addHoliday() {
+      try {
+        const branches = await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/branches`);
+        if (!branches.length) return;
+        await this.apiFetch(`/api/v1/admin/config/${this.tenantSlug}/branches/${branches[0].id}/holidays`, {
+          method: 'POST', body: JSON.stringify(this.newHoliday)
+        });
+        this.newHoliday = { date: '', reason: '', is_closed: true, emergency_only: false };
+      } catch {}
+    },
+
+    async clearCache() {
+      try {
+        await fetch(`/api/v1/admin/config/${this.tenantSlug}/cache/clear`, { method: 'POST',
+          headers: { 'Authorization': `Bearer ${this.token}` } });
+        this.cacheCleared = true;
+        setTimeout(() => this.cacheCleared = false, 4000);
+      } catch {}
+    },
+
+    logout() {
+      localStorage.removeItem('arteq_token');
+      location.reload();
+    }
+  };
+}
+</script>
+</body>
+</html>

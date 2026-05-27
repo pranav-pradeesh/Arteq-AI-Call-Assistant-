@@ -1,0 +1,59 @@
+# Core framework
+fastapi==0.111.0
+uvicorn[standard]==0.30.1
+websockets==12.0
+python-multipart==0.0.9
+httpx==0.27.0
+
+# Database
+sqlalchemy[asyncio]==2.0.30
+asyncpg==0.29.0
+alembic==1.13.1
+psycopg2-binary==2.9.9
+
+# Cache
+redis[hiredis]==5.0.4
+aioredis==2.0.1
+
+# Audio / STT
+deepgram-sdk==3.4.0
+# azure-cognitiveservices-speech==1.37.0  # Optional fallback STT
+
+# TTS - Malayalam support
+# azure-cognitiveservices-speech==1.37.0   # Azure Neural TTS - best Malayalam
+# google-cloud-texttospeech==2.16.3        # Google TTS Malayalam fallback
+# elevenlabs==1.2.0                        # ElevenLabs (if Malayalam model available)
+
+# LLM for response composition only
+anthropic==0.28.0
+
+# Validation and serialization
+pydantic==2.7.1
+pydantic-settings==2.3.0
+
+# Observability
+structlog==24.2.0
+prometheus-client==0.20.0
+opentelemetry-api==1.24.0
+opentelemetry-sdk==1.24.0
+opentelemetry-instrumentation-fastapi==0.45b0
+
+# Utilities
+python-dotenv==1.0.1
+tenacity==8.3.0
+cachetools==5.3.3
+phonenumbers==8.13.37
+pytz==2024.1
+arrow==1.3.0
+
+# Dashboard
+jinja2==3.1.4
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
+
+# Dev / test
+pytest==8.2.0
+pytest-asyncio==0.23.6
+pytest-httpx==0.30.0
+fakeredis==2.23.1
+coverage==7.5.1
