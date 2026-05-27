@@ -1,0 +1,73 @@
+services:
+  - type: web
+    name: arteq-voice-agent
+    runtime: python
+    plan: free
+    region: singapore
+    branch: claude/hospital-voice-agent-ml-XCG0G
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/v1/health
+    envVars:
+      # Non-secret runtime config
+      - key: ENV
+        value: production
+      - key: LOG_LEVEL
+        value: INFO
+      - key: HOSPITAL_ID
+        value: 00000000-0000-0000-0000-000000000001
+      - key: TELEPHONY_MODE
+        value: stream
+      - key: SARVAM_STT_MODEL
+        value: saarika:v2.5
+      - key: SARVAM_TTS_MODEL
+        value: bulbul:v3
+      - key: SARVAM_TTS_VOICE_ML
+        value: kavitha
+      - key: SARVAM_TTS_VOICE_EN
+        value: kavitha
+      - key: STT_PROVIDER
+        value: sarvam
+      - key: GROQ_MODEL_FAST
+        value: llama-3.1-8b-instant
+      - key: GROQ_MODEL_SMART
+        value: llama-3.3-70b-versatile
+      - key: GROQ_MAX_TOKENS
+        value: "100"
+      - key: GROQ_TIMEOUT_S
+        value: "8"
+      - key: SESSION_TTL_S
+        value: "300"
+      - key: CACHE_MAX_SIZE
+        value: "512"
+      - key: REDIS_URL
+        value: ""
+
+      # Secrets — Render prompts during deploy (sync: false)
+      - key: SARVAM_API_KEY
+        sync: false
+      - key: GROQ_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_ANON_KEY
+        sync: false
+      - key: SUPABASE_SERVICE_KEY
+        sync: false
+      - key: EXOTEL_SID
+        sync: false
+      - key: EXOTEL_API_KEY
+        sync: false
+      - key: EXOTEL_API_TOKEN
+        sync: false
+      - key: EXOTEL_CALLER_ID
+        sync: false
+
+      # Public URL — set this AFTER deploy completes
+      # to your Render URL (https://arteq-voice-agent.onrender.com)
+      - key: PUBLIC_BASE_URL
+        sync: false
+      - key: PUBLIC_WS_URL
+        sync: false
