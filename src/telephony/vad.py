@@ -1,28 +1,19 @@
 """
 Simple energy-based Voice Activity Detection.
 
-For production, replace with WebRTC VAD or Silero VAD.
-This implementation is sufficient for detecting speech vs silence
-in telephony audio (8kHz mulaw).
+Works on linear PCM 16-bit audio (Exotel Voicebot's native encoding).
+For production-grade VAD, swap in Silero or WebRTC.
 """
-
 from __future__ import annotations
 
 import audioop
-import struct
-from typing import Optional
 
 
 class SimpleVAD:
-    """
-    Energy-based VAD.
-    Works on mulaw-encoded 8kHz telephony audio.
+    """Energy-based VAD on PCM16 audio chunks."""
 
-    Thresholds tuned for typical phone call conditions.
-    """
-
-    SPEECH_THRESHOLD = 200      # RMS energy above this = speech
-    SILENCE_THRESHOLD = 100     # RMS energy below this = silence
+    SPEECH_THRESHOLD = 400    # RMS for PCM16 8kHz — telephony floor
+    SILENCE_THRESHOLD = 200
 
     def __init__(
         self,
@@ -32,20 +23,14 @@ class SimpleVAD:
         self.speech_threshold = speech_threshold
         self.silence_threshold = silence_threshold
 
-    def rms_energy(self, audio_bytes: bytes) -> float:
-        """Calculate RMS energy of mulaw audio chunk."""
+    def rms_energy(self, pcm16_bytes: bytes) -> float:
         try:
-            # Decode mulaw to linear PCM first
-            pcm = audioop.ulaw2lin(audio_bytes, 2)
-            rms = audioop.rms(pcm, 2)
-            return float(rms)
+            return float(audioop.rms(pcm16_bytes, 2))
         except Exception:
             return 0.0
 
-    def is_speech(self, audio_bytes: bytes) -> bool:
-        """Returns True if chunk contains speech."""
-        return self.rms_energy(audio_bytes) > self.speech_threshold
+    def is_speech(self, pcm16_bytes: bytes) -> bool:
+        return self.rms_energy(pcm16_bytes) > self.speech_threshold
 
-    def is_silence(self, audio_bytes: bytes) -> bool:
-        """Returns True if chunk is silence."""
-        return self.rms_energy(audio_bytes) < self.silence_threshold
+    def is_silence(self, pcm16_bytes: bytes) -> bool:
+        return self.rms_energy(pcm16_bytes) < self.silence_threshold

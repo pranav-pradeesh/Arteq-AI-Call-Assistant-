@@ -50,39 +50,29 @@ class SarvamTTS:
         t_start = time.monotonic()
         model = settings.SARVAM_TTS_MODEL
 
-        # bulbul:v3 rejects pitch/loudness; older versions accept them.
-        if model.startswith("bulbul:v3"):
-            payload = {
-                "text": text,
-                "target_language_code": language,
-                "speaker": self.voice,
-                "pace": 1.0,
-                "speech_sample_rate": sample_rate,
-                "enable_preprocessing": True,
-                "model": model,
-            }
-        else:
-            payload = {
-                "inputs": [text],
-                "target_language_code": language,
-                "speaker": self.voice,
-                "pitch": 0,
-                "pace": 1.0,
-                "loudness": 1.5,
-                "speech_sample_rate": sample_rate,
-                "enable_preprocessing": True,
-                "model": model,
-            }
+        # Per Sarvam docs:
+        #   - field name is "text" (singular) and "sample_rate" (not "speech_sample_rate")
+        #   - bulbul:v3 rejects pitch and loudness
+        payload = {
+            "text": text,
+            "target_language_code": language,
+            "speaker": self.voice,
+            "model": model,
+            "pace": 1.0,
+            "sample_rate": sample_rate,
+            "enable_preprocessing": True,
+        }
+        if not model.startswith("bulbul:v3"):
+            payload["pitch"] = 0
+            payload["loudness"] = 1.5
 
         try:
             resp = await self._client.post(self.TTS_ENDPOINT, json=payload)
             if resp.status_code >= 400:
-                # Log Sarvam's actual error body so we can diagnose schema/voice errors
-                body = resp.text[:500]
                 logger.error(
                     "sarvam_tts_http_error",
                     status=resp.status_code,
-                    body=body,
+                    body=resp.text[:500],
                     model=model,
                     voice=self.voice,
                 )
@@ -92,9 +82,11 @@ class SarvamTTS:
             if not audios:
                 logger.error("sarvam_tts_empty", response=str(data)[:200])
                 return None
-            audio_bytes = base64.b64decode(audios[0])
+            # Response is base64-encoded WAV. Strip 44-byte WAV header → raw PCM16.
+            wav_bytes = base64.b64decode(audios[0])
+            pcm_bytes = wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
             return TTSResult(
-                audio_bytes=audio_bytes,
+                audio_bytes=pcm_bytes,
                 latency_ms=int((time.monotonic() - t_start) * 1000),
             )
         except Exception as e:
