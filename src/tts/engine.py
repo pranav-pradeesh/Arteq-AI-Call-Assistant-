@@ -6,9 +6,12 @@ identical phrases (greeting, clarifications, etc.).
 """
 from __future__ import annotations
 
+import audioop
 import base64
 import hashlib
+import io
 import time
+import wave
 from typing import Optional
 
 import httpx
@@ -18,6 +21,36 @@ from src.config.settings import settings
 from src.observability.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _wav_to_pcm_8k_mono(wav_bytes: bytes) -> bytes:
+    """
+    Normalize Sarvam's WAV output to raw PCM16 mono @ 8 kHz.
+
+    Sarvam Bulbul v3 may return 22050 or 24000 Hz regardless of the
+    sample_rate request param. Read the header for the *actual* rate
+    and resample down — otherwise Exotel plays it ~3× too fast
+    (the "demon voice" effect).
+    """
+    try:
+        with wave.open(io.BytesIO(wav_bytes), "rb") as wf:
+            channels = wf.getnchannels()
+            sample_width = wf.getsampwidth()
+            framerate = wf.getframerate()
+            pcm = wf.readframes(wf.getnframes())
+    except wave.Error as e:
+        logger.error("tts_wav_parse_failed", error=str(e))
+        # Best-effort fallback: strip 44-byte RIFF header
+        return wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
+
+    if channels == 2:
+        pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
+    if sample_width != 2:
+        pcm = audioop.lin2lin(pcm, sample_width, 2)
+    if framerate != 8000:
+        pcm, _ = audioop.ratecv(pcm, 2, 1, framerate, 8000, None)
+        logger.info("tts_resampled", from_hz=framerate, to_hz=8000)
+    return pcm
 
 
 class TTSResult:
@@ -82,9 +115,11 @@ class SarvamTTS:
             if not audios:
                 logger.error("sarvam_tts_empty", response=str(data)[:200])
                 return None
-            # Response is base64-encoded WAV. Strip 44-byte WAV header → raw PCM16.
+            # Response is base64-encoded WAV. Parse header for real rate
+            # and resample to 8 kHz mono — Sarvam v3 ignores sample_rate
+            # request and returns 22050/24000 Hz, which Exotel plays too fast.
             wav_bytes = base64.b64decode(audios[0])
-            pcm_bytes = wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
+            pcm_bytes = _wav_to_pcm_8k_mono(wav_bytes)
             return TTSResult(
                 audio_bytes=pcm_bytes,
                 latency_ms=int((time.monotonic() - t_start) * 1000),
