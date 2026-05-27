@@ -177,31 +177,31 @@ async def _send_pcm(
     websocket: WebSocket,
     stream_sid: Optional[str],
     pcm_bytes: bytes,
-) -> None:
+) -> bool:
     """
-    Send raw PCM16 8kHz mono back to Exotel as base64 in 200ms chunks.
-    Per Exotel docs, frame size must be a multiple of 320 bytes and ≤ 100KB.
+    Send raw PCM16 8kHz mono to Exotel as base64 in 200ms frames.
+    Returns False if the socket closed mid-stream (so the caller stops).
     """
     if not pcm_bytes:
-        return
-    try:
-        # Pad to multiple of 320
-        if len(pcm_bytes) % 320 != 0:
-            pad = 320 - (len(pcm_bytes) % 320)
-            pcm_bytes = pcm_bytes + b"\x00" * pad
+        return True
+    if len(pcm_bytes) % 320 != 0:
+        pad = 320 - (len(pcm_bytes) % 320)
+        pcm_bytes = pcm_bytes + b"\x00" * pad
 
-        for i in range(0, len(pcm_bytes), OUT_FRAME_BYTES):
-            frame = pcm_bytes[i : i + OUT_FRAME_BYTES]
-            msg = {
-                "event": "media",
-                "streamSid": stream_sid,
-                "media": {"payload": base64.b64encode(frame).decode("ascii")},
-            }
+    for i in range(0, len(pcm_bytes), OUT_FRAME_BYTES):
+        frame = pcm_bytes[i : i + OUT_FRAME_BYTES]
+        msg = {
+            "event": "media",
+            "streamSid": stream_sid,
+            "media": {"payload": base64.b64encode(frame).decode("ascii")},
+        }
+        try:
             await websocket.send_text(json.dumps(msg))
-            # Pace at real-time so Exotel buffers don't overflow
-            await asyncio.sleep(OUT_FRAME_BYTES / (8000 * 2))   # 200ms per frame
-    except Exception as e:
-        logger.error("ws_send_pcm_error", error=str(e))
+        except Exception:
+            # WS closed mid-stream — caller hung up. Stop paced send.
+            return False
+        await asyncio.sleep(OUT_FRAME_BYTES / (8000 * 2))    # 200 ms
+    return True
 
 
 async def _send_clear(websocket: WebSocket, stream_sid: Optional[str]) -> None:

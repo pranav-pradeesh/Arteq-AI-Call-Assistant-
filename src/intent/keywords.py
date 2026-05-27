@@ -59,30 +59,40 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
 
     # ── Doctor availability ──────────────────────────────────────────────────
     INTENT_DOCTOR_AVAILABILITY: [
-        # Malayalam
+        # English / Manglish
         ("doctor", 1.2),
-        ("docter", 1.0),          # common misspelling in Manglish
+        ("docter", 1.0),
         ("doctar", 0.9),
-        ("vaidyan", 1.5),         # Malayalam for doctor
-        ("chikitsan", 1.2),       # doctor/physician
+        ("vaidyan", 1.5),
+        ("chikitsan", 1.2),
         ("available", 1.5),
-        ("undo", 1.3),            # "undo?" = "is there?" in Malayalam
+        ("undo", 1.3),
         ("und", 1.0),
         ("undu", 1.2),
-        ("undakum", 1.0),         # "will be there"
-        ("varum", 1.0),           # "will come"
+        ("undakum", 1.0),
+        ("varum", 1.0),
         ("varu", 0.9),
-        ("vann", 0.9),            # "came"
-        ("irikkum", 1.0),         # "will be"
-        ("irikkunundo", 1.5),     # "is he/she there?"
-        ("annu", 0.8),            # "today"
-        ("innu", 1.0),            # "today"
-        ("innale", 0.7),          # "yesterday"
-        ("nale", 0.9),            # "tomorrow"
+        ("vann", 0.9),
+        ("irikkum", 1.0),
+        ("irikkunundo", 1.5),
+        ("annu", 0.8),
+        ("innu", 1.0),
+        ("innale", 0.7),
+        ("nale", 0.9),
         ("consult", 1.2),
         ("consultation", 1.2),
-        ("op", 1.0),              # outpatient (also timing)
+        ("op", 1.0),
         ("opd", 1.2),
+        # Malayalam script
+        ("ഡോക്ടർ", 1.8),
+        ("ഡോക്ടറുണ്ടോ", 2.0),
+        ("ഡോക്ടറു", 1.5),
+        ("വൈദ്യൻ", 1.8),
+        ("ചികിത്സകൻ", 1.5),
+        ("ഉണ്ടോ", 1.3),
+        ("ഉണ്ട്", 1.0),
+        ("ഇന്ന്", 1.0),
+        ("നാളെ", 1.0),
     ],
 
     # ── Doctor / Department timing ───────────────────────────────────────────
@@ -90,28 +100,42 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("time", 1.5),
         ("timing", 2.0),
         ("timings", 2.0),
-        ("samayam", 2.0),         # time in Malayalam
-        ("samaym", 1.5),          # common mispronunciation
-        ("eppo", 1.8),            # "when" in Malayalam
+        ("samayam", 2.0),
+        ("samaym", 1.5),
+        ("eppo", 1.8),
         ("eppozha", 1.8),
         ("eppol", 1.8),
         ("epozhanu", 1.5),
-        ("ethra", 1.0),           # "how much/when"
-        ("mathiyo", 1.0),         # "is it ok?" (approximate)
+        ("ethra", 1.0),
+        ("mathiyo", 1.0),
         ("morning", 1.0),
         ("evening", 1.0),
         ("noon", 0.8),
         ("night", 0.8),
-        ("rathri", 1.0),          # night
+        ("rathri", 1.0),
         ("uduppu", 0.7),
-        ("vare", 0.8),            # "till"
-        ("mute", 0.8),            # "from" (as in "from 10 till 1")
-        ("op", 1.2),              # OP timing specifically
+        ("vare", 0.8),
+        ("mute", 0.8),
+        ("op", 1.2),
         ("opd", 1.2),
         ("schedule", 1.5),
         ("slots", 1.2),
         ("slot", 1.2),
         ("session", 1.0),
+        # Malayalam script
+        ("ടൈമിംഗ്", 2.0),
+        ("ടൈം", 1.8),
+        ("സമയം", 2.0),
+        ("എപ്പോഴാ", 2.0),
+        ("എപ്പോഴാണ്", 2.0),
+        ("എപ്പോൾ", 2.0),
+        ("എപ്പോഴ്", 2.0),
+        ("എത്ര", 1.0),
+        ("രാവിലെ", 1.0),
+        ("വൈകുന്നേരം", 1.0),
+        ("രാത്രി", 1.0),
+        ("തുറക്കും", 1.8),
+        ("തുറന്ന", 1.5),
     ],
 
     # ── Consultation fee ─────────────────────────────────────────────────────
@@ -128,16 +152,25 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("money", 1.2),
         ("pay", 1.2),
         ("payment", 1.2),
-        ("consultation fee", 3.0),  # bigram — very strong signal
-        ("varadakshina", 2.0),    # Malayalam for consultation fee
-        ("chellam", 1.0),         # informal Malayalam for money
-        ("panam", 1.8),           # money in Malayalam
-        ("ethra", 1.2),           # "how much"
-        ("ethraya", 1.5),         # "how much is it"
-        ("kada", 0.8),            # colloquial
+        ("consultation fee", 3.0),
+        ("varadakshina", 2.0),
+        ("chellam", 1.0),
+        ("panam", 1.8),
+        ("ethra", 1.2),
+        ("ethraya", 1.5),
+        ("kada", 0.8),
         ("rupee", 1.2),
         ("rupees", 1.2),
         ("rs", 1.0),
+        # Malayalam script
+        ("ഫീ", 2.0),
+        ("ഫീസ്", 2.0),
+        ("ചാർജ്", 2.0),
+        ("രൂപ", 1.5),
+        ("പണം", 1.8),
+        ("എത്രയാ", 1.8),
+        ("എത്രയാണ്", 1.8),
+        ("എത്ര", 1.0),
     ],
 
     # ── Department existence ─────────────────────────────────────────────────
@@ -160,36 +193,48 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
     # ── Hospital timing (general open/close) ─────────────────────────────────
     INTENT_HOSPITAL_TIMING: [
         ("hospital", 1.2),
-        ("thirakkum", 1.5),       # "opens" in Malayalam
+        ("thirakkum", 1.5),
         ("thurakkunnu", 1.5),
         ("open", 1.5),
         ("opens", 1.5),
         ("close", 1.5),
         ("closes", 1.5),
-        ("adakkunnu", 1.5),       # "closes"
+        ("adakkunnu", 1.5),
         ("adakkum", 1.5),
-        ("sunday", 2.0),          # common weekend query
+        ("sunday", 2.0),
         ("saturday", 1.8),
         ("holiday", 2.0),
         ("bandh", 1.5),
-        ("avadhi", 1.5),          # holiday in Malayalam
-        ("avasaram", 1.0),        # break/holiday
+        ("avadhi", 1.5),
+        ("avasaram", 1.0),
         ("weekly", 1.5),
         ("weekend", 2.0),
-        ("njayar", 2.0),          # Sunday in Malayalam
+        ("njayar", 2.0),
         ("njayarazcha", 2.0),
-        ("saniazcha", 1.8),       # Saturday in Malayalam
+        ("saniazcha", 1.8),
         ("saniyazcha", 1.8),
-        ("budhanazhcha", 1.0),    # Wednesday
+        ("budhanazhcha", 1.0),
         ("working", 1.5),
         ("off", 1.2),
         ("closed", 1.8),
+        # Malayalam script
+        ("ഹോസ്പിറ്റൽ", 1.2),
+        ("ആശുപത്രി", 1.5),
+        ("തുറക്കും", 1.8),
+        ("തുറന്നു", 1.8),
+        ("തുറന്നിരിക്കും", 1.8),
+        ("അടയ്ക്കും", 1.8),
+        ("അവധി", 1.8),
+        ("ഞായർ", 2.0),
+        ("ഞായറാഴ്ച", 2.0),
+        ("ശനി", 1.8),
+        ("ശനിയാഴ്ച", 1.8),
     ],
 
     # ── Emergency ────────────────────────────────────────────────────────────
     INTENT_EMERGENCY: [
         ("emergency", 2.5),
-        ("emergancy", 2.0),       # common misspelling
+        ("emergancy", 2.0),
         ("urgent", 2.0),
         ("accident", 2.0),
         ("casualty", 2.0),
@@ -199,27 +244,32 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("24", 1.5),
         ("24x7", 2.0),
         ("24hours", 2.0),
-        ("night", 1.0),           # ambiguous — lower weight
+        ("night", 1.0),
         ("rathri", 0.8),
-        ("athyavasyam", 2.0),     # urgent/emergency in Malayalam
+        ("athyavasyam", 2.0),
         ("parisrama", 1.0),
-        ("prasavam", 1.5),        # delivery/childbirth (emergency adjacent)
+        ("prasavam", 1.5),
         ("heart", 1.8),
         ("chest", 1.2),
         ("breathing", 1.5),
         ("blood", 1.2),
+        # Malayalam script
+        ("എമർജൻസി", 2.5),
+        ("അത്യാവശ്യം", 2.5),
+        ("ആംബുലൻസ്", 2.0),
+        ("അപകടം", 2.0),
     ],
 
     # ── Location ─────────────────────────────────────────────────────────────
     INTENT_LOCATION: [
         ("address", 2.0),
         ("location", 2.0),
-        ("located", 1.8),         # "where is located"
+        ("located", 1.8),
         ("where", 1.8),
         ("how to reach", 2.0),
         ("how to come", 1.8),
-        ("ethi", 1.5),            # "where is" (Malayalam)
-        ("evide", 2.0),           # "where" in Malayalam
+        ("ethi", 1.5),
+        ("evide", 2.0),
         ("evideyanu", 2.0),
         ("varthamanathil", 0.8),
         ("map", 1.5),
@@ -227,7 +277,7 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("way", 1.2),
         ("road", 1.0),
         ("route", 1.2),
-        ("varo", 1.2),            # "how to come"
+        ("varo", 1.2),
         ("varuvaan", 1.2),
         ("naattu", 0.8),
         ("district", 1.0),
@@ -235,6 +285,13 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("landmark", 1.2),
         ("pincode", 1.0),
         ("pin", 0.8),
+        # Malayalam script
+        ("എവിടെ", 2.0),
+        ("എവിടെയാ", 2.0),
+        ("എവിടെയാണ്", 2.0),
+        ("വിലാസം", 2.0),
+        ("സ്ഥലം", 1.5),
+        ("അഡ്രസ്", 1.8),
     ],
 
     # ── Contact ──────────────────────────────────────────────────────────────
@@ -245,12 +302,17 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("call", 1.5),
         ("telephone", 1.5),
         ("mobile", 1.2),
-        ("ethelpanikku", 1.5),    # "which number to call"
+        ("ethelpanikku", 1.5),
         ("direct", 1.0),
         ("whatsapp", 1.5),
         ("reception", 1.8),
         ("helpline", 2.0),
         ("hotline", 2.0),
+        # Malayalam script
+        ("നമ്പർ", 2.0),
+        ("ഫോൺ", 2.0),
+        ("ഫോൺനമ്പർ", 2.5),
+        ("വിളിക്കാൻ", 1.5),
     ],
 
     # ── Human transfer ───────────────────────────────────────────────────────
@@ -294,16 +356,21 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("goodbye", 2.0),
         ("thank you", 1.8),
         ("thanks", 1.5),
-        ("nanni", 1.5),           # "thank you" in Malayalam
+        ("nanni", 1.5),
         ("okay bye", 2.0),
         ("ok bye", 2.0),
-        ("ayi", 1.2),             # "done/over" informal
-        ("sheriyayi", 1.5),       # "ok/fine" — call ending signal
+        ("ayi", 1.2),
+        ("sheriyayi", 1.5),
         ("end", 1.5),
         ("cut", 1.2),
         ("finish", 1.2),
         ("done", 1.2),
-        ("kazhinju", 1.5),        # "done/finished"
+        ("kazhinju", 1.5),
+        # Malayalam script
+        ("നന്ദി", 1.8),
+        ("വിട", 2.0),
+        ("ശരി", 1.5),
+        ("കഴിഞ്ഞു", 1.5),
     ],
 }
 
