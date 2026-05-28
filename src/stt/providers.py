@@ -1,8 +1,9 @@
 """
-STT Providers — Sarvam AI Saarika v2.5 (default) and Google Cloud STT (optional).
+STT Providers — Google Cloud Speech-to-Text v1.
 
-Default: Sarvam saarika:v2.5 — best-in-class for Kerala Malayalam/Manglish.
-Optional: Google Cloud STT — set STT_PROVIDER=google and GOOGLE_API_KEY.
+Multilingual: STT_LANGUAGES env var lists BCP-47 codes in priority order.
+Primary language = first code. Google STT v1 supports up to 3 alternatives.
+Language detected is passed to Gemini brain and TTS for matching response voice.
 """
 from __future__ import annotations
 
@@ -37,105 +38,13 @@ class STTError:
     recoverable: bool = True
 
 
-class SarvamSTT:
-    """Sarvam AI Saarika ASR — saarika:v2.5."""
-
-    BASE_URL = "https://api.sarvam.ai"
-    STT_ENDPOINT = "/speech-to-text"
-
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self._client = httpx.AsyncClient(
-            base_url=self.BASE_URL,
-            headers={"api-subscription-key": api_key},
-            timeout=httpx.Timeout(10.0, connect=3.0),
-        )
-
-    async def transcribe_chunk(
-        self,
-        audio_bytes: bytes,
-        language: str = "unknown",
-        model: str = "saarika:v2.5",
-    ) -> STTResult | STTError:
-        """
-        language: 'unknown' enables Sarvam's auto-detect (best for Manglish);
-        otherwise pass 'ml-IN', 'en-IN', 'hi-IN', etc.
-        """
-        t_start = time.monotonic()
-        try:
-            response = await self._client.post(
-                self.STT_ENDPOINT,
-                files={"file": ("audio.wav", audio_bytes, "audio/wav")},
-                data={"model": model, "language_code": language},
-            )
-            if response.status_code >= 400:
-                logger.error(
-                    "sarvam_stt_http_error",
-                    status=response.status_code,
-                    body=response.text[:500],
-                    model=model,
-                    language=language,
-                )
-                return STTError(
-                    provider="sarvam",
-                    error_code=f"HTTP_{response.status_code}",
-                    message=response.text[:200],
-                    recoverable=response.status_code in (429, 503, 504),
-                )
-            payload = response.json()
-            latency_ms = int((time.monotonic() - t_start) * 1000)
-            transcript = payload.get("transcript", "")
-            confidence = _estimate_confidence(transcript, payload)
-            logger.info(
-                "sarvam_stt_ok",
-                transcript=transcript[:120],
-                lang_detected=payload.get("language_code"),
-                latency_ms=latency_ms,
-            )
-            return STTResult(
-                transcript=transcript,
-                confidence=confidence,
-                is_partial=False,
-                provider="sarvam",
-                latency_ms=latency_ms,
-                language_detected=payload.get("language_code", language),
-                raw=payload,
-            )
-        except httpx.HTTPStatusError as e:
-            return STTError(
-                provider="sarvam",
-                error_code=f"HTTP_{e.response.status_code}",
-                message=str(e),
-                recoverable=e.response.status_code in (429, 503, 504),
-            )
-        except httpx.TimeoutException:
-            return STTError(provider="sarvam", error_code="TIMEOUT",
-                            message="Sarvam STT timed out", recoverable=True)
-        except Exception as e:
-            return STTError(provider="sarvam", error_code="UNKNOWN",
-                            message=str(e), recoverable=True)
-
-    async def close(self) -> None:
-        await self._client.aclose()
-
-
 class GoogleSTT:
     """
     Google Cloud Speech-to-Text v1 REST API.
 
-    Advantages over Sarvam for mixed-language Kerala calls:
-    - `alternativeLanguageCodes` enables seamless Malayalam ↔ English switching
-      within a single utterance (Manglish code-switching)
-    - Better confidence scores per word
-    - Lower per-request cost at low volume (~$0.006/15s ≈ ₹0.02/15s)
-
-    Activate by setting STT_PROVIDER=google and GOOGLE_API_KEY in env.
-    Sarvam remains the default (better specialised Malayalam training).
-
-    Cost estimate (₹ at ₹83/USD):
-      STT:  $0.006/15s → $0.024/min → ~₹2/min of actual caller speech
-      Note: only speech chunks are sent, not full call duration. Typical
-      call with 5 turns × 4s = 20s total STT → ~₹0.66 per call.
+    Multilingual: reads STT_LANGUAGES (comma-separated BCP-47 codes).
+    First code = primary language. Next up to 3 = alternativeLanguageCodes.
+    Google returns the detected language in each result for TTS routing.
     """
 
     STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
@@ -144,18 +53,18 @@ class GoogleSTT:
         self,
         audio_bytes: bytes,
         language: str = "ml-IN",
-    ) -> "STTResult | STTError":
+    ) -> STTResult | STTError:
         import base64 as _b64
         t_start = time.monotonic()
         try:
-            # Parse STT_LANGUAGES: "ml-IN,en-IN,hi-IN" → primary + alternatives
+            # Parse STT_LANGUAGES: "ml-IN,en-IN,hi-IN,..." → primary + alternatives
             # Google STT v1 supports up to 3 alternativeLanguageCodes.
             lang_list = [l.strip() for l in settings.STT_LANGUAGES.split(",") if l.strip()]
             if not lang_list:
-                lang_list = ["ml-IN", "en-IN"]
-            # "unknown" → use configured primary language for auto-detection
+                lang_list = ["ml-IN", "en-IN", "hi-IN"]
+            # "unknown" → use configured primary language
             lang_code = lang_list[0] if language == "unknown" else language
-            alt_langs = [l for l in lang_list[1:4] if l != lang_code]  # max 3 alternatives
+            alt_langs = [l for l in lang_list[1:4] if l != lang_code]
             payload = {
                 "config": {
                     "encoding": "LINEAR16",
@@ -212,55 +121,25 @@ class GoogleSTT:
 
 
 class CompositeSTT:
-    """
-    Wraps Sarvam STT (default) and Google STT (optional).
-    Switch provider via STT_PROVIDER env var:
-      STT_PROVIDER=sarvam  (default — best for Malayalam/Manglish)
-      STT_PROVIDER=google  (alternative — better multilingual confidence)
-    """
+    """Google STT wrapper with empty-result fallback."""
 
     def __init__(self):
-        self._sarvam: Optional[SarvamSTT] = None
         self._google: Optional[GoogleSTT] = None
-        if settings.SARVAM_API_KEY:
-            self._sarvam = SarvamSTT(api_key=settings.SARVAM_API_KEY)
-        if settings.GOOGLE_API_KEY and settings.STT_PROVIDER == "google":
+        if settings.GOOGLE_API_KEY:
             self._google = GoogleSTT()
+        else:
+            logger.warning("google_stt_no_api_key_set")
 
     async def transcribe(self, audio_bytes: bytes, language: str = "ml-IN") -> STTResult:
-        # Google STT path (opt-in)
-        if self._google and settings.STT_PROVIDER == "google":
+        if self._google:
             result = await self._google.transcribe_chunk(audio_bytes, language=language)
             if isinstance(result, STTResult):
                 return result
             logger.warning("google_stt_error", error=result.error_code,
                            msg=result.message[:100])
-            # Fall through to Sarvam on transient errors
-
-        # Sarvam STT path (default)
-        if self._sarvam:
-            result = await self._sarvam.transcribe_chunk(
-                audio_bytes, language=language, model=settings.SARVAM_STT_MODEL
-            )
-            if isinstance(result, STTResult):
-                return result
-            logger.warning("sarvam_stt_error", error=result.error_code)
 
         return STTResult(transcript="", confidence=0.0, is_partial=False,
                          provider="none", latency_ms=0)
 
     async def close(self) -> None:
-        if self._sarvam:
-            await self._sarvam.close()
-
-
-def _estimate_confidence(transcript: str, payload: dict) -> float:
-    if "confidence" in payload:
-        return float(payload["confidence"])
-    if not transcript:
-        return 0.0
-    if len(transcript) < 3:
-        return 0.3
-    if len(transcript) < 10:
-        return 0.55
-    return 0.75
+        pass

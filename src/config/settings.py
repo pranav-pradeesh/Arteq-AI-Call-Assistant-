@@ -24,19 +24,12 @@ class Settings(BaseSettings):
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     PUBLIC_WS_URL: str = "ws://localhost:8000"
 
-    # Sarvam AI
-    SARVAM_API_KEY: str = ""
-    SARVAM_STT_MODEL: str = "saarika:v2.5"
-    SARVAM_TTS_MODEL: str = "bulbul:v3"
-    SARVAM_TTS_VOICE_ML: str = "kavitha"
-    SARVAM_TTS_VOICE_EN: str = "kavitha"
-
     # TTS provider
-    TTS_PROVIDER: str = "sarvam"     # "gemini" | "google" | "sarvam"
-    GEMINI_TTS_VOICE: str = "Aoede"  # Gemini TTS voice: Aoede, Kore, Zephyr (female) / Charon, Puck, Fenrir (male)
+    TTS_PROVIDER: str = "gemini"     # "gemini" (default) | "google"
+    GEMINI_TTS_VOICE: str = "Aoede"  # Aoede/Kore/Zephyr (female) · Charon/Puck/Fenrir (male)
 
     # STT
-    STT_PROVIDER: str = "sarvam"
+    STT_PROVIDER: str = "google"
     STT_CONFIDENCE_THRESHOLD: float = 0.55
     # All 22 scheduled Indian languages + English. Google STT v1 uses first as
     # primary and next 1-3 as alternatives. Operators can trim to their region.
@@ -50,7 +43,7 @@ class Settings(BaseSettings):
     GROQ_TIMEOUT_S: int = 8
 
     # AI Brain
-    AI_BRAIN: str = "groq"           # "groq" (keyword+Groq) or "gemini" (Gemini 2.5 Flash)
+    AI_BRAIN: str = "gemini"         # "gemini" (default) | "groq" (legacy keyword+Groq fallback)
     DEFAULT_LANGUAGE: str = "ml-IN"  # Fallback language if STT detection fails
 
     # Database

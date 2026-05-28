@@ -22,30 +22,28 @@ services:
         value: 00000000-0000-0000-0000-000000000001
       - key: TELEPHONY_MODE
         value: stream
-      - key: SARVAM_STT_MODEL
-        value: saarika:v2.5
-      - key: SARVAM_TTS_MODEL
-        value: bulbul:v3
-      - key: SARVAM_TTS_VOICE_ML
-        value: kavitha
-      - key: SARVAM_TTS_VOICE_EN
-        value: kavitha
+
+      # AI stack
+      - key: AI_BRAIN
+        value: gemini
       - key: STT_PROVIDER
-        value: sarvam
+        value: google
       - key: TTS_PROVIDER
-        value: sarvam
+        value: gemini
       - key: GEMINI_TTS_VOICE
         value: Aoede
-      - key: AI_BRAIN
-        value: groq
       - key: DEFAULT_LANGUAGE
         value: ml-IN
       - key: STT_LANGUAGES
         value: ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN
+
+      # Persona
       - key: AGENT_NAME
         value: Arya
       - key: AGENT_LANGUAGE
         value: ml-IN
+
+      # Groq (kept as legacy fallback — set AI_BRAIN=groq to use)
       - key: GROQ_MODEL_FAST
         value: llama-3.1-8b-instant
       - key: GROQ_MODEL_SMART
@@ -54,6 +52,8 @@ services:
         value: "100"
       - key: GROQ_TIMEOUT_S
         value: "8"
+
+      # Session / cache
       - key: SESSION_TTL_S
         value: "300"
       - key: CACHE_MAX_SIZE
@@ -61,8 +61,12 @@ services:
       - key: REDIS_URL
         value: ""
 
-      # Secrets — Render prompts during deploy (sync: false)
-      - key: SARVAM_API_KEY
+      # Secrets — set these in Render dashboard (sync: false = prompt on deploy)
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: GOOGLE_CLOUD_TTS_KEY
         sync: false
       - key: GROQ_API_KEY
         sync: false
@@ -82,15 +86,8 @@ services:
         sync: false
       - key: EXOTEL_CALLER_ID
         sync: false
-      - key: GOOGLE_CLOUD_TTS_KEY
-        sync: false
-      - key: GEMINI_API_KEY
-        sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
 
-      # Public URL — set this AFTER deploy completes
-      # to your Render URL (https://arteq-voice-agent.onrender.com)
+      # Public URL — set AFTER first deploy completes
       - key: PUBLIC_BASE_URL
         sync: false
       - key: PUBLIC_WS_URL
