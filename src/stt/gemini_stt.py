@@ -12,7 +12,6 @@ import io
 import json
 import time
 import wave
-from typing import Optional
 
 from google import genai
 from google.genai import types
@@ -22,7 +21,7 @@ from src.observability.logger import get_logger
 
 logger = get_logger(__name__)
 
-_MODEL = "gemini-2.5-flash-preview-05-20"
+_MODEL = "gemini-2.0-flash"
 
 _PROMPT = (
     "Transcribe the speech in this audio exactly as spoken. "

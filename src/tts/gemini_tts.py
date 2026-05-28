@@ -86,7 +86,13 @@ class GeminiTTS:
                 logger.error("gemini_tts_no_candidates")
                 return None
 
-            parts = candidates[0].content.parts
+            candidate = candidates[0]
+            if candidate.content is None:
+                logger.error("gemini_tts_no_content",
+                             finish_reason=str(candidate.finish_reason))
+                return None
+
+            parts = candidate.content.parts
             if not parts:
                 logger.error("gemini_tts_no_parts")
                 return None
