@@ -546,6 +546,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "eardrum", "kaan tool", "kaan vazhukkam", "kaan ketta", "kaan adi",
         "mookku adakku", "mookku tharakkuka", "thallu adakkam", "gala vedana",
         "sinus kayanam", "thalakkatika", "dysphonia",
+        # Malayalam script
+        "ഇ.എൻ.ടി", "ഇഎൻടി", "കാത്", "മൂക്ക്", "തൊണ്ട",
     ],
     "gynecology": [
         "gynecology", "gynecologist", "gynaecology", "obs", "obstetrics",
@@ -614,6 +616,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "tol kayanam", "nootha", "kariyappu", "therippu", "charmarogam",
         "charma kayanam", "seborrhea", "miliaria", "prickly heat",
         "heatrash", "tinea",
+        # Malayalam script
+        "ഡെർമറ്റോളജി", "ത്വക്ക് രോഗം", "ചർമ്മ",
     ],
     "neurology": [
         "neurology", "neuro", "brain", "thalach", "nerve",
@@ -655,6 +659,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "utkandha", "bhranthu", "manasiku vedana", "manassu kayanam",
         "nervous breakdown", "mental stress", "manasika rogam",
         "uyir thalavariche",
+        # Malayalam script
+        "സൈക്യാട്രി", "സൈക്ക്യാട്രി", "മാനസികരോഗ",
     ],
     "urology": [
         "urology", "kidney", "mutra", "mootram", "bladder",
@@ -718,9 +724,18 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "post surgery", "stroke rehab", "sports injury", "back exercise",
         "mobility", "pain management", "muscle strength", "balance training",
         "gait training", "occupational therapy", "speech therapy",
+        # Malayalam script
+        "ഫിസിയോതെറാപ്പി", "ഫിസിയോ",
     ],
     "emergency": [
         "emergency", "casualty", "accident", "urgent",
+        # Malayalam script
+        "എമർജൻസി", "അടിയന്തര",
+    ],
+    "surgery": [
+        "surgery", "surgical", "operation", "theatre", "ot",
+        # Malayalam script
+        "സർജറി", "ശസ്ത്രക്രിയ", "ഓപ്പറേഷൻ",
     ],
     "icu": [
         "icu", "intensive care", "critical",
