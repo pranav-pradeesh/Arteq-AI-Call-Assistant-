@@ -1,9 +1,11 @@
 """
-STT Providers — Google Cloud Speech-to-Text v1.
+STT Providers.
 
-Multilingual: STT_LANGUAGES env var lists BCP-47 codes in priority order.
-Primary language = first code. Google STT v1 supports up to 3 alternatives.
-Language detected is passed to Gemini brain and TTS for matching response voice.
+Provider selection via STT_PROVIDER env var:
+  "gemini"  → Gemini 2.5 Flash multimodal (default — no Google Cloud billing needed)
+  "google"  → Google Cloud Speech-to-Text v1 (requires GOOGLE_API_KEY + billing)
+
+Language detected is passed to Gemini brain and TTS for response voice matching.
 """
 from __future__ import annotations
 
@@ -44,7 +46,7 @@ class GoogleSTT:
 
     Multilingual: reads STT_LANGUAGES (comma-separated BCP-47 codes).
     First code = primary language. Next up to 3 = alternativeLanguageCodes.
-    Google returns the detected language in each result for TTS routing.
+    Requires GOOGLE_API_KEY with Cloud Speech billing enabled.
     """
 
     STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
@@ -57,12 +59,9 @@ class GoogleSTT:
         import base64 as _b64
         t_start = time.monotonic()
         try:
-            # Parse STT_LANGUAGES: "ml-IN,en-IN,hi-IN,..." → primary + alternatives
-            # Google STT v1 supports up to 3 alternativeLanguageCodes.
             lang_list = [l.strip() for l in settings.STT_LANGUAGES.split(",") if l.strip()]
             if not lang_list:
                 lang_list = ["ml-IN", "en-IN", "hi-IN"]
-            # "unknown" → use configured primary language
             lang_code = lang_list[0] if language == "unknown" else language
             alt_langs = [l for l in lang_list[1:4] if l != lang_code]
             payload = {
@@ -121,16 +120,42 @@ class GoogleSTT:
 
 
 class CompositeSTT:
-    """Google STT wrapper with empty-result fallback."""
+    """
+    STT dispatcher. Provider chosen by STT_PROVIDER env var.
+
+    "gemini" (default) → GeminiSTT — one API key, no billing required
+    "google"           → GoogleSTT — Google Cloud Speech, requires billing
+    """
 
     def __init__(self):
+        from src.stt.gemini_stt import GeminiSTT
+
+        self._gemini: Optional[GeminiSTT] = None
         self._google: Optional[GoogleSTT] = None
-        if settings.GOOGLE_API_KEY:
-            self._google = GoogleSTT()
+
+        if settings.STT_PROVIDER == "gemini":
+            if settings.GEMINI_API_KEY:
+                self._gemini = GeminiSTT()
+            else:
+                logger.warning("gemini_stt_no_api_key")
         else:
-            logger.warning("google_stt_no_api_key_set")
+            if settings.GOOGLE_API_KEY:
+                self._google = GoogleSTT()
+            else:
+                logger.warning("google_stt_no_api_key_set")
 
     async def transcribe(self, audio_bytes: bytes, language: str = "ml-IN") -> STTResult:
+        if self._gemini:
+            transcript, lang, confidence = await self._gemini.transcribe(audio_bytes)
+            return STTResult(
+                transcript=transcript,
+                confidence=confidence,
+                is_partial=False,
+                provider="gemini",
+                latency_ms=0,
+                language_detected=lang,
+            )
+
         if self._google:
             result = await self._google.transcribe_chunk(audio_bytes, language=language)
             if isinstance(result, STTResult):

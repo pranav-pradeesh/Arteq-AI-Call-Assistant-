@@ -25,7 +25,7 @@ services:
 
       # AI stack
       - key: STT_PROVIDER
-        value: google
+        value: gemini
       - key: TTS_PROVIDER
         value: gemini
       - key: GEMINI_TTS_VOICE
