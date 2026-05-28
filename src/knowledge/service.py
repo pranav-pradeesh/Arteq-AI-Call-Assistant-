@@ -27,7 +27,7 @@ from src.db.queries import (
 from src.intent.keywords import (
     INTENT_CONSULTATION_FEE, INTENT_CONTACT, INTENT_DEPARTMENT_EXISTS,
     INTENT_DOCTOR_AVAILABILITY, INTENT_DOCTOR_TIMING, INTENT_EMERGENCY,
-    INTENT_HOSPITAL_TIMING, INTENT_LOCATION,
+    INTENT_HOSPITAL_TIMING, INTENT_LOCATION, INTENT_SYMPTOM,
 )
 
 INDIA_TZ = pytz.timezone("Asia/Kolkata")
@@ -97,6 +97,121 @@ _DEPT_KEYWORDS: dict[str, str] = {
 
 def resolve_dept_keyword(keyword: str) -> Optional[str]:
     return _DEPT_KEYWORDS.get(keyword.lower())
+
+
+# ── Symptom description → canonical department map ────────────────────────────
+# Sorted longest-first at build time so _map_symptom_to_dept() can do a single
+# linear scan without worrying about shorter substrings matching first.
+# Keys are lowercased substrings to search in the caller's transcript.
+
+_SYMPTOM_DEPT_MAP_RAW: dict[str, str] = {
+    # Cardiology
+    "chest pain": "cardiology", "heart pain": "cardiology",
+    "heart problem": "cardiology", "heart attack": "cardiology",
+    "palpitation": "cardiology", "palpitations": "cardiology",
+    "high blood pressure": "cardiology", "hypertension": "cardiology",
+    "hridayam": "cardiology", "hrudayam": "cardiology",
+    "neriv vedana": "cardiology", "cardiac": "cardiology",
+    # Neurology
+    "headache": "neurology", "head pain": "neurology",
+    "head ache": "neurology", "migraine": "neurology",
+    "dizziness": "neurology", "dizzy": "neurology",
+    "seizure": "neurology", "epilepsy": "neurology",
+    "memory loss": "neurology", "tremor": "neurology",
+    "numbness": "neurology", "paralysis": "neurology",
+    "thalavedana": "neurology", "thalakayanam": "neurology",
+    "thalakkayanam": "neurology", "thalav": "neurology",
+    # Orthopedics
+    "knee pain": "orthopedics", "back pain": "orthopedics",
+    "joint pain": "orthopedics", "shoulder pain": "orthopedics",
+    "neck pain": "orthopedics", "hip pain": "orthopedics",
+    "ankle pain": "orthopedics", "wrist pain": "orthopedics",
+    "elbow pain": "orthopedics", "bone pain": "orthopedics",
+    "fracture": "orthopedics", "sprain": "orthopedics",
+    "spine": "orthopedics", "arthritis": "orthopedics",
+    "ellu vedana": "orthopedics", "muzhu vedana": "orthopedics",
+    "kazhuthu vedana": "orthopedics", "mottu vedana": "orthopedics",
+    "ellu kayanam": "orthopedics",
+    # Gastroenterology
+    "stomach pain": "gastroenterology", "stomach ache": "gastroenterology",
+    "abdominal pain": "gastroenterology", "abdomen pain": "gastroenterology",
+    "loose motion": "gastroenterology", "loose motions": "gastroenterology",
+    "diarrhea": "gastroenterology", "diarrhoea": "gastroenterology",
+    "constipation": "gastroenterology", "indigestion": "gastroenterology",
+    "acidity": "gastroenterology", "acid reflux": "gastroenterology",
+    "nausea": "gastroenterology", "vomiting": "gastroenterology",
+    "liver problem": "gastroenterology", "jaundice": "gastroenterology",
+    "vayar vedana": "gastroenterology", "vayarkayanam": "gastroenterology",
+    "omi": "gastroenterology", "omanarekkayanam": "gastroenterology",
+    "vayar": "gastroenterology",
+    # ENT
+    "ear pain": "ent", "earache": "ent",
+    "hearing loss": "ent", "hearing problem": "ent",
+    "sore throat": "ent", "throat pain": "ent",
+    "nose bleed": "ent", "nosebleed": "ent",
+    "sinusitis": "ent", "tonsil": "ent", "tonsils": "ent",
+    "kaan vedana": "ent", "kaan kayanam": "ent",
+    "thallu vedana": "ent", "mookku": "ent",
+    # Ophthalmology
+    "eye pain": "ophthalmology", "eye problem": "ophthalmology",
+    "blurry vision": "ophthalmology", "vision problem": "ophthalmology",
+    "eye redness": "ophthalmology", "watery eyes": "ophthalmology",
+    "kannu vedana": "ophthalmology", "kanninu": "ophthalmology",
+    "nethram": "ophthalmology",
+    # Dermatology
+    "skin rash": "dermatology", "skin problem": "dermatology",
+    "skin disease": "dermatology", "skin infection": "dermatology",
+    "itching": "dermatology", "eczema": "dermatology",
+    "psoriasis": "dermatology", "acne": "dermatology",
+    "hair fall": "dermatology", "hair loss": "dermatology",
+    "poochuvili": "dermatology", "charma rogam": "dermatology",
+    # Pulmonology
+    "breathing problem": "pulmonology",
+    "shortness of breath": "pulmonology",
+    "breathlessness": "pulmonology",
+    "difficulty breathing": "pulmonology",
+    "asthma": "pulmonology", "lung problem": "pulmonology",
+    "persistent cough": "pulmonology", "chronic cough": "pulmonology",
+    "ithira": "pulmonology", "niswasam": "pulmonology",
+    # Gynecology
+    "pregnancy": "gynaecology", "pregnant": "gynaecology",
+    "delivery": "gynaecology", "maternity": "gynaecology",
+    "menstrual problem": "gynaecology", "period problem": "gynaecology",
+    "pcod": "gynaecology", "pcos": "gynaecology",
+    "prasavam": "gynaecology", "garba": "gynaecology",
+    # Pediatrics
+    "child fever": "pediatrics", "baby fever": "pediatrics",
+    "child problem": "pediatrics", "baby problem": "pediatrics",
+    "infant": "pediatrics", "newborn": "pediatrics",
+    "kutta vedana": "pediatrics", "kuttinu": "pediatrics",
+    # Urology
+    "urinary problem": "urology", "urine problem": "urology",
+    "kidney stone": "urology", "kidney pain": "urology",
+    "kidney problem": "urology", "bladder": "urology",
+    "mutra rogam": "urology", "kidni": "urology",
+    # Dental
+    "tooth pain": "dental", "toothache": "dental",
+    "tooth ache": "dental", "gum pain": "dental",
+    "gum problem": "dental", "tooth problem": "dental",
+    "pallu vedana": "dental", "pallu kayanam": "dental",
+    # Psychiatry / Mental health
+    "depression": "psychiatry", "anxiety": "psychiatry",
+    "mental health": "psychiatry", "panic attack": "psychiatry",
+    "insomnia": "psychiatry", "sleep problem": "psychiatry",
+    "stress problem": "psychiatry", "mental problem": "psychiatry",
+    "manassastra": "psychiatry",
+    # General (catch-all for generic "fever"/"sick" etc.)
+    "fever": "general medicine", "pani": "general medicine",
+    "jwaram": "general medicine", "cold": "general medicine",
+    "flu": "general medicine", "weakness": "general medicine",
+    "fatigue": "general medicine", "tiredness": "general medicine",
+    "sukhamilla": "general medicine", "alukkam": "general medicine",
+}
+
+# Sort once at module load; longest key first → more specific match wins
+_SYMPTOM_DEPT_MAP: list[tuple[str, str]] = sorted(
+    _SYMPTOM_DEPT_MAP_RAW.items(), key=lambda kv: -len(kv[0])
+)
 
 
 # ── Main service ──────────────────────────────────────────────────────────────
@@ -220,6 +335,7 @@ class HospitalKnowledgeService:
             INTENT_EMERGENCY: self._emergency,
             INTENT_LOCATION: self._location,
             INTENT_CONTACT: self._contact,
+            INTENT_SYMPTOM: self._symptom_recommendation,
         }
         handler = handlers.get(intent)
         if handler:
@@ -497,6 +613,88 @@ class HospitalKnowledgeService:
             text_ml=f"Hospital phone number: {self.ctx.phone}.",
             data={"phone": self.ctx.phone},
         )
+
+    # ── Symptom recommendation ────────────────────────────────────────────────
+
+    def _symptom_recommendation(self, entities: dict) -> KnowledgeResult:
+        """
+        Map symptom description to right department and recommend available doctors.
+        Called when INTENT_SYMPTOM fires. Requires entities["transcript"] to be
+        the raw caller utterance; passed by call_handler when intent==INTENT_SYMPTOM.
+        """
+        transcript = entities.get("transcript", "")
+        dept_name = self._map_symptom_to_dept(transcript)
+
+        if not dept_name:
+            return KnowledgeResult(
+                intent=INTENT_SYMPTOM, found=False,
+                text_ml="ക്ഷമിക്കണം, ഏത് problem ആണ് ഉള്ളതെന്ന് ഒന്നുകൂടി പറഞ്ഞു തരാമോ?",
+                missing="no_symptom_match",
+            )
+
+        dept = self.ctx.find_dept(dept_name)
+        dow = today_db_dow()
+        day_label = _DAY_ML.get(dow, "ഇന്ന്")
+
+        if not dept:
+            # Department not available at this hospital
+            phone = self.ctx.phone or "reception"
+            return KnowledgeResult(
+                intent=INTENT_SYMPTOM, found=True,
+                text_ml=(f"ആ problem-ന് {dept_name.title()} specialist ആണ് ആവശ്യം. "
+                         f"ഞങ്ങളുടെ hospital-ൽ ആ department ലഭ്യമല്ല. "
+                         f"കൂടുതൽ വിവരത്തിന് {phone}-ൽ ബന്ധപ്പെടൂ."),
+                missing="dept_not_found",
+            )
+
+        dept_docs = self.ctx.doctors_for_dept(dept.name)
+        avail_today = [d for d in dept_docs if self._slot_for_dow(d, dow)]
+
+        if avail_today:
+            doc = avail_today[0]
+            slot = self._slot_for_dow(doc, dow)
+            names = ", ".join(d.name_ml or d.name for d in avail_today[:2])
+            return KnowledgeResult(
+                intent=INTENT_SYMPTOM, found=True,
+                text_ml=(f"ആ problem-ന് {dept.name_ml or dept.name} department-ൽ "
+                         f"consult ചെയ്യണം. {day_label} {names} doctor available ആണ്, "
+                         f"{slot.start} മുതൽ {slot.end} വരെ."),
+                data={"dept": dept.name, "doctors": [d.name for d in avail_today]},
+            )
+
+        # Dept exists but no doctors today — find next available
+        earliest_next = None
+        for d in dept_docs:
+            ns = self._next_slot_after(d, dow)
+            if ns and (earliest_next is None or ns[0] < earliest_next[0]):
+                earliest_next = (ns[0], ns[1], d)
+
+        if earliest_next:
+            ndow, ns, doc = earliest_next
+            next_label = _DAY_ML.get(ndow, "")
+            return KnowledgeResult(
+                intent=INTENT_SYMPTOM, found=True,
+                text_ml=(f"ആ problem-ന് {dept.name_ml or dept.name} department-ൽ "
+                         f"consult ചെയ്യണം. {day_label} doctors ലഭ്യമല്ല. "
+                         f"{next_label}-ൽ {doc.name_ml or doc.name} doctor "
+                         f"{ns.start} മുതൽ {ns.end} വരെ available ആണ്."),
+            )
+
+        phone = self.ctx.phone or "reception"
+        return KnowledgeResult(
+            intent=INTENT_SYMPTOM, found=True,
+            text_ml=(f"ആ problem-ന് {dept.name_ml or dept.name} department-ൽ "
+                     f"consult ചെയ്യണം. Appointment-ന് {phone}-ൽ ബന്ധപ്പെടൂ."),
+        )
+
+    @staticmethod
+    def _map_symptom_to_dept(text: str) -> Optional[str]:
+        """Search transcript for symptom phrases; return canonical dept name."""
+        t = text.lower()
+        for symptom, dept in _SYMPTOM_DEPT_MAP:
+            if symptom in t:
+                return dept
+        return None
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 

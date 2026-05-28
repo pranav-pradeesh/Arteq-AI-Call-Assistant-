@@ -34,6 +34,7 @@ from src.intent.keywords import (
     INTENT_GOODBYE,
     INTENT_HUMAN_TRANSFER,
     INTENT_REPEAT,
+    INTENT_SYMPTOM,
     INTENT_UNKNOWN,
 )
 from src.knowledge.service import HospitalKnowledgeService
@@ -138,6 +139,13 @@ class CallHandler:
                 await save_state(self._state)
                 return await self._synthesize(response_text)
 
+            # Filter automated recording announcements (Google dialer, IVR systems).
+            # These are injected before the caller speaks; we silently discard them.
+            if self._is_recording_announcement(stt_result.transcript):
+                logger.info("recording_announcement_ignored",
+                            transcript=stt_result.transcript[:80])
+                return b""
+
             # ── Intent ───────────────────────────────────────────────────────
             intent_start = time.monotonic()
             intent_result = self._intent_engine.classify(
@@ -184,6 +192,8 @@ class CallHandler:
                 "department": intent_result.entities.department,
                 "doctor_name": intent_result.entities.doctor_name,
                 "day": intent_result.entities.day_reference,
+                # Pass raw transcript for symptom → dept mapping
+                "transcript": stt_result.transcript,
             }
             knowledge_result = self._knowledge.answer(
                 intent=intent_result.intent,
@@ -208,7 +218,7 @@ class CallHandler:
             # This handles things like parking, insurance, facilities, etc.
             _no_answer_missing = {
                 "unsupported_intent", "dept_not_found",
-                "doctor_not_found", None,
+                "doctor_not_found", "no_symptom_match", None,
             }
             if not knowledge_result.found and knowledge_result.missing in _no_answer_missing:
                 logger.info("freeform_escalation", missing=knowledge_result.missing,
@@ -273,6 +283,26 @@ class CallHandler:
 
     async def _end_call_gracefully(self) -> None:
         await self.end_call()
+
+    @staticmethod
+    def _is_recording_announcement(transcript: str) -> bool:
+        """
+        Detect the automated "this call is being recorded" announcement that
+        Google dialer and some IVR systems inject at the start of a call.
+        Returns True when the utterance should be silently discarded.
+        """
+        t = transcript.lower().strip()
+        patterns = (
+            "this call is being recorded",
+            "call is being recorded",
+            "call may be recorded",
+            "being recorded for quality",
+            "recorded for training",
+            "recorded for quality",
+            "this call may be monitored",
+            "call may be monitored",
+        )
+        return any(p in t for p in patterns)
 
     def _narrowing_question(self, intent_result: IntentResult) -> str:
         if self._state and self._state.last_department:

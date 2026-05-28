@@ -33,6 +33,7 @@ INTENT_HUMAN_TRANSFER = "human_transfer"
 INTENT_REPEAT = "repeat_request"
 INTENT_GOODBYE = "goodbye"
 INTENT_UNKNOWN = "unknown"
+INTENT_SYMPTOM = "symptom_query"
 
 ALL_INTENTS = [
     INTENT_DOCTOR_AVAILABILITY,
@@ -46,6 +47,7 @@ ALL_INTENTS = [
     INTENT_HUMAN_TRANSFER,
     INTENT_REPEAT,
     INTENT_GOODBYE,
+    INTENT_SYMPTOM,
     INTENT_UNKNOWN,
 ]
 
@@ -348,6 +350,69 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("understand", 1.2),
         ("manasilayi", 1.5),      # "understood" (confirming?)
         ("manassilaayilla", 1.8), # "didn't understand"
+    ],
+
+    # ── Symptom / health complaint (route to right dept) ─────────────────────
+    # These keywords fire when the caller describes their condition rather than
+    # naming a specific department or asking about schedules/fees.
+    # Bigrams like "chest pain", "stomach ache" score higher than unigrams
+    # so they reliably beat INTENT_EMERGENCY's "chest" (w=1.2).
+    INTENT_SYMPTOM: [
+        # Strong unambiguous signals
+        ("symptom", 2.0),
+        ("symptoms", 2.0),
+        ("vedana", 1.8),          # pain (Malayalam)
+        ("kayanam", 1.8),         # ache (Malayalam)
+        ("thalavedana", 2.0),     # headache
+        ("thalakayanam", 2.0),    # headache
+        ("vayar vedana", 2.2),    # stomach pain (bigram)
+        ("vayarkayanam", 2.0),    # stomach ache
+        ("ellu vedana", 2.2),     # bone pain (bigram)
+        ("muzhu vedana", 2.2),    # knee pain (bigram)
+        ("kaan vedana", 2.2),     # ear pain (bigram)
+        ("kannu vedana", 2.2),    # eye pain (bigram)
+        ("pallu vedana", 2.2),    # tooth pain (bigram)
+        ("neriv vedana", 2.2),    # chest pain (bigram)
+        # Specific conditions / symptoms
+        ("migraine", 2.0),
+        ("seizure", 1.8),
+        ("palpitation", 1.8),
+        ("palpitations", 1.8),
+        ("dizziness", 1.8),
+        ("swelling", 1.8),
+        ("bleeding", 1.5),
+        ("infection", 1.5),
+        ("rash", 1.8),
+        ("itching", 1.8),
+        ("poochuvili", 2.0),      # itching (Malayalam)
+        ("ithira", 1.8),          # breathlessness (Malayalam)
+        ("jwaram", 1.8),          # fever (Malayalam)
+        ("sukhamilla", 2.0),      # not well (Malayalam)
+        ("rogam", 1.5),           # disease (Malayalam)
+        # Moderate – combined with body-part term they become symptom queries
+        ("pain", 1.2),
+        ("ache", 1.2),
+        ("aching", 1.2),
+        ("hurt", 1.2),
+        ("hurting", 1.2),
+        ("burning", 1.0),
+        ("soreness", 1.2),
+        ("sore", 1.0),
+        ("injured", 1.5),
+        ("injury", 1.5),
+        ("wound", 1.5),
+        ("fracture", 1.5),
+        ("suffering", 1.5),
+        ("sick", 1.0),
+        ("unwell", 1.5),
+        # Malayalam script
+        ("വേദന", 2.0),
+        ("കായനം", 2.0),
+        ("അസുഖം", 1.8),
+        ("രോഗം", 1.5),
+        ("സുഖമില്ല", 2.0),
+        ("ചൊറിച്ചിൽ", 2.0),
+        ("ഒമ", 1.8),
     ],
 
     # ── Goodbye ──────────────────────────────────────────────────────────────
