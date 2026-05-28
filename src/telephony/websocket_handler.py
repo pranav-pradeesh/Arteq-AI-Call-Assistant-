@@ -188,7 +188,6 @@ async def handle_exotel_stream(
             except Exception:
                 continue
             rms = vad.rms_energy(pcm_chunk)
-            is_speech_chunk = rms > vad.speech_threshold
 
             # ── Barge-in detection (while playing) ────────────────────────
             if is_speaking():
@@ -219,9 +218,17 @@ async def handle_exotel_stream(
                 continue
 
             # ── Accumulate when bot is silent ─────────────────────────────
+            # Update adaptive noise floor from bot-silent frames only.
+            # During TTS playback the incoming audio may contain echo/sidetone
+            # that would bias the noise estimate upward.
+            vad.update_noise_floor(rms)
+
             bargein_speech_chunks = 0
             audio_buffer.extend(pcm_chunk)
             utterance_chunks += 1
+            # Use adaptive threshold: caller's voice (direct mic) stays well
+            # above noise_floor × 2.5, while background voices at a distance fall below.
+            is_speech_chunk = rms > vad.effective_speech_threshold()
             if is_speech_chunk:
                 speech_chunks += 1
                 silence_count = 0

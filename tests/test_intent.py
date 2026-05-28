@@ -46,7 +46,9 @@ def test_clean_fee_query():
 def test_clean_emergency():
     result = classify_intent("Is there emergency service available")
     assert result.intent == INTENT_EMERGENCY
-    assert result.confidence > 0.7
+    # "available" also scores doctor_availability; new formula penalises that spread.
+    # Confidence is lower but intent is correct and above the 0.50 threshold.
+    assert result.confidence > 0.55
 
 
 def test_clean_location():

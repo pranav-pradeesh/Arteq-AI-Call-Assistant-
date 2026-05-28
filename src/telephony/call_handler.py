@@ -122,9 +122,9 @@ class CallHandler:
         time_greet = _time_greeting()
         hosp_name = self._ctx.name_ml or self._ctx.name
         greeting = (
-            f"{time_greet}! {hosp_name}-ലേക്ക് സ്വാഗതം. "
+            f"{time_greet}! Welcome to {hosp_name}. "
             f"ഞാൻ ഇവിടത്തെ AI assistant ആണ്. "
-            f"എന്ത് സഹായം ആണ് വേണ്ടത്?"
+            f"Doctor timing, fees, departments — എന്ത് സഹായം വേണം?"
         )
         audio = await self._tts.synthesize(greeting, language="ml-IN")
         return audio or b""
@@ -204,9 +204,9 @@ class CallHandler:
                 if self._looks_like_noise_or_greeting(stt_result.transcript):
                     hosp_name = self._ctx.name_ml or self._ctx.name if self._ctx else "ഈ hospital"
                     response_text = (
-                        f"ഹലോ! ഞാൻ {hosp_name}-ലെ AI assistant ആണ്. "
+                        f"Hello! I'm the AI assistant for {hosp_name}. "
                         f"Doctor timing, fees, departments, emergency — "
-                        f"ഏത് വിഷയം enquire ചെയ്യണം?"
+                        f"എന്ത് സഹായം വേണം?"
                     )
                     await save_state(self._state)
                     return await self._synthesize(response_text)

@@ -200,20 +200,32 @@ class IntentEngine:
             result_intent = INTENT_UNKNOWN
             confidence = 0.0
         else:
-            # Normalize: compare top score to second highest
             sorted_scores = sorted(scores.values(), reverse=True)
             second_score = sorted_scores[1] if len(sorted_scores) > 1 else 0.0
+            total_score = sum(scores.values())
 
-            # Confidence = how dominant the top intent is
-            # High margin → high confidence
+            # Confidence is the product of two independent signals:
+            #
+            #   norm_fraction: what share of all scored points went to the top
+            #     intent.  When background voices add tokens across many intents,
+            #     total_score grows while top_score stays flat → fraction collapses.
+            #     This is the primary noise-robustness mechanism.
+            #
+            #   margin_factor: how much bigger the top score is vs the runner-up.
+            #     An unambiguous query gets a factor close to 2.0; a near-tie gets
+            #     close to 1.0.
+            #
+            # Combined they reward "one clear winner with a large lead" and punish
+            # "many intents with similar scores" (which indicates noisy or
+            # mixed-conversation input).
+            norm_fraction = top_score / total_score  # 0..1
             if second_score == 0.0:
-                confidence = min(top_score / 3.0, 1.0)
+                margin_factor = 2.0   # uncontested — full boost
             else:
                 margin = (top_score - second_score) / (top_score + second_score)
-                # Scale to 0-1 with some normalization
-                base_conf = min(top_score / 4.0, 0.9)  # raw score contribution
-                margin_conf = margin * 0.4             # margin contribution
-                confidence = min(base_conf + margin_conf, 1.0)
+                margin_factor = 1.0 + margin  # 1.0 (tie) … 2.0 (no runner-up)
+
+            confidence = min(norm_fraction * margin_factor, 1.0)
 
             result_intent = top_intent if confidence > 0.2 else INTENT_UNKNOWN
 
