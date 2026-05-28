@@ -1482,7 +1482,7 @@ class HospitalKnowledgeService:
 
     # ── Free-form LLM answer using hospital summary ───────────────────────────
 
-    def answer_freeform(self, question: str) -> KnowledgeResult:
+    async def answer_freeform(self, question: str) -> KnowledgeResult:
         """
         Answer any caller question by giving the LLM (Groq llama-3.1-8b)
         the full hospital summary and the user's question. Used when the
@@ -1492,16 +1492,21 @@ class HospitalKnowledgeService:
         On Groq failure, the fallback embeds the question text so we
         don't return identical audio for every miss (which would otherwise
         be served from the TTS cache).
+
+        Uses AsyncGroq to avoid blocking the asyncio event loop during the
+        2-5 second network call (which would otherwise stall all other
+        concurrent WebSocket connections and cause Exotel keep-alive failures).
         """
         import logging
         log = logging.getLogger(__name__)
 
         try:
-            from groq import Groq
-            client = Groq(api_key=settings.GROQ_API_KEY)
+            from groq import AsyncGroq
+            client = AsyncGroq(api_key=settings.GROQ_API_KEY)
             reception = self.ctx.phone or "the hospital"
             prompt = (
-                "You are an AI voice assistant for a Kerala hospital. "
+                f"You are {settings.AGENT_NAME}, a friendly AI voice receptionist for a Kerala hospital. "
+                "You have a warm, professional personality and speak naturally. "
                 "A caller has already dialed in and is speaking with you. "
                 "Answer using ONLY the facts in the HOSPITAL SUMMARY below.\n\n"
                 "Rules:\n"
@@ -1521,7 +1526,7 @@ class HospitalKnowledgeService:
                 f"Caller: {question}\nReceptionist:"
             )
             log.info(f"freeform_groq_call question={question!r}")
-            resp = client.chat.completions.create(
+            resp = await client.chat.completions.create(
                 model=settings.GROQ_MODEL_FAST,
                 messages=[{"role": "user", "content": prompt}],
                 max_tokens=settings.GROQ_MAX_TOKENS,

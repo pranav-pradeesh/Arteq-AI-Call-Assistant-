@@ -166,7 +166,7 @@ class CallHandler:
         hosp_name = self._ctx.name_ml or self._ctx.name
         greeting = (
             f"{time_greet}! Welcome to {hosp_name}. "
-            f"ഞാൻ ഇവിടത്തെ AI assistant ആണ്. "
+            f"ഞാൻ {settings.AGENT_NAME} ആണ്, ഇവിടത്തെ AI assistant. "
             f"Doctor timing, fees, departments — എന്ത് സഹായം വേണം?"
         )
         audio = await self._tts.synthesize(greeting, language="ml-IN")
@@ -278,7 +278,7 @@ class CallHandler:
                 if self._looks_like_noise_or_greeting(stt_result.transcript):
                     hosp_name = self._ctx.name_ml or self._ctx.name if self._ctx else "ഈ hospital"
                     response_text = (
-                        f"Hello! I'm the AI assistant for {hosp_name}. "
+                        f"Hello! ഞാൻ {settings.AGENT_NAME} ആണ്, {hosp_name}-ലെ AI assistant. "
                         f"Doctor timing, fees, departments, emergency — "
                         f"എന്ത് സഹായം വേണം?"
                     )
@@ -286,7 +286,7 @@ class CallHandler:
                     return await self._synthesize(response_text)
 
                 logger.info("freeform_fallback", transcript=stt_result.transcript[:100])
-                knowledge_result = self._knowledge.answer_freeform(
+                knowledge_result = await self._knowledge.answer_freeform(
                     stt_result.transcript
                 )
                 response_text = knowledge_result.text_ml or self._composer.fallback()
@@ -331,7 +331,7 @@ class CallHandler:
             if not knowledge_result.found and knowledge_result.missing in _no_answer_missing:
                 logger.info("freeform_escalation", missing=knowledge_result.missing,
                             transcript=stt_result.transcript[:60])
-                freeform = self._knowledge.answer_freeform(stt_result.transcript)
+                freeform = await self._knowledge.answer_freeform(stt_result.transcript)
                 if freeform.found and freeform.text_ml:
                     knowledge_result = freeform
 

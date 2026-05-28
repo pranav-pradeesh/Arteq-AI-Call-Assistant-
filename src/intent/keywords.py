@@ -517,6 +517,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "thal kayanam", "kaal kayanam", "kai kayanam", "ellu kayanam",
         "ellu moluvu", "sandi vedana", "nattu kayanam", "kazhuthu kayanam",
         "iduppu kayanam", "mottu", "kaal ottiyathu",
+        # Malayalam script
+        "ഓർത്തോപീഡിക്സ്", "ഓർത്തോ", "അസ്ഥി ശസ്ത്രക്രിയ",
     ],
     "cardiology": [
         "cardiology", "cardio", "heart", "hrudayam", "hridayam",
@@ -529,6 +531,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "hridayastambhanam", "uchha rakthasammardam", "kunja rakthasammardam",
         "bp", "blood pressure", "rektha", "sammardam", "maarpu vedana",
         "maarpu kayanam", "maarpu irakka", "hridrogam", "hridayam",
+        # Malayalam script
+        "കാർഡിയോളജി", "കാർഡിയോളജിസ്റ്റ്", "ഹൃദ്രോഗ", "ഹൃദ്രോഗ വിഭാഗം",
     ],
     "ent": [
         "ent", "ear", "nose", "throat", "kaan", "mookk", "thallu",
@@ -566,6 +570,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "mahilarogam", "pregnant aano", "kutti undu",
         # phonetic STT variants
         "jinecology", "ginecology", "gynacology",
+        # Malayalam script (Sarvam STT sometimes outputs English words in Malayalam script)
+        "ഗൈനക്കോളജി", "ഗൈനക്കോളജിസ്റ്റ്", "ഒബ്സ്റ്റട്രിക്സ്",
     ],
     "ophthalmology": [
         "ophthalmology", "eye", "kannu", "kanninu", "ophthal",
@@ -578,6 +584,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "color blind", "netra rogam", "kannu charayan", "kannu cholinja",
         "kannu chuvakkunnu", "kannu titippu", "kannu velicham kuranju",
         "kazhcha kuranju", "kann vedana", "kannilninnu water varunu",
+        # Malayalam script
+        "ഓഫ്താൽമോളജി", "ഒഫ്താൽമോളജി",
     ],
     "pediatrics": [
         "pediatrics", "paediatrics", "child", "kutta", "kuttinu",
@@ -590,6 +598,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "kunninu", "kuttiku pani", "kutti dokthar", "bala rogam",
         "balya rogam", "shishu poshana", "kutti vomiting",
         "kutti loose motion", "kutti kayanam",
+        # Malayalam script
+        "പീഡിയാട്രിക്സ്", "ശിശുരോഗ",
     ],
     "dermatology": [
         "dermatology", "skin", "charma", "charmam", "rog",
@@ -618,6 +628,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "tingling", "one side weakness", "one side pain", "oru bhagam",
         "kaikal tarippu", "thal tharakan", "manasikarogam", "madhi kuranju",
         "neramppu", "medu",
+        # Malayalam script
+        "ന്യൂറോളജി", "ന്യൂറോളജിസ്റ്റ്", "നർവ്",
     ],
     "general": [
         "general", "gp", "general medicine", "general physician",

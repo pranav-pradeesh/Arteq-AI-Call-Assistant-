@@ -58,6 +58,13 @@ class Settings(BaseSettings):
     INTENT_CONFIDENCE_THRESHOLD: float = 0.50
     MAX_CLARIFICATION_ATTEMPTS: int = 2
 
+    # Persona
+    AGENT_NAME: str = "Arya"
+    AGENT_LANGUAGE: str = "ml-IN"
+
+    # Google Cloud (optional STT/TTS provider)
+    GOOGLE_API_KEY: str = ""
+
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"
