@@ -37,7 +37,9 @@ class Settings(BaseSettings):
     # STT
     STT_PROVIDER: str = "sarvam"
     STT_CONFIDENCE_THRESHOLD: float = 0.55
-    STT_LANGUAGES: str = "ml-IN,en-IN,hi-IN"  # Comma-separated fallback languages for Google STT
+    # All 22 scheduled Indian languages + English. Google STT v1 uses first as
+    # primary and next 1-3 as alternatives. Operators can trim to their region.
+    STT_LANGUAGES: str = "ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN"
 
     # Groq LLM
     GROQ_API_KEY: str = ""

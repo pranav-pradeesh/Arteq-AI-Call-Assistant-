@@ -39,7 +39,7 @@ services:
       - key: DEFAULT_LANGUAGE
         value: ml-IN
       - key: STT_LANGUAGES
-        value: ml-IN,en-IN,hi-IN
+        value: ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN
       - key: AGENT_NAME
         value: Arya
       - key: AGENT_LANGUAGE
