@@ -35,15 +35,7 @@ class Settings(BaseSettings):
     # primary and next 1-3 as alternatives. Operators can trim to their region.
     STT_LANGUAGES: str = "ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN"
 
-    # Groq LLM
-    GROQ_API_KEY: str = ""
-    GROQ_MODEL_FAST: str = "llama-3.1-8b-instant"
-    GROQ_MODEL_SMART: str = "llama-3.3-70b-versatile"
-    GROQ_MAX_TOKENS: int = 100
-    GROQ_TIMEOUT_S: int = 8
-
     # AI Brain
-    AI_BRAIN: str = "gemini"         # "gemini" (default) | "groq" (legacy keyword+Groq fallback)
     DEFAULT_LANGUAGE: str = "ml-IN"  # Fallback language if STT detection fails
 
     # Database

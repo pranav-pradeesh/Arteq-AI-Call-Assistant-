@@ -24,8 +24,6 @@ services:
         value: stream
 
       # AI stack
-      - key: AI_BRAIN
-        value: gemini
       - key: STT_PROVIDER
         value: google
       - key: TTS_PROVIDER
@@ -43,16 +41,6 @@ services:
       - key: AGENT_LANGUAGE
         value: ml-IN
 
-      # Groq (kept as legacy fallback — set AI_BRAIN=groq to use)
-      - key: GROQ_MODEL_FAST
-        value: llama-3.1-8b-instant
-      - key: GROQ_MODEL_SMART
-        value: llama-3.3-70b-versatile
-      - key: GROQ_MAX_TOKENS
-        value: "100"
-      - key: GROQ_TIMEOUT_S
-        value: "8"
-
       # Session / cache
       - key: SESSION_TTL_S
         value: "300"
@@ -67,8 +55,6 @@ services:
       - key: GOOGLE_API_KEY
         sync: false
       - key: GOOGLE_CLOUD_TTS_KEY
-        sync: false
-      - key: GROQ_API_KEY
         sync: false
       - key: DATABASE_URL
         sync: false

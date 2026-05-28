@@ -3,13 +3,9 @@ Response Composer.
 
 Primary: uses KnowledgeResult.text_ml (pre-built by KnowledgeService).
 Fallback: template-based composition from result.data (backward compat).
-Edge-case: Groq LLM (only when both above are empty).
 """
 from __future__ import annotations
 
-from typing import Optional
-
-from src.config.settings import settings
 from src.knowledge.service import KnowledgeResult
 from src.intent.keywords import (
     INTENT_CONSULTATION_FEE,
@@ -82,10 +78,8 @@ class ResponseComposer:
       3. Groq LLM (edge cases only)
     """
 
-    def __init__(self, hospital_name: str = "ഈ Hospital", use_llm: bool = True):
+    def __init__(self, hospital_name: str = "ഈ Hospital"):
         self.hospital_name = hospital_name
-        # use_llm flag: respected but Groq only activates when API key is set
-        self._use_llm = use_llm and bool(settings.GROQ_API_KEY)
 
     def compose(self, result: KnowledgeResult) -> str:
         # 1. Pre-built text from knowledge service
@@ -117,12 +111,6 @@ class ResponseComposer:
         }.get(result.intent)
         if handler:
             text = handler(result)
-            if text:
-                return text
-
-        # 4. Groq LLM for truly unknown edge cases
-        if self._use_llm and result.data:
-            text = _compose_via_groq(result.intent, result.data, self.hospital_name)
             if text:
                 return text
 
@@ -225,26 +213,3 @@ class ResponseComposer:
         if not r.found or not d.get("phone_primary"):
             return NO_DATA_MSG
         return _t("contact", phone=d["phone_primary"])
-
-
-# ── Groq LLM fallback ─────────────────────────────────────────────────────────
-
-def _compose_via_groq(intent: str, data: dict, hospital_name: str) -> Optional[str]:
-    try:
-        from groq import Groq
-        client = Groq(api_key=settings.GROQ_API_KEY)
-        prompt = (
-            f"You are the voice assistant for {hospital_name} hospital in Kerala.\n"
-            f"Reply in plain Malayalam (2 sentences max). Never invent facts.\n"
-            f"Intent: {intent}\nData: {data}\nReply in Malayalam:"
-        )
-        resp = client.chat.completions.create(
-            model=settings.GROQ_MODEL_FAST,
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=settings.GROQ_MAX_TOKENS,
-            timeout=settings.GROQ_TIMEOUT_S,
-        )
-        text = resp.choices[0].message.content.strip()
-        return text if text else None
-    except Exception:
-        return None
