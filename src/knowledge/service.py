@@ -213,6 +213,58 @@ _SYMPTOM_DEPT_MAP: list[tuple[str, str]] = sorted(
     _SYMPTOM_DEPT_MAP_RAW.items(), key=lambda kv: -len(kv[0])
 )
 
+# ── Ambiguous symptoms ────────────────────────────────────────────────────────
+# Symptoms that can belong to multiple departments. For these, routing to one
+# department without asking first would be wrong (e.g., "chest pain" is more
+# often gastric / acidity in Kerala context than cardiac). The bot asks a
+# single clarifying question so the caller can self-triage.
+_AMBIGUOUS_SYMPTOM_CLARIFICATIONS: dict[str, str] = {
+    # Chest — most common: gastric/acid reflux, then cardiac, then pulmonary
+    "chest pain": (
+        "Chest pain-ന് Gastroenterology (acidity/gastric), Cardiology (heart), "
+        "അല്ലെങ്കിൽ Pulmonology (breathing) — ഏതെങ്കിലും ആകാം. "
+        "Eating-ന് ശേഷം burning ആണോ, അതോ sudden severe pain ആണോ?"
+    ),
+    "chest": (
+        "Chest area-ൽ ഉള്ള problem — Gastroenterology, Cardiology, "
+        "അല്ലെങ്കിൽ Pulmonology ആകാം. "
+        "കൂടുതൽ describe ചെയ്യാമോ — burning ആണോ, pain ആണോ, breathlessness ആണോ?"
+    ),
+    # Stomach / abdomen — often gastric, but could be general medicine for mild fever+stomach
+    "stomach pain": (
+        "Stomach pain-ന് Gastroenterology department ആണ് relevant. "
+        "Fever കൂടി ഉണ്ടോ, അതോ vomiting ഉണ്ടോ?"
+    ),
+    # Head — migraine / neurology vs. fever / general medicine
+    "headache": (
+        "Headache-ന് Neurology (severe/migraine) അല്ലെങ്കിൽ General Medicine (mild/fever) "
+        "ആകാം. Fever കൂടി ഉണ്ടോ, അതോ head-ൽ severe pulsating pain ആണോ?"
+    ),
+    "head pain": (
+        "Head pain-ന് Neurology അല്ലെങ്കിൽ General Medicine ആകാം. "
+        "Severe pain ആണോ, fever ഉണ്ടോ?"
+    ),
+    # Back — orthopedic vs. kidney (urology)
+    "back pain": (
+        "Back pain-ന് Orthopedics (spine/muscle) അല്ലെങ്കിൽ Urology (kidney-related) "
+        "ആകാം. Upper back ആണോ, lower back ആണോ?"
+    ),
+    # Vayar in Malayalam is often both "stomach" and "intestines"
+    "vayar vedana": (
+        "Vayar vedana-ന് Gastroenterology ആണ് relevant. "
+        "Vomiting ഉണ്ടോ, fever ഉണ്ടോ, അതോ acidity/gas ആണോ?"
+    ),
+    "vayarkayanam": (
+        "Vayar kayanam-ന് Gastroenterology consult ചെയ്യണം. "
+        "Loose motion, vomiting, fever — ഏതെങ്കിലും ഉണ്ടോ?"
+    ),
+    # Thalavedana in Malayalam
+    "thalavedana": (
+        "Thalavedana-ന് Neurology (severe/migraine) അല്ലെങ്കിൽ General Medicine (mild) "
+        "ആകാം. Pani (fever) ഉണ്ടോ?"
+    ),
+}
+
 
 # ── Main service ──────────────────────────────────────────────────────────────
 
@@ -619,10 +671,24 @@ class HospitalKnowledgeService:
     def _symptom_recommendation(self, entities: dict) -> KnowledgeResult:
         """
         Map symptom description to right department and recommend available doctors.
-        Called when INTENT_SYMPTOM fires. Requires entities["transcript"] to be
-        the raw caller utterance; passed by call_handler when intent==INTENT_SYMPTOM.
+        For ambiguous symptoms (e.g., chest pain could be cardiac OR gastric),
+        asks a clarifying question instead of routing immediately to one department.
+        Called when INTENT_SYMPTOM fires; requires entities["transcript"].
         """
         transcript = entities.get("transcript", "")
+        t_lower = transcript.lower()
+
+        # ── Ambiguous check first ─────────────────────────────────────────────
+        # Sort by length descending so "chest pain" matches before "chest"
+        for phrase in sorted(_AMBIGUOUS_SYMPTOM_CLARIFICATIONS, key=lambda p: -len(p)):
+            if phrase in t_lower:
+                clarification = _AMBIGUOUS_SYMPTOM_CLARIFICATIONS[phrase]
+                return KnowledgeResult(
+                    intent=INTENT_SYMPTOM, found=True,
+                    text_ml=clarification,
+                    data={"ambiguous": True, "phrase": phrase},
+                )
+
         dept_name = self._map_symptom_to_dept(transcript)
 
         if not dept_name:
@@ -740,17 +806,22 @@ class HospitalKnowledgeService:
             client = Groq(api_key=settings.GROQ_API_KEY)
             reception = self.ctx.phone or "the hospital"
             prompt = (
-                "You are the phone receptionist for a Kerala hospital. "
-                "Answer the caller's question using ONLY the facts in the HOSPITAL SUMMARY below.\n\n"
+                "You are an AI voice assistant for a Kerala hospital. "
+                "A caller has already dialed in and is speaking with you. "
+                "Answer using ONLY the facts in the HOSPITAL SUMMARY below.\n\n"
                 "Rules:\n"
-                "1. Only say a service is NOT available if it is explicitly listed under "
+                "1. NEVER ask 'ആരാണ് സംസാരിക്കുന്നത്' or 'who is speaking'. "
+                "The caller is already on the line.\n"
+                "2. If the caller's message is unclear or seems like a greeting, "
+                "respond: 'ഹലോ! Doctor timing, fees, departments — ഏത് കാര്യം enquire ചെയ്യണം?'\n"
+                "3. Only say a service is NOT available if it is explicitly listed under "
                 "'SERVICES NOT OFFERED HERE'. For anything not mentioned in the summary, "
                 f"say: 'Please contact our reception at {reception} for details.'\n"
-                "2. Match the caller's language: Malayalam-Manglish for Malayalam/Manglish "
+                "4. Match the caller's language: Malayalam-Manglish for Malayalam/Manglish "
                 "input, English for English input.\n"
-                "3. Keep the reply to ONE or TWO short sentences — this is a voice call.\n"
-                "4. Do not start with 'Sorry' unless you are genuinely denying something.\n"
-                "5. Do not invent facts. If you are unsure, direct to reception.\n\n"
+                "5. Keep the reply to ONE or TWO short sentences — this is a voice call.\n"
+                "6. Do not start with 'Sorry' unless you are genuinely denying something.\n"
+                "7. Do not invent facts. If you are unsure, direct to reception.\n\n"
                 f"HOSPITAL SUMMARY:\n{self._summary}\n\n"
                 f"Caller: {question}\nReceptionist:"
             )

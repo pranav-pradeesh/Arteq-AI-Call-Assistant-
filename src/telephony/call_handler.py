@@ -17,6 +17,8 @@ import time
 from datetime import datetime, timezone
 from typing import Optional
 
+import pytz
+
 from src.config.settings import settings
 from src.conversation.state import (
     ConversationState,
@@ -47,6 +49,21 @@ from src.stt.providers import CompositeSTT
 from src.tts.engine import CompositeTTS
 
 logger = get_logger(__name__)
+
+_INDIA_TZ = pytz.timezone("Asia/Kolkata")
+
+
+def _time_greeting() -> str:
+    """Return a time-appropriate Malayalam greeting based on IST."""
+    hour = datetime.now(_INDIA_TZ).hour
+    if 5 <= hour < 12:
+        return "സുപ്രഭാതം"       # Good Morning
+    elif 12 <= hour < 17:
+        return "ശുഭ ഉച്ചനേരം"   # Good Afternoon
+    elif 17 <= hour < 21:
+        return "ശുഭ സന്ധ്യ"      # Good Evening
+    else:
+        return "ശുഭ രാത്രി"       # Good Night
 
 
 class CallHandler:
@@ -102,9 +119,14 @@ class CallHandler:
             hospital_name=self._ctx.name_ml or self._ctx.name
         )
 
+        time_greet = _time_greeting()
+        hosp_name = self._ctx.name_ml or self._ctx.name
         greeting = (
-            f"നമസ്കാരം! {self._ctx.name_ml or self._ctx.name}-ലേക്ക് സ്വാഗതം. "
-            f"എന്ത് സഹായം ആണ് വേണ്ടത്?"
+            f"{time_greet}! {hosp_name}-ലേക്ക് സ്വാഗതം. "
+            f"ഞാൻ ഇവിടത്തെ AI assistant ആണ്. "
+            f"Doctor timing, fees, departments, emergency — "
+            f"ഏത് കാര്യവും enquire ചെയ്യാം. "
+            f"എന്ത് അറിയണം?"
         )
         audio = await self._tts.synthesize(greeting, language="ml-IN")
         return audio or b""
@@ -177,6 +199,20 @@ class CallHandler:
             # so the caller gets a real answer from hospital data instead of
             # cycling through "could you repeat?" → transfer.
             if intent_result.needs_clarification:
+                # Noise / single-word greetings ("hello", "hi", "hmm") are not
+                # real questions — sending them to Groq makes Groq ask
+                # "ആരാണ് സംസാരിക്കുന്നത്?" (who is speaking?).
+                # Re-introduce the bot instead so the caller knows what to ask.
+                if self._looks_like_noise_or_greeting(stt_result.transcript):
+                    hosp_name = self._ctx.name_ml or self._ctx.name if self._ctx else "ഈ hospital"
+                    response_text = (
+                        f"ഹലോ! ഞാൻ {hosp_name}-ലെ AI assistant ആണ്. "
+                        f"Doctor timing, fees, departments, emergency — "
+                        f"ഏത് വിഷയം enquire ചെയ്യണം?"
+                    )
+                    await save_state(self._state)
+                    return await self._synthesize(response_text)
+
                 logger.info("freeform_fallback", transcript=stt_result.transcript[:100])
                 knowledge_result = self._knowledge.answer_freeform(
                     stt_result.transcript
@@ -283,6 +319,25 @@ class CallHandler:
 
     async def _end_call_gracefully(self) -> None:
         await self.end_call()
+
+    @staticmethod
+    def _looks_like_noise_or_greeting(transcript: str) -> bool:
+        """
+        True when the caller's utterance is ambient noise, a backchannel ("hmm"),
+        or a one-word greeting ("hello", "hi") rather than a real question.
+        These should NOT be sent to Groq because Groq responds with
+        "ആരാണ് സംസാരിക്കുന്നത്?" (who's speaking?) — a receptionist reflex
+        that makes the bot seem broken.
+        """
+        t = transcript.lower().strip()
+        _NOISE_WORDS = {
+            "hello", "hi", "hey", "hm", "hmm", "mm", "um", "uh", "ah", "oh",
+            "yeah", "yep", "yes", "no", "nope", "ok", "okay", "k",
+            "helo", "haloo", "allo", "oi", "eh", "aye", "a",
+            # Malayalam single-word backchannels that get STT'd
+            "hello?", "hi?",
+        }
+        return t in _NOISE_WORDS
 
     @staticmethod
     def _is_recording_announcement(transcript: str) -> bool:

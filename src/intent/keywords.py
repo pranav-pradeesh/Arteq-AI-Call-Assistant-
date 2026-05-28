@@ -373,6 +373,20 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("kannu vedana", 2.2),    # eye pain (bigram)
         ("pallu vedana", 2.2),    # tooth pain (bigram)
         ("neriv vedana", 2.2),    # chest pain (bigram)
+        # English symptom bigrams — trigger the structured handler which asks
+        # the right clarifying question for ambiguous cases (chest pain, etc.)
+        ("chest pain", 2.2),
+        ("stomach pain", 2.2),
+        ("stomach ache", 2.2),
+        ("knee pain", 2.2),
+        ("back pain", 2.2),
+        ("head pain", 2.2),
+        ("ear pain", 2.2),
+        ("eye pain", 2.2),
+        ("tooth pain", 2.2),
+        ("joint pain", 2.2),
+        ("body pain", 2.0),
+        ("chest ache", 2.0),
         # Specific conditions / symptoms
         ("migraine", 2.0),
         ("seizure", 1.8),
