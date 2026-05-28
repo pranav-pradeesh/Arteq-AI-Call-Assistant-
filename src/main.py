@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
+from fastapi.staticfiles import StaticFiles
+
 from src.config.settings import settings
 from src.db.queries import close_pool, get_pool
 from src.observability.logger import configure_logging, get_logger
@@ -117,40 +119,19 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     return Response(content=xml, media_type="text/xml")
 
 
-# ── Dashboard routes (optional, graceful skip if models missing) ──────────────
+# ── Admin Dashboard ───────────────────────────────────────────────────────────
+
+try:
+    from dashboard.routes.admin_api import router as admin_router
+    app.include_router(admin_router, prefix="/admin", tags=["admin"])
+    logger.info("dashboard_mounted", path="/admin")
+except Exception as e:
+    logger.error("dashboard_mount_failed", error=str(e))
+
+# ── Legacy dashboard routes (optional, graceful skip if models missing) ───────
 
 try:
     from dashboard.routes.auth import router as auth_router
-    app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
-except Exception:
-    pass
-
-try:
-    from dashboard.routes.hospitals import router as hospitals_router
-    app.include_router(hospitals_router, prefix="/api/v1/admin/hospitals", tags=["hospitals"])
-except Exception:
-    pass
-
-try:
-    from dashboard.routes.doctors import router as doctors_router
-    app.include_router(doctors_router, prefix="/api/v1/admin/doctors", tags=["doctors"])
-except Exception:
-    pass
-
-try:
-    from dashboard.routes.departments import router as departments_router
-    app.include_router(departments_router, prefix="/api/v1/admin/departments", tags=["departments"])
-except Exception:
-    pass
-
-try:
-    from dashboard.routes.config import router as config_router
-    app.include_router(config_router, prefix="/api/v1/admin/config", tags=["config"])
-except Exception:
-    pass
-
-try:
-    from dashboard.routes.analytics import router as analytics_router
-    app.include_router(analytics_router, prefix="/api/v1/admin/analytics", tags=["analytics"])
+    app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth-legacy"])
 except Exception:
     pass

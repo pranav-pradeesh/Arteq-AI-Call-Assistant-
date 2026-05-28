@@ -57,11 +57,13 @@ class CallHandler:
     def __init__(
         self,
         call_id: str,
-        tenant_slug: str,
+        hospital_id: Optional[str] = None,
         caller_number: Optional[str] = None,
+        # backward compat alias
+        tenant_slug: Optional[str] = None,
     ):
         self.call_id = call_id
-        self.tenant_slug = tenant_slug
+        self.hospital_id = hospital_id or settings.HOSPITAL_ID
         self.caller_number = caller_number
 
         self._ctx: Optional[HospitalContext] = None
@@ -78,11 +80,11 @@ class CallHandler:
 
     async def start_call(self) -> bytes:
         """Load hospital context and return greeting audio."""
-        bind_call_context(call_id=self.call_id, tenant_id=settings.HOSPITAL_ID)
+        bind_call_context(call_id=self.call_id, tenant_id=self.hospital_id)
         logger.info("call_started", call_id=self.call_id, caller=self.caller_number)
 
         try:
-            self._ctx = await get_or_load_hospital_context(settings.HOSPITAL_ID)
+            self._ctx = await get_or_load_hospital_context(self.hospital_id)
         except Exception as e:
             logger.error("hospital_context_load_failed", error=str(e))
             return await self._tts.synthesize(
@@ -267,11 +269,11 @@ class CallHandler:
         )
 
     async def _persist_call_log(self) -> None:
-        if not self._state or not self._ctx:
+        if not self._state:
             return
         try:
             await write_call_log(
-                hospital_id=self._ctx.hospital_id,
+                hospital_id=self._ctx.hospital_id if self._ctx else self.hospital_id,
                 call_id=self.call_id,
                 caller=self.caller_number or "",
                 started_at=datetime.fromtimestamp(

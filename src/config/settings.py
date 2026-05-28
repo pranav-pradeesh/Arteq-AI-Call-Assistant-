@@ -58,6 +58,11 @@ class Settings(BaseSettings):
     INTENT_CONFIDENCE_THRESHOLD: float = 0.50
     MAX_CLARIFICATION_ATTEMPTS: int = 2
 
+    # Dashboard auth
+    DASHBOARD_ADMIN_PASSWORD: str = "admin"
+    DASHBOARD_JWT_SECRET: str = "change-me-in-production"
+    DASHBOARD_JWT_EXPIRE_MINUTES: int = 720
+
     @property
     def is_dev(self) -> bool:
         return self.ENV == "dev"

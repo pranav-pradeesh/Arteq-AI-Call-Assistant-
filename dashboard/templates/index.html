@@ -3,151 +3,277 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Arteq Hospital Voice Agent — Dashboard</title>
+<title>Arteq Hospital Voice Agent</title>
 <script src="https://cdn.tailwindcss.com"></script>
 <script src="https://unpkg.com/alpinejs@3.x.x/dist/cdn.min.js" defer></script>
 <style>
-  [x-cloak] { display: none !important; }
-  body { font-family: 'Inter', 'Segoe UI', sans-serif; }
+  [x-cloak]{display:none!important}
+  body{font-family:'Inter','Segoe UI',sans-serif}
+  .input{@apply w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500}
+  .btn-primary{@apply bg-blue-600 text-white px-4 py-2 rounded-lg text-sm font-medium hover:bg-blue-700 transition-colors}
+  .btn-secondary{@apply bg-white border border-gray-300 text-gray-700 px-3 py-1.5 rounded-lg text-sm hover:bg-gray-50 transition-colors}
+  .btn-danger{@apply bg-red-50 text-red-600 border border-red-200 px-3 py-1.5 rounded-lg text-sm hover:bg-red-100 transition-colors}
+  .card{@apply bg-white rounded-xl border border-gray-200 p-5}
+  .label{@apply block text-sm font-medium text-gray-700 mb-1}
+  .badge-green{@apply px-2 py-0.5 rounded text-xs bg-green-100 text-green-700}
+  .badge-red{@apply px-2 py-0.5 rounded text-xs bg-red-100 text-red-700}
+  .badge-blue{@apply px-2 py-0.5 rounded text-xs bg-blue-100 text-blue-700}
+  .badge-yellow{@apply px-2 py-0.5 rounded text-xs bg-yellow-100 text-yellow-700}
+  th{@apply px-4 py-3 text-left text-xs font-semibold text-gray-500 uppercase tracking-wide bg-gray-50}
+  td{@apply px-4 py-3 text-sm}
 </style>
 </head>
-<body class="bg-gray-50 min-h-screen" x-data="dashboard()" x-init="init()">
+<body class="bg-gray-50 min-h-screen" x-data="app()" x-init="init()" x-cloak>
 
-<!-- Top Nav -->
-<nav class="bg-white border-b border-gray-200 px-6 py-3 flex items-center justify-between shadow-sm">
-  <div class="flex items-center gap-3">
-    <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
-      <span class="text-white text-xs font-bold">A</span>
+<!-- ── LOGIN ── -->
+<div x-show="!token" class="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100">
+  <div class="bg-white rounded-2xl shadow-lg p-8 w-full max-w-sm">
+    <div class="flex items-center gap-3 mb-8">
+      <div class="w-10 h-10 bg-blue-600 rounded-xl flex items-center justify-center">
+        <span class="text-white text-lg font-bold">A</span>
+      </div>
+      <div>
+        <div class="font-bold text-gray-900">Arteq Voice Agent</div>
+        <div class="text-xs text-gray-500">Hospital Management Dashboard</div>
+      </div>
     </div>
-    <span class="font-semibold text-gray-900">Arteq Voice Agent</span>
-    <span class="text-gray-400">|</span>
-    <span class="text-sm text-blue-600 font-medium" x-text="tenantName || 'Loading...'"></span>
+    <form @submit.prevent="login()">
+      <label class="label">Admin Password</label>
+      <input x-model="loginPassword" type="password" placeholder="Enter admin password"
+        class="input mb-4" :class="loginError ? 'border-red-400' : ''">
+      <div x-show="loginError" class="text-red-500 text-sm mb-3" x-text="loginError"></div>
+      <button type="submit" class="btn-primary w-full" :disabled="loginLoading">
+        <span x-show="!loginLoading">Sign In</span>
+        <span x-show="loginLoading">Signing in…</span>
+      </button>
+    </form>
   </div>
-  <div class="flex items-center gap-4">
-    <div class="flex items-center gap-2">
-      <span class="w-2 h-2 rounded-full" :class="systemOnline ? 'bg-green-500' : 'bg-red-500'"></span>
-      <span class="text-sm text-gray-600" x-text="systemOnline ? 'System Online' : 'System Offline'"></span>
-    </div>
-    <button @click="logout()" class="text-sm text-gray-500 hover:text-gray-700">Logout</button>
-  </div>
-</nav>
+</div>
 
-<!-- Main Layout -->
-<div class="flex min-h-screen">
+<!-- ── MAIN APP ── -->
+<div x-show="token" class="flex min-h-screen">
 
   <!-- Sidebar -->
-  <aside class="w-56 bg-white border-r border-gray-200 min-h-screen pt-4">
-    <nav class="px-3 space-y-1">
-      <template x-for="item in navItems" :key="item.id">
-        <button
-          @click="activeSection = item.id"
-          class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
-          :class="activeSection === item.id ? 'bg-blue-50 text-blue-700 font-medium' : 'text-gray-600 hover:bg-gray-50'"
-        >
-          <span x-text="item.icon"></span>
-          <span x-text="item.label"></span>
+  <aside class="w-60 bg-white border-r border-gray-200 flex flex-col" style="min-height:100vh">
+    <div class="px-5 py-4 border-b border-gray-200">
+      <div class="flex items-center gap-2">
+        <div class="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+          <span class="text-white text-sm font-bold">A</span>
+        </div>
+        <span class="font-semibold text-gray-900 text-sm">Arteq Admin</span>
+      </div>
+    </div>
+
+    <!-- Hospital picker -->
+    <div class="px-3 py-3 border-b border-gray-100">
+      <div class="text-xs font-semibold text-gray-400 uppercase mb-2 px-2">Hospital</div>
+      <template x-if="!currentHospital">
+        <button @click="tab='hospitals'" class="w-full text-left px-2 py-1.5 text-sm text-blue-600 hover:bg-blue-50 rounded-lg">
+          ← Choose hospital
         </button>
       </template>
+      <template x-if="currentHospital">
+        <div>
+          <div class="px-2 py-1.5 text-sm font-medium text-gray-900" x-text="currentHospital.name"></div>
+          <button @click="currentHospital=null;tab='hospitals'" class="px-2 text-xs text-gray-400 hover:text-gray-600">
+            ← Switch hospital
+          </button>
+        </div>
+      </template>
+    </div>
+
+    <!-- Nav items -->
+    <nav class="flex-1 px-3 py-3 space-y-0.5">
+      <template x-if="!currentHospital">
+        <button @click="tab='hospitals'" class="nav-item w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+          :class="tab==='hospitals'?'bg-blue-50 text-blue-700 font-medium':'text-gray-600 hover:bg-gray-50'">
+          🏥 All Hospitals
+        </button>
+      </template>
+      <template x-if="currentHospital">
+        <div class="space-y-0.5">
+          <template x-for="item in tabs" :key="item.id">
+            <button @click="tab=item.id" class="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+              :class="tab===item.id?'bg-blue-50 text-blue-700 font-medium':'text-gray-600 hover:bg-gray-50'">
+              <span x-text="item.icon"></span>
+              <span x-text="item.label"></span>
+            </button>
+          </template>
+        </div>
+      </template>
     </nav>
+
+    <div class="px-4 py-3 border-t border-gray-200">
+      <button @click="logout()" class="text-sm text-gray-400 hover:text-gray-600">Sign out</button>
+    </div>
   </aside>
 
-  <!-- Content -->
-  <main class="flex-1 p-6">
+  <!-- Main content -->
+  <main class="flex-1 p-6 overflow-auto">
 
-    <!-- ── Overview ── -->
-    <div x-show="activeSection === 'overview'" x-cloak>
-      <h1 class="text-xl font-semibold text-gray-900 mb-6">📊 Dashboard Overview</h1>
-      <div class="grid grid-cols-4 gap-4 mb-6">
-        <template x-for="stat in stats" :key="stat.label">
-          <div class="bg-white rounded-xl border border-gray-200 p-4">
-            <div class="text-2xl font-bold text-blue-600" x-text="stat.value"></div>
-            <div class="text-sm text-gray-500 mt-1" x-text="stat.label"></div>
+    <!-- Notification -->
+    <div x-show="notice.msg" x-transition
+      class="fixed top-4 right-4 z-50 px-4 py-3 rounded-xl shadow-lg text-sm font-medium"
+      :class="notice.type==='error'?'bg-red-50 text-red-700 border border-red-200':'bg-green-50 text-green-700 border border-green-200'"
+      x-text="notice.msg"></div>
+
+    <!-- ── HOSPITALS LIST ── -->
+    <div x-show="tab==='hospitals'">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">All Hospitals</h1>
+        <button @click="openHospitalModal()" class="btn-primary">+ Add Hospital</button>
+      </div>
+      <div x-show="hospitals.length===0" class="card text-center py-12 text-gray-400">
+        No hospitals found. Add your first hospital to get started.
+      </div>
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <template x-for="h in hospitals" :key="h.id">
+          <div class="card hover:border-blue-300 cursor-pointer transition-colors" @click="selectHospital(h)">
+            <div class="flex items-start justify-between mb-3">
+              <div>
+                <div class="font-semibold text-gray-900" x-text="h.name"></div>
+                <div class="text-sm text-gray-500" x-text="h.name_ml"></div>
+              </div>
+              <span :class="h.active?'badge-green':'badge-red'" x-text="h.active?'Active':'Inactive'"></span>
+            </div>
+            <div class="text-xs text-gray-400 mb-2" x-text="h.phone || 'No phone'"></div>
+            <div class="text-xs text-gray-400" x-text="h.address ? h.address.slice(0,60) : 'No address'"></div>
+            <div class="mt-3 pt-3 border-t border-gray-100 flex gap-2">
+              <button @click.stop="selectHospital(h)" class="btn-primary text-xs py-1 px-3">Manage</button>
+              <button @click.stop="openHospitalModal(h)" class="btn-secondary text-xs py-1 px-3">Edit</button>
+            </div>
           </div>
         </template>
       </div>
+    </div>
 
-      <div class="bg-white rounded-xl border border-gray-200 p-4">
-        <h2 class="font-medium text-gray-900 mb-3">Recent Calls</h2>
-        <div x-show="calls.length === 0" class="text-sm text-gray-400 py-4 text-center">No calls yet</div>
-        <div class="space-y-2">
-          <template x-for="call in calls.slice(0, 10)" :key="call.call_id">
-            <div class="flex items-center justify-between py-2 border-b border-gray-50 text-sm">
-              <div class="flex items-center gap-3">
-                <span class="px-2 py-0.5 rounded text-xs font-medium"
-                  :class="{
-                    'bg-green-100 text-green-700': call.outcome === 'answered',
-                    'bg-yellow-100 text-yellow-700': call.outcome === 'transferred',
-                    'bg-red-100 text-red-700': call.outcome === 'dropped',
-                    'bg-gray-100 text-gray-700': !call.outcome
-                  }"
-                  x-text="call.outcome || 'unknown'"></span>
-                <span class="text-gray-600" x-text="call.intent || '-'"></span>
-              </div>
-              <div class="flex items-center gap-4 text-gray-400">
-                <span x-text="call.total_latency_ms ? call.total_latency_ms + 'ms' : '-'"></span>
-                <span x-text="call.clarifications + ' clarif.'"></span>
-                <span x-text="call.start ? new Date(call.start).toLocaleTimeString() : ''"></span>
-              </div>
+    <!-- ── OVERVIEW ── -->
+    <div x-show="tab==='overview' && currentHospital">
+      <h1 class="text-xl font-semibold text-gray-900 mb-6">Overview — <span x-text="currentHospital?.name"></span></h1>
+      <div class="grid grid-cols-4 gap-4 mb-6">
+        <div class="card text-center">
+          <div class="text-2xl font-bold text-blue-600" x-text="stats.total_calls ?? '—'"></div>
+          <div class="text-xs text-gray-500 mt-1">Calls (7d)</div>
+        </div>
+        <div class="card text-center">
+          <div class="text-2xl font-bold text-blue-600" x-text="stats.avg_latency_ms ? stats.avg_latency_ms+'ms' : '—'"></div>
+          <div class="text-xs text-gray-500 mt-1">Avg Latency</div>
+        </div>
+        <div class="card text-center">
+          <div class="text-2xl font-bold text-blue-600" x-text="stats.transfers ?? '—'"></div>
+          <div class="text-xs text-gray-500 mt-1">Transfers</div>
+        </div>
+        <div class="card text-center">
+          <div class="text-2xl font-bold text-blue-600" x-text="stats.avg_turns ?? '—'"></div>
+          <div class="text-xs text-gray-500 mt-1">Avg Turns/Call</div>
+        </div>
+      </div>
+      <div class="card mb-4">
+        <div class="flex justify-between items-center mb-3">
+          <h2 class="font-medium text-gray-900">WebSocket Endpoint</h2>
+          <button @click="copyWsUrl()" class="btn-secondary text-xs">Copy</button>
+        </div>
+        <code class="text-sm text-blue-600 break-all" x-text="wsUrl"></code>
+      </div>
+      <div class="card">
+        <div class="flex items-center justify-between mb-3">
+          <h2 class="font-medium text-gray-900">Recent Calls</h2>
+          <button @click="loadCalls()" class="btn-secondary text-xs">Refresh</button>
+        </div>
+        <div x-show="calls.length===0" class="text-sm text-gray-400 py-4 text-center">No calls yet</div>
+        <table x-show="calls.length>0" class="w-full">
+          <thead><tr>
+            <th>Outcome</th><th>Intents</th><th>Turns</th><th>Latency</th><th>Time</th>
+          </tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <template x-for="c in calls.slice(0,20)" :key="c.call_id">
+              <tr class="hover:bg-gray-50">
+                <td>
+                  <span :class="{
+                    'badge-green': c.outcome==='answered',
+                    'badge-yellow': c.outcome==='transferred',
+                    'badge-red': c.outcome==='dropped',
+                    'badge-blue': !c.outcome||c.outcome==='unknown'
+                  }" x-text="c.outcome||'unknown'"></span>
+                </td>
+                <td class="text-gray-500" x-text="(c.intents||[]).join(', ')||'—'"></td>
+                <td x-text="c.total_turns"></td>
+                <td x-text="c.latency_avg_ms ? c.latency_avg_ms+'ms' : '—'"></td>
+                <td class="text-gray-400" x-text="c.started_at ? new Date(c.started_at).toLocaleString('en-IN',{hour:'2-digit',minute:'2-digit',day:'2-digit',month:'short'}) : ''"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── SETTINGS ── -->
+    <div x-show="tab==='settings' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Hospital Settings</h1>
+        <button @click="saveHospital()" class="btn-primary">Save Changes</button>
+      </div>
+      <div class="grid grid-cols-2 gap-6 max-w-4xl">
+        <div class="card col-span-2 md:col-span-1">
+          <h2 class="font-medium text-gray-900 mb-4">Basic Info</h2>
+          <div class="space-y-3">
+            <div><label class="label">Hospital Name</label><input x-model="hospitalForm.name" class="input" placeholder="Hospital name"></div>
+            <div><label class="label">Name (Malayalam)</label><input x-model="hospitalForm.name_ml" class="input" placeholder="ആശുപത്രി പേര്"></div>
+            <div><label class="label">Phone Number</label><input x-model="hospitalForm.phone" class="input" placeholder="+91 XXXXXXXXXX"></div>
+            <div><label class="label">Address</label><textarea x-model="hospitalForm.address" rows="3" class="input" placeholder="Full address…"></textarea></div>
+            <div class="flex items-center gap-2">
+              <input type="checkbox" x-model="hospitalForm.active" class="rounded">
+              <label class="text-sm text-gray-700">Active (accepting calls)</label>
             </div>
-          </template>
+          </div>
+        </div>
+        <div class="card col-span-2 md:col-span-1">
+          <h2 class="font-medium text-gray-900 mb-4">Opening Hours</h2>
+          <div class="space-y-2">
+            <template x-for="day in ['mon','tue','wed','thu','fri','sat','sun']" :key="day">
+              <div class="flex items-center gap-3">
+                <div class="w-10 text-xs font-medium text-gray-500 uppercase" x-text="day"></div>
+                <input x-model="hospitalForm.hours[day] && hospitalForm.hours[day][0]"
+                  @change="setHour(day,0,$event.target.value)"
+                  type="time" class="input w-28 text-sm">
+                <span class="text-gray-400">–</span>
+                <input x-model="hospitalForm.hours[day] && hospitalForm.hours[day][1]"
+                  @change="setHour(day,1,$event.target.value)"
+                  type="time" class="input w-28 text-sm">
+                <button @click="clearDay(day)" class="text-gray-300 hover:text-red-400 text-xs">✕</button>
+              </div>
+            </template>
+          </div>
+          <p class="text-xs text-gray-400 mt-3">Leave blank to mark as closed that day.</p>
         </div>
       </div>
     </div>
 
-    <!-- ── Hospital Info ── -->
-    <div x-show="activeSection === 'hospital'" x-cloak>
-      <h1 class="text-xl font-semibold text-gray-900 mb-6">🏥 Hospital Settings</h1>
-      <div class="bg-white rounded-xl border border-gray-200 p-6 max-w-2xl">
-        <div class="space-y-4">
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Hospital Name</label>
-            <input x-model="hospitalProfile.name" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Hospital name">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Transfer Number (for human handoff)</label>
-            <input x-model="hospitalProfile.transfer_number" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="+91 XXXXXXXXXX">
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Greeting Message (Malayalam)</label>
-            <textarea x-model="hospitalProfile.greeting_text" rows="3" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Custom Malayalam greeting..."></textarea>
-          </div>
-          <div>
-            <label class="block text-sm font-medium text-gray-700 mb-1">Fallback Message</label>
-            <textarea x-model="hospitalProfile.fallback_text" rows="2" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm" placeholder="Message when system can't answer..."></textarea>
-          </div>
-          <button @click="saveHospitalProfile()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
-            Save Changes
-          </button>
-          <div x-show="saveMsg" class="text-green-600 text-sm" x-text="saveMsg"></div>
-        </div>
-      </div>
-    </div>
-
-    <!-- ── Departments ── -->
-    <div x-show="activeSection === 'departments'" x-cloak>
+    <!-- ── DEPARTMENTS ── -->
+    <div x-show="tab==='departments' && currentHospital">
       <div class="flex items-center justify-between mb-6">
-        <h1 class="text-xl font-semibold text-gray-900">🏗️ Departments</h1>
-        <button @click="showAddDept = true" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-blue-700">+ Add Department</button>
+        <h1 class="text-xl font-semibold text-gray-900">Departments</h1>
+        <button @click="openDeptModal()" class="btn-primary">+ Add Department</button>
       </div>
-      <div class="bg-white rounded-xl border border-gray-200">
-        <table class="w-full text-sm">
-          <thead class="bg-gray-50 border-b border-gray-200">
-            <tr>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Department</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Floor</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Aliases</th>
-            </tr>
-          </thead>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr>
+            <th>Name</th><th>Malayalam</th><th>Floor</th><th>Location Hint</th><th>Ext</th><th>Status</th><th></th>
+          </tr></thead>
           <tbody class="divide-y divide-gray-100">
-            <template x-for="dept in departments" :key="dept.id">
+            <tr x-show="departments.length===0"><td colspan="7" class="text-center py-8 text-gray-400">No departments added yet.</td></tr>
+            <template x-for="d in departments" :key="d.id">
               <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 font-medium text-gray-900" x-text="dept.name"></td>
-                <td class="px-4 py-3 text-gray-500" x-text="dept.floor_info || '-'"></td>
-                <td class="px-4 py-3">
-                  <span class="px-2 py-0.5 rounded text-xs" :class="dept.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" x-text="dept.is_active ? 'Active' : 'Inactive'"></span>
+                <td class="font-medium text-gray-900" x-text="d.name"></td>
+                <td class="text-gray-500" x-text="d.name_ml||'—'"></td>
+                <td x-text="d.floor||'—'"></td>
+                <td class="text-gray-400 max-w-xs truncate" x-text="d.location_hint||'—'"></td>
+                <td x-text="d.phone_ext||'—'"></td>
+                <td><span :class="d.active?'badge-green':'badge-red'" x-text="d.active?'Active':'Inactive'"></span></td>
+                <td class="flex gap-2 py-2">
+                  <button @click="openDeptModal(d)" class="btn-secondary text-xs">Edit</button>
+                  <button @click="deleteDept(d)" class="btn-danger text-xs">Remove</button>
                 </td>
-                <td class="px-4 py-3 text-gray-400 text-xs" x-text="(dept.aliases || []).slice(0, 3).join(', ')"></td>
               </tr>
             </template>
           </tbody>
@@ -155,31 +281,37 @@
       </div>
     </div>
 
-    <!-- ── Doctors ── -->
-    <div x-show="activeSection === 'doctors'" x-cloak>
+    <!-- ── DOCTORS ── -->
+    <div x-show="tab==='doctors' && currentHospital">
       <div class="flex items-center justify-between mb-6">
-        <h1 class="text-xl font-semibold text-gray-900">👨‍⚕️ Doctors</h1>
-        <button @click="showAddDoctor = true" class="bg-blue-600 text-white px-3 py-1.5 rounded-lg text-sm hover:bg-blue-700">+ Add Doctor</button>
+        <h1 class="text-xl font-semibold text-gray-900">Doctors</h1>
+        <button @click="openDoctorModal()" class="btn-primary">+ Add Doctor</button>
       </div>
-      <div class="bg-white rounded-xl border border-gray-200">
-        <table class="w-full text-sm">
-          <thead class="bg-gray-50 border-b border-gray-200">
-            <tr>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Specialization</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
-              <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Visiting</th>
-            </tr>
-          </thead>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr>
+            <th>Name</th><th>Specialty</th><th>Department</th><th>Schedule</th><th>Status</th><th></th>
+          </tr></thead>
           <tbody class="divide-y divide-gray-100">
-            <template x-for="doc in doctors" :key="doc.id">
+            <tr x-show="doctors.length===0"><td colspan="6" class="text-center py-8 text-gray-400">No doctors added yet.</td></tr>
+            <template x-for="d in doctors" :key="d.id">
               <tr class="hover:bg-gray-50">
-                <td class="px-4 py-3 font-medium text-gray-900" x-text="doc.name"></td>
-                <td class="px-4 py-3 text-gray-500" x-text="doc.specialization || '-'"></td>
-                <td class="px-4 py-3">
-                  <span class="px-2 py-0.5 rounded text-xs" :class="doc.is_active ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'" x-text="doc.is_active ? 'Active' : 'Inactive'"></span>
+                <td>
+                  <div class="font-medium text-gray-900" x-text="d.name"></div>
+                  <div class="text-xs text-gray-400" x-text="d.name_ml"></div>
                 </td>
-                <td class="px-4 py-3 text-gray-400" x-text="doc.is_visiting ? 'Visiting' : 'Regular'"></td>
+                <td class="text-gray-500" x-text="d.specialty||'—'"></td>
+                <td class="text-gray-500" x-text="d.dept_name||'—'"></td>
+                <td>
+                  <button @click="openScheduleModal(d)" class="badge-blue cursor-pointer hover:bg-blue-200">
+                    <span x-text="(d.schedules||[]).filter(s=>s.active).length"></span> slot(s)
+                  </button>
+                </td>
+                <td><span :class="d.active?'badge-green':'badge-red'" x-text="d.active?'Active':'Inactive'"></span></td>
+                <td class="flex gap-2 py-2">
+                  <button @click="openDoctorModal(d)" class="btn-secondary text-xs">Edit</button>
+                  <button @click="deleteDoctor(d)" class="btn-danger text-xs">Remove</button>
+                </td>
               </tr>
             </template>
           </tbody>
@@ -187,188 +319,593 @@
       </div>
     </div>
 
-    <!-- ── Holidays ── -->
-    <div x-show="activeSection === 'holidays'" x-cloak>
-      <h1 class="text-xl font-semibold text-gray-900 mb-6">📅 Holiday & Closing Days</h1>
-      <div class="bg-white rounded-xl border border-gray-200 p-6 max-w-lg">
-        <h2 class="font-medium text-gray-900 mb-4">Add Holiday/Closure</h2>
-        <div class="space-y-3">
-          <input x-model="newHoliday.date" type="date" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-          <input x-model="newHoliday.reason" type="text" placeholder="Reason (e.g., Onam)" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm">
-          <div class="flex items-center gap-3">
-            <label class="flex items-center gap-2 text-sm">
-              <input x-model="newHoliday.is_closed" type="checkbox" class="rounded">
-              <span>Fully Closed</span>
-            </label>
-            <label class="flex items-center gap-2 text-sm">
-              <input x-model="newHoliday.emergency_only" type="checkbox" class="rounded">
-              <span>Emergency Only</span>
-            </label>
-          </div>
-          <button @click="addHoliday()" class="bg-blue-600 text-white px-4 py-2 rounded-lg text-sm hover:bg-blue-700">
-            Add Holiday
-          </button>
-        </div>
+    <!-- ── BILLING ── -->
+    <div x-show="tab==='billing' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Billing / Fees</h1>
+        <button @click="openBillingModal()" class="btn-primary">+ Add Item</button>
+      </div>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr><th>Item Key</th><th>Malayalam Label</th><th>Min Fee (₹)</th><th>Max Fee (₹)</th><th>Notes</th><th>Status</th><th></th></tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr x-show="billing.length===0"><td colspan="7" class="text-center py-8 text-gray-400">No billing items added yet.</td></tr>
+            <template x-for="b in billing" :key="b.id">
+              <tr class="hover:bg-gray-50">
+                <td class="font-mono text-xs text-gray-700" x-text="b.item"></td>
+                <td x-text="b.item_ml||'—'"></td>
+                <td x-text="b.price_min!=null ? '₹'+b.price_min : '—'"></td>
+                <td x-text="b.price_max!=null ? '₹'+b.price_max : '—'"></td>
+                <td class="text-gray-400 text-xs max-w-xs truncate" x-text="b.notes||'—'"></td>
+                <td><span :class="b.active?'badge-green':'badge-red'" x-text="b.active?'Active':'Inactive'"></span></td>
+                <td class="flex gap-2 py-2">
+                  <button @click="openBillingModal(b)" class="btn-secondary text-xs">Edit</button>
+                  <button @click="deleteBilling(b)" class="btn-danger text-xs">Remove</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </div>
 
-    <!-- ── System Status ── -->
-    <div x-show="activeSection === 'system'" x-cloak>
-      <h1 class="text-xl font-semibold text-gray-900 mb-6">⚙️ System Status</h1>
-      <div class="grid grid-cols-2 gap-4 max-w-2xl">
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-          <div class="text-sm font-medium text-gray-700 mb-2">STT Provider</div>
-          <div class="flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full bg-green-500"></span>
-            <span class="text-sm">Sarvam AI Saarika (Primary)</span>
-          </div>
-          <div class="text-xs text-gray-400 mt-1">Malayalam-optimized, Low-latency</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-          <div class="text-sm font-medium text-gray-700 mb-2">TTS Provider</div>
-          <div class="flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full bg-green-500"></span>
-            <span class="text-sm">Sarvam AI Bulbul (Primary)</span>
-          </div>
-          <div class="text-xs text-gray-400 mt-1">Natural Malayalam voice</div>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-          <div class="text-sm font-medium text-gray-700 mb-2">WebSocket Endpoint</div>
-          <code class="text-xs text-blue-600 break-all" x-text="wsEndpoint"></code>
-        </div>
-        <div class="bg-white rounded-xl border border-gray-200 p-4">
-          <div class="text-sm font-medium text-gray-700 mb-2">Cache Status</div>
-          <div class="flex items-center gap-2">
-            <span class="w-2 h-2 rounded-full" :class="systemOnline ? 'bg-green-500' : 'bg-red-500'"></span>
-            <span class="text-sm" x-text="systemOnline ? 'Redis Connected' : 'Redis Error'"></span>
-          </div>
-        </div>
+    <!-- ── EMERGENCY ── -->
+    <div x-show="tab==='emergency' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Emergency Contacts</h1>
+        <button @click="openEmergencyModal()" class="btn-primary">+ Add Contact</button>
       </div>
-      <div class="mt-4">
-        <button @click="clearCache()" class="bg-yellow-500 text-white px-4 py-2 rounded-lg text-sm hover:bg-yellow-600">
-          🔄 Clear Tenant Cache (force config reload)
-        </button>
-        <div x-show="cacheCleared" class="text-green-600 text-sm mt-2">Cache cleared. Next call will reload from database.</div>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr><th>Label</th><th>Malayalam</th><th>Phone</th><th>Priority</th><th>Status</th><th></th></tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr x-show="emergency.length===0"><td colspan="6" class="text-center py-8 text-gray-400">No emergency contacts added yet.</td></tr>
+            <template x-for="e in emergency" :key="e.id">
+              <tr class="hover:bg-gray-50">
+                <td class="font-medium text-gray-900" x-text="e.label"></td>
+                <td class="text-gray-500" x-text="e.label_ml||'—'"></td>
+                <td class="font-mono" x-text="e.phone"></td>
+                <td x-text="e.priority"></td>
+                <td><span :class="e.active?'badge-green':'badge-red'" x-text="e.active?'Active':'Inactive'"></span></td>
+                <td class="flex gap-2 py-2">
+                  <button @click="openEmergencyModal(e)" class="btn-secondary text-xs">Edit</button>
+                  <button @click="deleteEmergency(e)" class="btn-danger text-xs">Remove</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── FAQs ── -->
+    <div x-show="tab==='faqs' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">FAQs</h1>
+        <button @click="openFaqModal()" class="btn-primary">+ Add FAQ</button>
+      </div>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr><th>Category</th><th>Question</th><th>Tags</th><th>Priority</th><th>Status</th><th></th></tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr x-show="faqs.length===0"><td colspan="6" class="text-center py-8 text-gray-400">No FAQs added yet.</td></tr>
+            <template x-for="f in faqs" :key="f.id">
+              <tr class="hover:bg-gray-50">
+                <td class="badge-blue text-xs" x-text="f.category||'general'"></td>
+                <td class="max-w-sm"><div class="font-medium text-gray-900" x-text="f.question"></div><div class="text-xs text-gray-400 truncate" x-text="f.answer"></div></td>
+                <td class="text-xs text-gray-400" x-text="(f.tags||[]).join(', ')||'—'"></td>
+                <td x-text="f.priority"></td>
+                <td><span :class="f.active?'badge-green':'badge-red'" x-text="f.active?'Active':'Inactive'"></span></td>
+                <td class="flex gap-2 py-2">
+                  <button @click="openFaqModal(f)" class="btn-secondary text-xs">Edit</button>
+                  <button @click="deleteFaq(f)" class="btn-danger text-xs">Remove</button>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
       </div>
     </div>
 
   </main>
 </div>
 
-<script>
-function dashboard() {
-  return {
-    activeSection: 'overview',
-    tenantName: 'Mother Hospital Thrissur',
-    tenantSlug: 'mother-hospital-thrissur',
-    systemOnline: true,
-    token: localStorage.getItem('arteq_token'),
-    stats: [
-      { label: 'Total Calls (7d)', value: '—' },
-      { label: 'Avg Latency', value: '—ms' },
-      { label: 'Transfers', value: '—' },
-      { label: 'Clarifications/Call', value: '—' },
-    ],
-    calls: [],
-    departments: [],
-    doctors: [],
-    hospitalProfile: {},
-    newHoliday: { date: '', reason: '', is_closed: true, emergency_only: false },
-    saveMsg: '',
-    cacheCleared: false,
-    wsEndpoint: '',
-    navItems: [
-      { id: 'overview', icon: '📊', label: 'Overview' },
-      { id: 'hospital', icon: '🏥', label: 'Hospital Info' },
-      { id: 'departments', icon: '🏗️', label: 'Departments' },
-      { id: 'doctors', icon: '👨‍⚕️', label: 'Doctors' },
-      { id: 'holidays', icon: '📅', label: 'Holidays' },
-      { id: 'system', icon: '⚙️', label: 'System' },
-    ],
+<!-- ── MODALS ── -->
 
-    async init() {
-      this.wsEndpoint = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws/call/${this.tenantSlug}`;
-      await this.loadHealth();
-      await this.loadAnalytics();
-      await this.loadRecentCalls();
+<!-- Hospital Modal -->
+<div x-show="modals.hospital" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.hospital=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.hospital.id ? 'Edit Hospital' : 'New Hospital'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Name *</label><input x-model="forms.hospital.name" class="input" placeholder="Hospital name"></div>
+      <div><label class="label">Name (Malayalam)</label><input x-model="forms.hospital.name_ml" class="input" placeholder="ആശുപത്രി"></div>
+      <div><label class="label">Phone</label><input x-model="forms.hospital.phone" class="input" placeholder="+91 XXXXXXXXXX"></div>
+      <div><label class="label">Address</label><textarea x-model="forms.hospital.address" rows="2" class="input" placeholder="Address"></textarea></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.hospital=false" class="btn-secondary">Cancel</button>
+      <button @click="saveHospitalModal()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Department Modal -->
+<div x-show="modals.dept" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.dept=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.dept.id ? 'Edit Department' : 'New Department'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Name *</label><input x-model="forms.dept.name" class="input" placeholder="Cardiology"></div>
+      <div><label class="label">Name (Malayalam)</label><input x-model="forms.dept.name_ml" class="input" placeholder="ഹൃദ്രോഗം"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Floor</label><input x-model="forms.dept.floor" class="input" placeholder="2nd Floor"></div>
+        <div><label class="label">Phone Ext</label><input x-model="forms.dept.phone_ext" class="input" placeholder="201"></div>
+      </div>
+      <div><label class="label">Location Hint</label><input x-model="forms.dept.location_hint" class="input" placeholder="Near main lift"></div>
+      <div class="flex items-center gap-2"><input type="checkbox" x-model="forms.dept.active" class="rounded"><label class="text-sm">Active</label></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.dept=false" class="btn-secondary">Cancel</button>
+      <button @click="saveDept()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Doctor Modal -->
+<div x-show="modals.doctor" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.doctor=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.doctor.id ? 'Edit Doctor' : 'New Doctor'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Name *</label><input x-model="forms.doctor.name" class="input" placeholder="Dr. Ramesh Kumar"></div>
+      <div><label class="label">Name (Malayalam)</label><input x-model="forms.doctor.name_ml" class="input" placeholder="ഡോ. രമേഷ് കുമാർ"></div>
+      <div><label class="label">Specialty</label><input x-model="forms.doctor.specialty" class="input" placeholder="Cardiologist"></div>
+      <div><label class="label">Qualifications</label><input x-model="forms.doctor.qualifications" class="input" placeholder="MBBS, MD"></div>
+      <div>
+        <label class="label">Department</label>
+        <select x-model="forms.doctor.dept_id" class="input">
+          <option value="">— Select department —</option>
+          <template x-for="d in departments.filter(d=>d.active)" :key="d.id">
+            <option :value="d.id" x-text="d.name"></option>
+          </template>
+        </select>
+      </div>
+      <div class="flex items-center gap-2"><input type="checkbox" x-model="forms.doctor.active" class="rounded"><label class="text-sm">Active</label></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.doctor=false" class="btn-secondary">Cancel</button>
+      <button @click="saveDoctor()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Schedule Modal -->
+<div x-show="modals.schedule" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.schedule=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-1">Schedule — <span x-text="scheduleDoctor?.name"></span></h2>
+    <p class="text-sm text-gray-400 mb-4">Add or remove weekly availability slots.</p>
+    <div class="space-y-2 mb-4 max-h-64 overflow-y-auto">
+      <template x-for="s in (scheduleDoctor?.schedules||[]).filter(s=>s.active)" :key="s.id">
+        <div class="flex items-center justify-between bg-gray-50 rounded-lg px-3 py-2">
+          <span class="text-sm font-medium" x-text="dowFull[s.dow]"></span>
+          <span class="text-sm" x-text="s.start+' – '+s.end"></span>
+          <span class="text-xs text-gray-400" x-text="s.room||''"></span>
+          <button @click="deleteSchedule(s)" class="text-red-400 hover:text-red-600 text-xs ml-3">✕ Remove</button>
+        </div>
+      </template>
+      <div x-show="!(scheduleDoctor?.schedules||[]).filter(s=>s.active).length" class="text-sm text-gray-400 py-2 text-center">No slots yet.</div>
+    </div>
+    <div class="border-t border-gray-100 pt-4">
+      <h3 class="text-sm font-medium text-gray-700 mb-3">Add Slot</h3>
+      <div class="grid grid-cols-4 gap-2">
+        <div>
+          <label class="label text-xs">Day</label>
+          <select x-model.number="newSlot.dow" class="input text-sm">
+            <template x-for="(name,i) in ['Sun','Mon','Tue','Wed','Thu','Fri','Sat']" :key="i">
+              <option :value="i" x-text="name"></option>
+            </template>
+          </select>
+        </div>
+        <div>
+          <label class="label text-xs">Start</label>
+          <input type="time" x-model="newSlot.start_time" class="input text-sm">
+        </div>
+        <div>
+          <label class="label text-xs">End</label>
+          <input type="time" x-model="newSlot.end_time" class="input text-sm">
+        </div>
+        <div>
+          <label class="label text-xs">Room</label>
+          <input x-model="newSlot.room" class="input text-sm" placeholder="OP-1">
+        </div>
+      </div>
+      <button @click="addSchedule()" class="btn-primary mt-3 text-sm">Add Slot</button>
+    </div>
+    <div class="flex justify-end mt-4">
+      <button @click="modals.schedule=false" class="btn-secondary">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- Billing Modal -->
+<div x-show="modals.billing" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.billing=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.billing.id ? 'Edit Billing Item' : 'New Billing Item'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Item Key *</label><input x-model="forms.billing.item" class="input font-mono" placeholder="consultation:cardiology"><p class="text-xs text-gray-400 mt-1">Format: consultation:department</p></div>
+      <div><label class="label">Malayalam Label</label><input x-model="forms.billing.item_ml" class="input" placeholder="ഹൃദ്രോഗ consultation"></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Min Fee (₹)</label><input type="number" x-model.number="forms.billing.price_min" class="input" placeholder="300"></div>
+        <div><label class="label">Max Fee (₹)</label><input type="number" x-model.number="forms.billing.price_max" class="input" placeholder="500"></div>
+      </div>
+      <div><label class="label">Notes</label><input x-model="forms.billing.notes" class="input" placeholder="Includes ECG"></div>
+      <div class="flex items-center gap-2"><input type="checkbox" x-model="forms.billing.active" class="rounded"><label class="text-sm">Active</label></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.billing=false" class="btn-secondary">Cancel</button>
+      <button @click="saveBilling()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- Emergency Modal -->
+<div x-show="modals.emergency" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.emergency=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.emergency.id ? 'Edit Emergency Contact' : 'New Emergency Contact'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Label *</label><input x-model="forms.emergency.label" class="input" placeholder="Emergency Ward"></div>
+      <div><label class="label">Label (Malayalam)</label><input x-model="forms.emergency.label_ml" class="input" placeholder="ഇമർജൻസി"></div>
+      <div><label class="label">Phone *</label><input x-model="forms.emergency.phone" class="input" placeholder="+91 XXXXXXXXXX"></div>
+      <div><label class="label">Priority (higher = shown first)</label><input type="number" x-model.number="forms.emergency.priority" class="input" placeholder="1"></div>
+      <div class="flex items-center gap-2"><input type="checkbox" x-model="forms.emergency.active" class="rounded"><label class="text-sm">Active</label></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.emergency=false" class="btn-secondary">Cancel</button>
+      <button @click="saveEmergency()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- FAQ Modal -->
+<div x-show="modals.faq" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.faq=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-lg mx-4" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="forms.faq.id ? 'Edit FAQ' : 'New FAQ'"></h2>
+    <div class="space-y-3">
+      <div><label class="label">Category</label><input x-model="forms.faq.category" class="input" placeholder="timing / fees / general"></div>
+      <div><label class="label">Question *</label><input x-model="forms.faq.question" class="input" placeholder="What are the OP timings?"></div>
+      <div><label class="label">Answer (English) *</label><textarea x-model="forms.faq.answer" rows="3" class="input" placeholder="OP is open 8AM–8PM Mon–Sat."></textarea></div>
+      <div><label class="label">Answer (Malayalam)</label><textarea x-model="forms.faq.answer_ml" rows="2" class="input" placeholder="OP 8 AM മുതൽ 8 PM വരെ…"></textarea></div>
+      <div><label class="label">Tags (comma separated)</label><input x-model="forms.faq.tagsStr" class="input" placeholder="timing,op,hours"></div>
+      <div><label class="label">Priority (higher = returned first)</label><input type="number" x-model.number="forms.faq.priority" class="input" placeholder="0"></div>
+      <div class="flex items-center gap-2"><input type="checkbox" x-model="forms.faq.active" class="rounded"><label class="text-sm">Active</label></div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.faq=false" class="btn-secondary">Cancel</button>
+      <button @click="saveFaq()" class="btn-primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const BASE = '/admin';
+const DOW_FULL = {0:'Sunday',1:'Monday',2:'Tuesday',3:'Wednesday',4:'Thursday',5:'Friday',6:'Saturday'};
+
+function app() {
+  return {
+    token: localStorage.getItem('arteq_token') || '',
+    loginPassword: '', loginError: '', loginLoading: false,
+    tab: 'hospitals',
+    hospitals: [],
+    currentHospital: null,
+    departments: [], doctors: [], billing: [], emergency: [], faqs: [],
+    calls: [], stats: {},
+    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{} },
+    modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
+    forms: {
+      hospital: {}, dept: {}, doctor: {}, billing: {}, emergency: {}, faq: {}
+    },
+    scheduleDoctor: null,
+    newSlot: { dow:1, start_time:'09:00', end_time:'17:00', room:'' },
+    notice: { msg:'', type:'success', _t:null },
+    dowFull: DOW_FULL,
+    tabs: [
+      { id:'overview', icon:'📊', label:'Overview' },
+      { id:'settings', icon:'⚙️', label:'Settings' },
+      { id:'departments', icon:'🏗️', label:'Departments' },
+      { id:'doctors', icon:'👨‍⚕️', label:'Doctors' },
+      { id:'billing', icon:'💳', label:'Billing' },
+      { id:'emergency', icon:'🚨', label:'Emergency' },
+      { id:'faqs', icon:'❓', label:'FAQs' },
+    ],
+    get wsUrl() {
+      if (!this.currentHospital) return '';
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      return `${proto}://${location.host}/ws/call/${this.currentHospital.id}`;
     },
 
-    async apiFetch(path, options = {}) {
-      const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
-      if (this.token) headers['Authorization'] = `Bearer ${this.token}`;
-      const r = await fetch(path, { ...options, headers });
-      if (!r.ok) throw new Error(`API error: ${r.status}`);
+    async init() {
+      if (this.token) await this.loadHospitals();
+    },
+
+    async api(path, opts={}) {
+      const h = { 'Content-Type':'application/json' };
+      if (this.token) h['Authorization'] = 'Bearer ' + this.token;
+      const r = await fetch(BASE + path, { ...opts, headers: { ...h, ...(opts.headers||{}) } });
+      if (r.status === 401) { this.token=''; localStorage.removeItem('arteq_token'); return null; }
+      if (!r.ok) { const t = await r.text(); throw new Error(t||r.status); }
       return r.json();
     },
 
-    async loadHealth() {
-      try {
-        const h = await this.apiFetch('/api/v1/health');
-        this.systemOnline = h.status === 'healthy' || h.status === 'degraded';
-      } catch { this.systemOnline = false; }
+    notify(msg, type='success') {
+      this.notice = { msg, type };
+      clearTimeout(this.notice._t);
+      this.notice._t = setTimeout(() => this.notice.msg = '', 3500);
     },
 
-    async loadAnalytics() {
+    async login() {
+      this.loginLoading = true; this.loginError = '';
       try {
-        const data = await this.apiFetch(`/api/v1/admin/analytics/${this.tenantSlug}/summary?days=7`);
-        this.stats = [
-          { label: 'Total Calls (7d)', value: data.total_calls || '0' },
-          { label: 'Avg Latency', value: (data.avg_latency_ms || 0).toFixed(0) + 'ms' },
-          { label: 'Transfers', value: data.total_transfers || '0' },
-          { label: 'Clarifications/Call', value: data.avg_clarifications_per_call || '0.0' },
-        ];
-      } catch { /* analytics not critical */ }
-    },
-
-    async loadRecentCalls() {
-      try {
-        this.calls = await this.apiFetch(`/api/v1/admin/analytics/${this.tenantSlug}/calls?limit=20`);
-      } catch {}
-    },
-
-    async loadDepartments() {
-      try {
-        const branches = await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/branches`);
-        if (branches.length > 0) {
-          this.departments = await this.apiFetch(`/api/v1/admin/departments/${this.tenantSlug}/branch/${branches[0].id}`);
+        const d = await this.api('/login', { method:'POST', body: JSON.stringify({ password: this.loginPassword }) });
+        if (d?.access_token) {
+          this.token = d.access_token;
+          localStorage.setItem('arteq_token', this.token);
+          await this.loadHospitals();
         }
-      } catch {}
+      } catch(e) { this.loginError = 'Incorrect password. Try again.'; }
+      finally { this.loginLoading = false; }
     },
 
-    async saveHospitalProfile() {
+    logout() { this.token=''; localStorage.removeItem('arteq_token'); this.currentHospital=null; },
+
+    async loadHospitals() {
+      try { this.hospitals = await this.api('/hospitals') || []; } catch {}
+    },
+
+    async selectHospital(h) {
+      this.currentHospital = h;
+      this.tab = 'overview';
+      this.hospitalForm = { ...h, hours: { ...(h.hours||{}) } };
+      await Promise.all([
+        this.loadDepts(), this.loadDoctors(), this.loadBilling(),
+        this.loadEmergency(), this.loadFaqs(), this.loadCalls(), this.loadStats(),
+      ]);
+    },
+
+    async loadDepts() { try { this.departments = await this.api(`/hospitals/${this.currentHospital.id}/departments`) || []; } catch {} },
+    async loadDoctors() { try { this.doctors = await this.api(`/hospitals/${this.currentHospital.id}/doctors`) || []; } catch {} },
+    async loadBilling() { try { this.billing = await this.api(`/hospitals/${this.currentHospital.id}/billing`) || []; } catch {} },
+    async loadEmergency() { try { this.emergency = await this.api(`/hospitals/${this.currentHospital.id}/emergency`) || []; } catch {} },
+    async loadFaqs() { try { this.faqs = await this.api(`/hospitals/${this.currentHospital.id}/faqs`) || []; } catch {} },
+    async loadCalls() { try { this.calls = await this.api(`/hospitals/${this.currentHospital.id}/calls?limit=50`) || []; } catch {} },
+    async loadStats() { try { this.stats = await this.api(`/hospitals/${this.currentHospital.id}/stats?days=7`) || {}; } catch {} },
+
+    // ── Hospital ────────────────────────────────────────────────────────────
+    openHospitalModal(h=null) {
+      this.forms.hospital = h ? { ...h } : { name:'', name_ml:'', phone:'', address:'', active:true };
+      this.modals.hospital = true;
+    },
+    async saveHospitalModal() {
       try {
-        await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/profile`, {
-          method: 'PUT', body: JSON.stringify(this.hospitalProfile)
+        const f = this.forms.hospital;
+        if (!f.name) { this.notify('Hospital name is required','error'); return; }
+        if (f.id) {
+          await this.api(`/hospitals/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('Hospital updated');
+        } else {
+          const res = await this.api('/hospitals', { method:'POST', body: JSON.stringify(f) });
+          this.notify('Hospital created');
+        }
+        await this.loadHospitals();
+        this.modals.hospital = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── Hospital settings form ───────────────────────────────────────────────
+    setHour(day, idx, val) {
+      if (!this.hospitalForm.hours[day]) this.hospitalForm.hours[day] = ['',''];
+      this.hospitalForm.hours[day][idx] = val;
+    },
+    clearDay(day) { delete this.hospitalForm.hours[day]; this.hospitalForm.hours = { ...this.hospitalForm.hours }; },
+    async saveHospital() {
+      try {
+        const f = this.hospitalForm;
+        const cleaned = {};
+        for (const [d, v] of Object.entries(f.hours)) {
+          if (v && v[0] && v[1]) cleaned[d] = v;
+        }
+        f.hours = cleaned;
+        await this.api(`/hospitals/${this.currentHospital.id}`, { method:'PUT', body: JSON.stringify(f) });
+        this.currentHospital = { ...this.currentHospital, ...f };
+        this.notify('Settings saved');
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── Departments ──────────────────────────────────────────────────────────
+    openDeptModal(d=null) {
+      this.forms.dept = d ? { ...d } : { name:'', name_ml:'', floor:'', location_hint:'', phone_ext:'', active:true };
+      this.modals.dept = true;
+    },
+    async saveDept() {
+      try {
+        const f = this.forms.dept;
+        if (!f.name) { this.notify('Name is required','error'); return; }
+        const id = this.currentHospital.id;
+        if (f.id) {
+          await this.api(`/hospitals/${id}/departments/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('Department updated');
+        } else {
+          await this.api(`/hospitals/${id}/departments`, { method:'POST', body: JSON.stringify(f) });
+          this.notify('Department added');
+        }
+        await this.loadDepts();
+        this.modals.dept = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    async deleteDept(d) {
+      if (!confirm(`Remove department "${d.name}"?`)) return;
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/departments/${d.id}`, { method:'DELETE' });
+        this.notify('Department removed');
+        await this.loadDepts();
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── Doctors ──────────────────────────────────────────────────────────────
+    openDoctorModal(d=null) {
+      this.forms.doctor = d ? { ...d } : { name:'', name_ml:'', specialty:'', qualifications:'', dept_id:'', active:true };
+      this.modals.doctor = true;
+    },
+    async saveDoctor() {
+      try {
+        const f = this.forms.doctor;
+        if (!f.name) { this.notify('Name is required','error'); return; }
+        const id = this.currentHospital.id;
+        if (f.id) {
+          await this.api(`/hospitals/${id}/doctors/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('Doctor updated');
+        } else {
+          await this.api(`/hospitals/${id}/doctors`, { method:'POST', body: JSON.stringify(f) });
+          this.notify('Doctor added');
+        }
+        await this.loadDoctors();
+        this.modals.doctor = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    async deleteDoctor(d) {
+      if (!confirm(`Deactivate Dr. ${d.name}?`)) return;
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/doctors/${d.id}`, { method:'DELETE' });
+        this.notify('Doctor deactivated');
+        await this.loadDoctors();
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── Schedules ────────────────────────────────────────────────────────────
+    openScheduleModal(d) {
+      this.scheduleDoctor = { ...d, schedules: [...(d.schedules||[])] };
+      this.newSlot = { dow:1, start_time:'09:00', end_time:'17:00', room:'' };
+      this.modals.schedule = true;
+    },
+    async addSchedule() {
+      if (!this.newSlot.start_time || !this.newSlot.end_time) { this.notify('Start and end time required','error'); return; }
+      try {
+        const res = await this.api(`/doctors/${this.scheduleDoctor.id}/schedules`, {
+          method:'POST',
+          body: JSON.stringify({ ...this.newSlot, active:true })
         });
-        this.saveMsg = '✓ Saved! Cache cleared automatically.';
-        setTimeout(() => this.saveMsg = '', 3000);
-      } catch { this.saveMsg = 'Error saving.'; }
+        const newEntry = { id: res.id, dow: this.newSlot.dow, start: this.newSlot.start_time, end: this.newSlot.end_time, room: this.newSlot.room, active:true };
+        this.scheduleDoctor.schedules = [...(this.scheduleDoctor.schedules||[]), newEntry];
+        this.notify('Slot added');
+        await this.loadDoctors();
+        // Sync modal doctor with updated list
+        const updated = this.doctors.find(d=>d.id===this.scheduleDoctor.id);
+        if (updated) this.scheduleDoctor = { ...updated };
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
     },
-
-    async addHoliday() {
+    async deleteSchedule(s) {
       try {
-        const branches = await this.apiFetch(`/api/v1/admin/hospitals/${this.tenantSlug}/branches`);
-        if (!branches.length) return;
-        await this.apiFetch(`/api/v1/admin/config/${this.tenantSlug}/branches/${branches[0].id}/holidays`, {
-          method: 'POST', body: JSON.stringify(this.newHoliday)
-        });
-        this.newHoliday = { date: '', reason: '', is_closed: true, emergency_only: false };
-      } catch {}
+        await this.api(`/schedules/${s.id}`, { method:'DELETE' });
+        this.scheduleDoctor.schedules = this.scheduleDoctor.schedules.filter(x=>x.id!==s.id);
+        this.notify('Slot removed');
+        await this.loadDoctors();
+        const updated = this.doctors.find(d=>d.id===this.scheduleDoctor.id);
+        if (updated) this.scheduleDoctor = { ...updated };
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
     },
 
-    async clearCache() {
+    // ── Billing ───────────────────────────────────────────────────────────────
+    openBillingModal(b=null) {
+      this.forms.billing = b ? { ...b } : { item:'', item_ml:'', price_min:null, price_max:null, notes:'', active:true };
+      this.modals.billing = true;
+    },
+    async saveBilling() {
       try {
-        await fetch(`/api/v1/admin/config/${this.tenantSlug}/cache/clear`, { method: 'POST',
-          headers: { 'Authorization': `Bearer ${this.token}` } });
-        this.cacheCleared = true;
-        setTimeout(() => this.cacheCleared = false, 4000);
-      } catch {}
+        const f = this.forms.billing;
+        if (!f.item) { this.notify('Item key is required','error'); return; }
+        const id = this.currentHospital.id;
+        if (f.id) {
+          await this.api(`/hospitals/${id}/billing/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('Billing item updated');
+        } else {
+          await this.api(`/hospitals/${id}/billing`, { method:'POST', body: JSON.stringify(f) });
+          this.notify('Billing item added');
+        }
+        await this.loadBilling();
+        this.modals.billing = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    async deleteBilling(b) {
+      if (!confirm(`Remove billing item "${b.item}"?`)) return;
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/billing/${b.id}`, { method:'DELETE' });
+        this.notify('Billing item removed');
+        await this.loadBilling();
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
     },
 
-    logout() {
-      localStorage.removeItem('arteq_token');
-      location.reload();
-    }
+    // ── Emergency ─────────────────────────────────────────────────────────────
+    openEmergencyModal(e=null) {
+      this.forms.emergency = e ? { ...e } : { label:'', label_ml:'', phone:'', priority:1, active:true };
+      this.modals.emergency = true;
+    },
+    async saveEmergency() {
+      try {
+        const f = this.forms.emergency;
+        if (!f.label||!f.phone) { this.notify('Label and phone are required','error'); return; }
+        const id = this.currentHospital.id;
+        if (f.id) {
+          await this.api(`/hospitals/${id}/emergency/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('Contact updated');
+        } else {
+          await this.api(`/hospitals/${id}/emergency`, { method:'POST', body: JSON.stringify(f) });
+          this.notify('Contact added');
+        }
+        await this.loadEmergency();
+        this.modals.emergency = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    async deleteEmergency(e) {
+      if (!confirm(`Remove contact "${e.label}"?`)) return;
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/emergency/${e.id}`, { method:'DELETE' });
+        this.notify('Contact removed');
+        await this.loadEmergency();
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── FAQs ──────────────────────────────────────────────────────────────────
+    openFaqModal(f=null) {
+      this.forms.faq = f ? { ...f, tagsStr:(f.tags||[]).join(', ') } : { category:'', question:'', answer:'', answer_ml:'', tagsStr:'', priority:0, active:true };
+      this.modals.faq = true;
+    },
+    async saveFaq() {
+      try {
+        const f = { ...this.forms.faq };
+        if (!f.question||!f.answer) { this.notify('Question and answer are required','error'); return; }
+        f.tags = (f.tagsStr||'').split(',').map(t=>t.trim()).filter(Boolean);
+        delete f.tagsStr;
+        const id = this.currentHospital.id;
+        if (f.id) {
+          await this.api(`/hospitals/${id}/faqs/${f.id}`, { method:'PUT', body: JSON.stringify(f) });
+          this.notify('FAQ updated');
+        } else {
+          await this.api(`/hospitals/${id}/faqs`, { method:'POST', body: JSON.stringify(f) });
+          this.notify('FAQ added');
+        }
+        await this.loadFaqs();
+        this.modals.faq = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    async deleteFaq(f) {
+      if (!confirm(`Remove FAQ: "${f.question}"?`)) return;
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/faqs/${f.id}`, { method:'DELETE' });
+        this.notify('FAQ removed');
+        await this.loadFaqs();
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    copyWsUrl() {
+      navigator.clipboard.writeText(this.wsUrl).then(()=>this.notify('WebSocket URL copied'));
+    },
   };
 }
 </script>

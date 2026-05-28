@@ -37,11 +37,43 @@ from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.config.settings import settings
 from src.observability.logger import get_logger
 from src.telephony.call_handler import CallHandler
 from src.telephony.vad import SimpleVAD
 
 logger = get_logger(__name__)
+
+
+async def _resolve_hospital_id(tenant_slug: str) -> str:
+    """Map tenant_slug to a hospital_id.
+
+    Strategy:
+      1. If slug looks like a UUID, use it directly.
+      2. Otherwise, look up the hospitals table for a matching id prefix or name slug.
+      3. Fallback to settings.HOSPITAL_ID.
+    """
+    import re
+    UUID_RE = re.compile(
+        r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$', re.I
+    )
+    if UUID_RE.match(tenant_slug):
+        return tenant_slug
+    try:
+        from src.db.queries import get_pool
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT id FROM hospitals WHERE active=true "
+                "AND (LOWER(REPLACE(name,' ','-'))=$1 OR id::text=$1) LIMIT 1",
+                tenant_slug.lower(),
+            )
+            if row:
+                return str(row["id"])
+    except Exception as e:
+        logger.warning("tenant_slug_lookup_failed", slug=tenant_slug, error=str(e))
+    return settings.HOSPITAL_ID
+
 
 # Audio tuning (PCM16 @ 8 kHz, 1600 bytes ≈ 100 ms)
 CHUNK_DURATION_MS = 100
@@ -58,6 +90,7 @@ async def handle_exotel_stream(
     tenant_slug: str,
 ) -> None:
     """Handle an Exotel Voicebot WebSocket session with barge-in support."""
+    hospital_id = await _resolve_hospital_id(tenant_slug)
     call_id = str(uuid.uuid4())
     stream_sid: Optional[str] = None
     handler: Optional[CallHandler] = None
@@ -118,7 +151,7 @@ async def handle_exotel_stream(
 
                 handler = CallHandler(
                     call_id=call_sid,
-                    tenant_slug=tenant_slug,
+                    hospital_id=hospital_id,
                     caller_number=caller,
                 )
                 greeting_pcm = await handler.start_call()
