@@ -124,9 +124,7 @@ class CallHandler:
         greeting = (
             f"{time_greet}! {hosp_name}-ലേക്ക് സ്വാഗതം. "
             f"ഞാൻ ഇവിടത്തെ AI assistant ആണ്. "
-            f"Doctor timing, fees, departments, emergency — "
-            f"ഏത് കാര്യവും enquire ചെയ്യാം. "
-            f"എന്ത് അറിയണം?"
+            f"എന്ത് സഹായം ആണ് വേണ്ടത്?"
         )
         audio = await self._tts.synthesize(greeting, language="ml-IN")
         return audio or b""

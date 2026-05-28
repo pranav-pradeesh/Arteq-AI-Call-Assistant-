@@ -31,6 +31,7 @@ import audioop
 import base64
 import io
 import json
+import time
 import uuid
 import wave
 from typing import Optional
@@ -64,8 +65,8 @@ async def _resolve_hospital_id(tenant_slug: str) -> str:
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT id FROM hospitals WHERE active=true "
-                "AND (LOWER(REPLACE(name,' ','-'))=$1 OR id::text=$1) LIMIT 1",
+                "SELECT id FROM hospitals WHERE "
+                "(LOWER(REPLACE(name,' ','-'))=$1 OR id::text=$1) LIMIT 1",
                 tenant_slug.lower(),
             )
             if row:
@@ -81,7 +82,13 @@ SILENCE_THRESHOLD_CHUNKS = 12     # 1.2 s of silence ends an utterance
 MAX_UTTERANCE_CHUNKS = 80         # 8 s hard cap
 MIN_SPEECH_CHUNKS = 2             # need 200 ms of speech before STT
 BARGEIN_SPEECH_CHUNKS = 2         # 200 ms of speech during TTS triggers barge-in
-BARGEIN_RMS = 600                 # higher threshold during playback to ignore echo
+# Raised from 600 → 1200: production logs showed phone-line noise at 614-692 RMS
+# falsely triggering barge-in; real caller speech was at 2455 RMS.
+BARGEIN_RMS = 1200
+# After playback starts, don't evaluate barge-in for this many seconds.
+# TTS synthesis takes ~5-10 s on Sarvam; Exotel queues audio during that time.
+# The first queued chunks are pre-speech noise that would otherwise kill the greeting.
+BARGEIN_COOLDOWN_S = 1.5
 OUT_FRAME_BYTES = 3200            # ~200 ms outbound chunks (multiple of 320)
 
 
@@ -102,14 +109,16 @@ async def handle_exotel_stream(
     speech_chunks = 0
     bargein_speech_chunks = 0
     playback_task: Optional[asyncio.Task] = None
+    playback_started_at: float = 0.0   # monotonic timestamp when playback began
 
     def is_speaking() -> bool:
         return playback_task is not None and not playback_task.done()
 
     def start_playback(pcm: bytes) -> None:
-        nonlocal playback_task
+        nonlocal playback_task, playback_started_at
         if playback_task and not playback_task.done():
             playback_task.cancel()
+        playback_started_at = time.monotonic()
         playback_task = asyncio.create_task(
             _send_pcm(websocket, stream_sid, pcm)
         )
@@ -183,7 +192,16 @@ async def handle_exotel_stream(
 
             # ── Barge-in detection (while playing) ────────────────────────
             if is_speaking():
-                # Use a tighter threshold during playback to ignore echo/PC noise
+                # Cooldown: ignore barge-in for the first BARGEIN_COOLDOWN_S seconds
+                # of playback. TTS synthesis takes ~5-10s on Sarvam; Exotel queues
+                # all caller audio during that time. Processing those stale chunks
+                # immediately after playback starts would kill the greeting with
+                # pre-speech noise before the caller ever hears a word.
+                if time.monotonic() - playback_started_at < BARGEIN_COOLDOWN_S:
+                    continue
+
+                # Use a higher RMS threshold during playback to ignore phone-line
+                # noise and echo (production logs: noise at 614-692, speech at 2455).
                 if rms > BARGEIN_RMS:
                     bargein_speech_chunks += 1
                 else:
