@@ -80,8 +80,8 @@ async def health_check():
         "status": "healthy",
         "version": "1.0.0",
         "env": settings.ENV,
-        "stt": "sarvam/" + settings.SARVAM_STT_MODEL,
-        "tts": "sarvam/" + settings.SARVAM_TTS_MODEL,
+        "stt": "google/" + settings.STT_PROVIDER,
+        "tts": "gemini/" + settings.TTS_PROVIDER,
         "hospital_id": settings.HOSPITAL_ID,
     }
 
