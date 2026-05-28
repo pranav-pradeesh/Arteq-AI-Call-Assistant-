@@ -34,6 +34,8 @@ services:
         value: sarvam
       - key: TTS_PROVIDER
         value: sarvam
+      - key: GEMINI_TTS_VOICE
+        value: Aoede
       - key: AI_BRAIN
         value: groq
       - key: DEFAULT_LANGUAGE

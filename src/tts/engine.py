@@ -19,6 +19,7 @@ import httpx
 from src.cache.store import tts_cache, TTS_CACHE_TTL
 from src.config.settings import settings
 from src.observability.logger import get_logger
+from src.tts.gemini_tts import GeminiTTS
 from src.tts.google_tts import GoogleTTS
 
 logger = get_logger(__name__)
@@ -143,11 +144,17 @@ class CompositeTTS:
     Cache key = hash(text + language).
 
     Provider selection (via settings.TTS_PROVIDER):
-      - "google"  → Google Cloud TTS Neural2, falls back to Sarvam on failure
-      - "sarvam"  → Sarvam Bulbul v3 only (default)
+      - "gemini"  → Gemini 2.5 Flash TTS (best quality, multilingual, cheapest)
+      - "google"  → Google Cloud TTS Neural2
+      - "sarvam"  → Sarvam Bulbul v3 (default, best for Malayalam)
+    Fallback chain: gemini → google → sarvam (whichever is configured).
     """
 
     def __init__(self):
+        self._gemini: Optional[GeminiTTS] = None
+        if settings.TTS_PROVIDER == "gemini" and settings.GEMINI_API_KEY:
+            self._gemini = GeminiTTS()
+
         self._google: Optional[GoogleTTS] = None
         if settings.TTS_PROVIDER == "google" and settings.GOOGLE_CLOUD_TTS_KEY:
             self._google = GoogleTTS()
@@ -178,13 +185,22 @@ class CompositeTTS:
         return result.audio_bytes
 
     async def _synthesize_raw(self, text: str, language: str) -> Optional[TTSResult]:
-        # Try Google TTS first if configured
+        # Gemini TTS (natively multilingual — language param ignored, text drives it)
+        if self._gemini:
+            t_start = time.monotonic()
+            pcm = await self._gemini.synthesize(text, voice=settings.GEMINI_TTS_VOICE)
+            if pcm is not None:
+                return TTSResult(audio_bytes=pcm, latency_ms=int((time.monotonic() - t_start) * 1000))
+            logger.warning("gemini_tts_fallback_to_sarvam")
+
+        # Google Neural2 TTS
         if self._google:
             t_start = time.monotonic()
             pcm = await self._google.synthesize(text, language=language)
             if pcm is not None:
                 return TTSResult(audio_bytes=pcm, latency_ms=int((time.monotonic() - t_start) * 1000))
             logger.warning("google_tts_fallback_to_sarvam")
+
         # Sarvam fallback
         if self._sarvam:
             return await self._sarvam.synthesize(text, language=language)

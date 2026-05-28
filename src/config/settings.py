@@ -32,7 +32,8 @@ class Settings(BaseSettings):
     SARVAM_TTS_VOICE_EN: str = "kavitha"
 
     # TTS provider
-    TTS_PROVIDER: str = "sarvam"     # "sarvam" or "google"
+    TTS_PROVIDER: str = "sarvam"     # "gemini" | "google" | "sarvam"
+    GEMINI_TTS_VOICE: str = "Aoede"  # Gemini TTS voice: Aoede, Kore, Zephyr (female) / Charon, Puck, Fenrir (male)
 
     # STT
     STT_PROVIDER: str = "sarvam"
