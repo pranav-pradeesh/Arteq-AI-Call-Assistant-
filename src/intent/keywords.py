@@ -427,6 +427,8 @@ INTENT_KEYWORDS: Dict[str, List[Tuple[str, float]]] = {
         ("സുഖമില്ല", 2.0),
         ("ചൊറിച്ചിൽ", 2.0),
         ("ഒമ", 1.8),
+        ("കഷ്ടം", 1.5),
+        ("ബുദ്ധിമുട്ട്", 1.8),
         # ── Additional English symptom terms ────────────────────────────────
         ("shortness of breath", 2.0), ("difficulty breathing", 2.0),
         ("coughing blood", 2.5), ("blood in urine", 2.5), ("blood in stool", 2.5),
@@ -503,6 +505,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "periodontitis", "wisdom tooth", "danthavaidyan", "dantachikitsa",
         "pallu poyi", "pallu kothikkunnu", "pallu alichal", "pallu undu",
         "pal vedana", "oralrogam",
+        # Malayalam script
+        "ഡെന്റൽ", "ദന്ത",
     ],
     "orthopedic": [
         "orthopedic", "ortho", "bone", "ellu", "ellinu", "joint",
@@ -646,6 +650,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "weight loss", "loss of appetite", "nausea", "general weakness",
         "thalarcha", "alukkam", "sukhamilla", "mithyam", "thabhathi",
         "bukhar", "jwaram", "ushnam kooduthal", "thandal", "pani undu",
+        # Malayalam script
+        "ജനറൽ മെഡിസിൻ", "മെഡിസിൻ", "ജനറൽ",
     ],
     "psychiatry": [
         "psychiatry", "mental", "psychology", "manassastra",
@@ -674,6 +680,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "hydrocele", "varicocele", "mutra vedana", "mutrathakku",
         "mutra pidutham", "mootram varunnilla", "mutra rogam",
         "kidni stone", "renal",
+        # Malayalam script
+        "യൂറോളജി", "മൂത്രരോഗ",
     ],
     "gastroenterology": [
         "gastro", "stomach", "vayar", "digestive", "liver",
@@ -688,6 +696,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "bloating", "kiral rogam", "kiral vedana", "karal rogam",
         "vayar ilittukayanam", "vayar pothuka", "malabandham",
         "muthal rogam", "mala rogam", "raktham potti", "vayar ketti",
+        # Malayalam script
+        "ഗ്യാസ്ട്രോ", "ഗ്യാസ്ട്രോഎൻററോളജി",
     ],
     "pulmonology": [
         "pulmonology", "lung", "chest", "respiration", "asthma",
@@ -699,6 +709,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "breathless", "inhaler", "nebulizer", "spirometry", "lung function",
         "oxygen level", "spo2", "uksham", "shwasam", "kashi", "kapanam",
         "kapha chuma", "swaasam ellatha", "maarpu irakka vedana",
+        # Malayalam script
+        "പൾമോണോളജി", "ശ്വസനരോഗ",
     ],
     "oncology": [
         "oncology", "cancer", "tumor", "arbudham",
@@ -709,6 +721,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "lung cancer", "colon cancer", "prostate cancer", "liver cancer",
         "skin cancer", "metastasis", "lymph node", "arbhutham", "kansar",
         "katina rogam",
+        # Malayalam script
+        "ഓങ്കോളജി", "കാൻസർ",
     ],
     "radiology": [
         "radiology", "xray", "x-ray", "scan", "mri", "ct", "ct scan",
@@ -716,6 +730,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         # expanded
         "mammography", "fluoroscopy", "angiography", "bone density",
         "dexa", "doppler", "nuclear scan", "pet scan", "image guided",
+        # Malayalam script
+        "റേഡിയോളജി", "സ്കാൻ", "എക്സ്-റേ",
     ],
     "physiotherapy": [
         "physiotherapy", "physio", "rehabilitation", "rehab",
@@ -750,6 +766,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "blood sugar", "hba1c", "lipid", "cholesterol", "triglycerides",
         "uric acid", "creatinine", "serum", "plasma", "electrolytes",
         "rektha parikshanam",
+        # Malayalam script
+        "ലബോറട്ടറി", "ലാബ്", "രക്തപരിശോധന",
     ],
     "pharmacy": [
         "pharmacy", "medical", "medicine", "mrundu", "marundhu",
@@ -759,6 +777,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "drops", "prescription refill", "generic", "brand", "side effects",
         "dosage", "marundhu", "medicine name", "tablet name",
         "injection edukkanam",
+        # Malayalam script
+        "ഫാർമസി", "മരുന്ന്",
     ],
     # ── New departments ──────────────────────────────────────────────────────
     "endocrinology": [
@@ -769,6 +789,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "praameham", "sugar rogam", "thyroid rogam", "thyroid kayanam",
         "thyroid undakkam", "madhu rogam", "blood sugar kooduthal",
         "blood sugar kuranju",
+        # Malayalam script
+        "എൻഡോക്രൈനോളജി", "പ്രമേഹ", "ഡയബറ്റിക്",
     ],
     "nephrology": [
         "nephrology", "nephrologist",
@@ -776,6 +798,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "nephritis", "renal failure", "creatinine", "proteinuria",
         "kidney function", "vrikka rogam", "kidni rogam", "kidni failure",
         "dialysis cheyyaan", "vrikka",
+        # Malayalam script
+        "നെഫ്രോളജി", "വൃക്കരോഗ",
     ],
     "rheumatology": [
         "rheumatology", "rheumatologist",
