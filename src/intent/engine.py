@@ -160,19 +160,32 @@ class IntentEngine:
             )
 
         tokens = tokenize(transcript)
+        # Separate unigrams from bigrams to avoid double-counting
+        unigrams = [t for t in tokens if " " not in t]
+        bigrams_list = [t for t in tokens if " " in t]
+
         scores: Dict[str, float] = {intent: 0.0 for intent in ALL_INTENTS}
 
-        # Score each token against keyword index
-        for token in tokens:
-            # Check base index
-            if token in self._base_index:
-                for intent, weight in self._base_index[token]:
+        # Score bigrams first; words they cover won't be scored again as unigrams
+        covered_words: set = set()
+        for bigram in bigrams_list:
+            if bigram in self._base_index:
+                for intent, weight in self._base_index[bigram]:
                     scores[intent] += weight
+                covered_words.update(bigram.split(" ", 1))
+            if bigram in self._tenant_overrides:
+                for intent, weight in self._tenant_overrides[bigram]:
+                    scores[intent] += weight * 1.2
 
-            # Check tenant overrides (additive)
-            if token in self._tenant_overrides:
-                for intent, weight in self._tenant_overrides[token]:
-                    scores[intent] += weight * 1.2  # slight boost for custom rules
+        # Score unigrams, skipping those already covered by a matched bigram
+        for token in unigrams:
+            if token not in covered_words:
+                if token in self._base_index:
+                    for intent, weight in self._base_index[token]:
+                        scores[intent] += weight
+                if token in self._tenant_overrides:
+                    for intent, weight in self._tenant_overrides[token]:
+                        scores[intent] += weight * 1.2
 
         # Context boost: if prior intent is known, boost related intents slightly
         if prior_intent and prior_intent != INTENT_UNKNOWN:

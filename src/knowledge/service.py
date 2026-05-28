@@ -191,8 +191,8 @@ class HospitalKnowledgeService:
         if state_context:
             if not entities.get("department") and state_context.get("last_department"):
                 entities = {**entities, "department": state_context["last_department"]}
-            if not entities.get("doctor_name") and state_context.get("last_doctor"):
-                entities = {**entities, "doctor_name": state_context["last_doctor"]}
+            if not entities.get("doctor_name") and state_context.get("last_doctor_name"):
+                entities = {**entities, "doctor_name": state_context["last_doctor_name"]}
             if not entities.get("day") and state_context.get("last_day"):
                 entities = {**entities, "day": state_context["last_day"]}
 

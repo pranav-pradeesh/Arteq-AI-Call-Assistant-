@@ -100,6 +100,10 @@ class ResponseComposer:
         if result.intent == INTENT_REPEAT:
             return CLARIFICATION_MSGS[0]
 
+        # Freeform: text_ml was built by answer_freeform(); skip LLM re-query
+        if result.intent == "freeform":
+            return result.text_ml or FALLBACK_MSG
+
         # 3. Template-based fallback
         handler = {
             INTENT_DOCTOR_AVAILABILITY: self._compose_doctor_avail,

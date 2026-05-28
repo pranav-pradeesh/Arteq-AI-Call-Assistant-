@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -75,10 +76,10 @@ async def get_pool() -> asyncpg.Pool:
         _pool = await asyncpg.create_pool(
             url,
             min_size=1,
-            max_size=8,
-            command_timeout=10,
+            max_size=10,                # Render free tier holds ~10 conn comfortably
+            command_timeout=30,         # cold-start Supabase queries can be slow
             ssl="require",
-            timeout=10,      # per-connection connect timeout (seconds)
+            timeout=20,                 # per-connection connect timeout
         )
     return _pool
 
@@ -167,8 +168,9 @@ class HospitalContext:
 
     def find_dept(self, keyword: str) -> Optional[DeptInfo]:
         kw = keyword.lower()
+        pattern = re.compile(r'\b' + re.escape(kw) + r'\b')
         for d in self.departments:
-            if kw in d.name.lower() or kw in (d.name_ml or "").lower():
+            if pattern.search(d.name.lower()) or pattern.search((d.name_ml or "").lower()):
                 return d
         return None
 
@@ -200,6 +202,10 @@ class HospitalContext:
 
 # ── Loader ───────────────────────────────────────────────────────────────────
 
+class HospitalNotFound(Exception):
+    """Raised when load_hospital_context can't find the given hospital_id."""
+
+
 async def load_hospital_context(hospital_id: str) -> HospitalContext:
     pool = await get_pool()
     async with pool.acquire() as conn:
@@ -208,6 +214,10 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
             "SELECT id, name, name_ml, address, phone, hours FROM hospitals WHERE id=$1",
             hospital_id,
         )
+        if h is None:
+            raise HospitalNotFound(
+                f"hospital_id={hospital_id} not found in hospitals table"
+            )
 
         # Departments
         dept_rows = await conn.fetch(
@@ -259,11 +269,19 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
             "FROM billing_info WHERE hospital_id=$1 AND active=true",
             hospital_id,
         )
-        billing = [
-            BillingRow(r["item"], r["item_ml"] or "", float(r["price_min"] or 0),
-                       float(r["price_max"] or 0), r["notes"] or "")
-            for r in billing_rows
-        ]
+        # If price_min or price_max is NULL we drop the row rather than coerce
+        # to ₹0 — quoting "free" by mistake is worse than saying "not available".
+        billing = []
+        for r in billing_rows:
+            pmin, pmax = r["price_min"], r["price_max"]
+            if pmin is None and pmax is None:
+                continue
+            billing.append(BillingRow(
+                r["item"], r["item_ml"] or "",
+                float(pmin) if pmin is not None else float(pmax),
+                float(pmax) if pmax is not None else float(pmin),
+                r["notes"] or "",
+            ))
 
         # FAQs
         faq_rows = await conn.fetch(
@@ -303,6 +321,17 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         emergency=emergency,
         loaded_at=time.time(),
     )
+
+
+async def get_or_load_hospital_context(hospital_id: str) -> HospitalContext:
+    """Return cached HospitalContext, refreshing from DB every 5 minutes."""
+    from src.cache.store import hospital_cache, HOSPITAL_CACHE_TTL
+    cached = hospital_cache.get(hospital_id)
+    if cached is not None:
+        return cached
+    ctx = await load_hospital_context(hospital_id)
+    hospital_cache.set(hospital_id, ctx, ttl=HOSPITAL_CACHE_TTL)
+    return ctx
 
 
 async def write_call_log(

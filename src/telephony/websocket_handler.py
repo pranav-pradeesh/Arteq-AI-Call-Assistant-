@@ -47,7 +47,7 @@ logger = get_logger(__name__)
 CHUNK_DURATION_MS = 100
 SILENCE_THRESHOLD_CHUNKS = 12     # 1.2 s of silence ends an utterance
 MAX_UTTERANCE_CHUNKS = 80         # 8 s hard cap
-MIN_SPEECH_CHUNKS = 3             # need 300 ms of speech before STT
+MIN_SPEECH_CHUNKS = 2             # need 200 ms of speech before STT
 BARGEIN_SPEECH_CHUNKS = 2         # 200 ms of speech during TTS triggers barge-in
 BARGEIN_RMS = 600                 # higher threshold during playback to ignore echo
 OUT_FRAME_BYTES = 3200            # ~200 ms outbound chunks (multiple of 320)
@@ -141,7 +141,10 @@ async def handle_exotel_stream(
             payload_b64 = msg.get("media", {}).get("payload", "")
             if not payload_b64:
                 continue
-            pcm_chunk = base64.b64decode(payload_b64)
+            try:
+                pcm_chunk = base64.b64decode(payload_b64)
+            except Exception:
+                continue
             rms = vad.rms_energy(pcm_chunk)
             is_speech_chunk = rms > vad.speech_threshold
 

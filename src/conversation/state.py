@@ -106,6 +106,8 @@ class ConversationState:
         return int((time.time() - self.call_start_ts) * 1000)
 
     def add_error(self, error: dict) -> None:
+        if len(self.errors) >= 100:
+            self.errors.pop(0)
         self.errors.append(error)
 
     def to_dict(self) -> dict:

@@ -26,7 +26,7 @@ from src.conversation.state import (
 )
 from src.db.queries import (
     HospitalContext,
-    load_hospital_context,
+    get_or_load_hospital_context,
     write_call_log,
 )
 from src.intent.engine import IntentEngine, IntentResult
@@ -37,7 +37,7 @@ from src.intent.keywords import (
     INTENT_UNKNOWN,
 )
 from src.knowledge.service import HospitalKnowledgeService
-from src.observability.logger import get_logger
+from src.observability.logger import get_logger, bind_call_context, clear_call_context
 from src.response.composer import (
     FALLBACK_MSG,
     ResponseComposer,
@@ -78,10 +78,11 @@ class CallHandler:
 
     async def start_call(self) -> bytes:
         """Load hospital context and return greeting audio."""
+        bind_call_context(call_id=self.call_id, tenant_id=settings.HOSPITAL_ID)
         logger.info("call_started", call_id=self.call_id, caller=self.caller_number)
 
         try:
-            self._ctx = await load_hospital_context(settings.HOSPITAL_ID)
+            self._ctx = await get_or_load_hospital_context(settings.HOSPITAL_ID)
         except Exception as e:
             logger.error("hospital_context_load_failed", error=str(e))
             return await self._tts.synthesize(
@@ -220,6 +221,8 @@ class CallHandler:
             await self._tts.close()
         except Exception as e:
             logger.error("end_call_error", error=str(e))
+        finally:
+            clear_call_context()
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
@@ -232,6 +235,8 @@ class CallHandler:
             if self._consecutive_failures >= 5:
                 logger.error("circuit_break_tts", call_id=self.call_id)
                 self._call_dead = True
+                if self._state:
+                    self._state.transfer_requested = True
             return b""
         self._consecutive_failures = 0
         return audio

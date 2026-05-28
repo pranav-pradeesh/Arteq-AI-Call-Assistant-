@@ -43,13 +43,17 @@ def _wav_to_pcm_8k_mono(wav_bytes: bytes) -> bytes:
         # Best-effort fallback: strip 44-byte RIFF header
         return wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
 
-    if channels == 2:
-        pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
-    if sample_width != 2:
-        pcm = audioop.lin2lin(pcm, sample_width, 2)
-    if framerate != 8000:
-        pcm, _ = audioop.ratecv(pcm, 2, 1, framerate, 8000, None)
-        logger.info("tts_resampled", from_hz=framerate, to_hz=8000)
+    try:
+        if channels == 2:
+            pcm = audioop.tomono(pcm, sample_width, 0.5, 0.5)
+        if sample_width != 2:
+            pcm = audioop.lin2lin(pcm, sample_width, 2)
+        if framerate != 8000:
+            pcm, _ = audioop.ratecv(pcm, 2, 1, framerate, 8000, None)
+            logger.info("tts_resampled", from_hz=framerate, to_hz=8000)
+    except Exception as e:
+        logger.error("tts_audioop_failed", error=str(e), framerate=framerate, channels=channels)
+        return wav_bytes[44:] if len(wav_bytes) > 44 else wav_bytes
     return pcm
 
 
