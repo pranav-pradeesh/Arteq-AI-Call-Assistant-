@@ -29,11 +29,9 @@ from __future__ import annotations
 import asyncio
 import audioop
 import base64
-import io
 import json
 import time
 import uuid
-import wave
 from typing import Optional
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -247,11 +245,10 @@ async def handle_exotel_stream(
                 utterance_chunks = 0
                 speech_chunks = 0
 
-                # Upsample 8 kHz → 16 kHz for Saarika; STT is more accurate at 16k.
+                # Upsample 8 kHz → 16 kHz; STT providers expect 16k PCM.
                 pcm_16k, _ = audioop.ratecv(pcm, 2, 1, 8000, 16000, None)
                 logger.info("stt_input", bytes=len(pcm_16k), rms=audioop.rms(pcm_16k, 2))
-                wav_bytes = _pcm_to_wav(pcm_16k, sample_rate=16000)
-                response_pcm = await handler.process_audio_turn(wav_bytes)
+                response_pcm = await handler.process_audio_turn(pcm_16k)
 
                 if response_pcm:
                     start_playback(response_pcm)
@@ -321,12 +318,3 @@ async def _send_clear(websocket: WebSocket, stream_sid: Optional[str]) -> None:
         pass
 
 
-def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 8000) -> bytes:
-    """Wrap raw PCM16 in a WAV header for Sarvam STT."""
-    buf = io.BytesIO()
-    with wave.open(buf, "wb") as wf:
-        wf.setnchannels(1)
-        wf.setsampwidth(2)
-        wf.setframerate(sample_rate)
-        wf.writeframes(pcm_bytes)
-    return buf.getvalue()

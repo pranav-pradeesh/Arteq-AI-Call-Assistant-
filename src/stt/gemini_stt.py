@@ -1,13 +1,12 @@
 """
-Gemini STT — transcribes audio using Gemini 2.5 Flash multimodal input.
+Gemini STT — transcribes audio using Gemini 2.0 Flash multimodal input.
 
-Accepts raw PCM16 @ 8 kHz mono (Exotel format), upsamples to 16 kHz,
+Accepts raw PCM16 @ 16 kHz mono (already upsampled by websocket_handler),
 wraps in a WAV container, and asks Gemini to transcribe + detect language.
 Returns (transcript, BCP-47 language code, confidence).
 """
 from __future__ import annotations
 
-import audioop
 import io
 import json
 import time
@@ -33,20 +32,19 @@ _PROMPT = (
 )
 
 
-def _pcm8k_to_wav16k(pcm_8k: bytes) -> bytes:
-    """Upsample PCM16 8 kHz mono → 16 kHz, wrap in WAV container."""
-    pcm_16k, _ = audioop.ratecv(pcm_8k, 2, 1, 8000, 16000, None)
+def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
+    """Wrap raw PCM16 mono in a WAV container."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as wf:
         wf.setnchannels(1)
         wf.setsampwidth(2)
-        wf.setframerate(16000)
-        wf.writeframes(pcm_16k)
+        wf.setframerate(sample_rate)
+        wf.writeframes(pcm_bytes)
     return buf.getvalue()
 
 
 class GeminiSTT:
-    """Transcribes audio via Gemini 2.5 Flash — no Google Cloud billing needed."""
+    """Transcribes audio via Gemini 2.0 Flash — no Google Cloud billing needed."""
 
     def __init__(self):
         self._client = genai.Client(api_key=settings.GEMINI_API_KEY)
@@ -54,11 +52,11 @@ class GeminiSTT:
     async def transcribe(self, audio_bytes: bytes) -> tuple[str, str, float]:
         """
         Returns (transcript, language_code, confidence).
-        audio_bytes: raw PCM16 @ 8 kHz mono.
+        audio_bytes: raw PCM16 @ 16 kHz mono (upsampled by websocket_handler).
         """
         t_start = time.monotonic()
         try:
-            wav = _pcm8k_to_wav16k(audio_bytes)
+            wav = _pcm_to_wav(audio_bytes)
             response = await self._client.aio.models.generate_content(
                 model=_MODEL,
                 contents=[
