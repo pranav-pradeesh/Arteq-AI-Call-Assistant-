@@ -171,6 +171,21 @@ def build_hospital_summary(ctx: HospitalContext) -> str:
         em_parts = [f"{e.label} {e.phone}" for e in ctx.emergency]
         lines.append("EMERGENCY CONTACTS: " + " | ".join(em_parts) + ".")
 
+    # FAQs — included so the LLM can answer questions about parking, insurance,
+    # appointment booking, facilities, and anything else the admin has documented.
+    if ctx.faqs:
+        lines.append("ADDITIONAL INFORMATION:")
+        for faq in ctx.faqs:
+            lines.append(f"Q: {faq.question}")
+            lines.append(f"A: {faq.answer}")
+
+    # Instruction so the LLM knows where to redirect unknown questions.
+    if ctx.phone:
+        lines.append(
+            f"FALLBACK: For anything not covered above, direct the caller to "
+            f"reception at {ctx.phone}."
+        )
+
     return "\n".join(lines)
 
 
@@ -525,16 +540,19 @@ class HospitalKnowledgeService:
         try:
             from groq import Groq
             client = Groq(api_key=settings.GROQ_API_KEY)
+            reception = self.ctx.phone or "the hospital"
             prompt = (
                 "You are the phone receptionist for a Kerala hospital. "
-                "Answer the caller's question using ONLY the facts in the "
-                "HOSPITAL SUMMARY below. Rules:\n"
-                "- If a service / doctor is not in the summary, say it is NOT "
-                "available at this hospital. Do not invent.\n"
-                "- Match the caller's language: Malayalam-Manglish reply for "
-                "Malayalam/Manglish input, English for English input.\n"
-                "- Keep the reply to ONE short sentence — this is a voice call.\n"
-                "- Never start with 'Sorry' unless you are actually denying.\n\n"
+                "Answer the caller's question using ONLY the facts in the HOSPITAL SUMMARY below.\n\n"
+                "Rules:\n"
+                "1. Only say a service is NOT available if it is explicitly listed under "
+                "'SERVICES NOT OFFERED HERE'. For anything not mentioned in the summary, "
+                f"say: 'Please contact our reception at {reception} for details.'\n"
+                "2. Match the caller's language: Malayalam-Manglish for Malayalam/Manglish "
+                "input, English for English input.\n"
+                "3. Keep the reply to ONE or TWO short sentences — this is a voice call.\n"
+                "4. Do not start with 'Sorry' unless you are genuinely denying something.\n"
+                "5. Do not invent facts. If you are unsure, direct to reception.\n\n"
                 f"HOSPITAL SUMMARY:\n{self._summary}\n\n"
                 f"Caller: {question}\nReceptionist:"
             )

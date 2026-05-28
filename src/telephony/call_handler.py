@@ -202,6 +202,21 @@ class CallHandler:
             elif knowledge_result.missing in ("dept_not_found", "doctor_not_found"):
                 self._state.clear_entity_context()
 
+            # Freeform escalation: when structured path couldn't answer
+            # (unsupported intent, or data not found and caller wasn't
+            # just being vague), try the LLM with the full hospital summary.
+            # This handles things like parking, insurance, facilities, etc.
+            _no_answer_missing = {
+                "unsupported_intent", "dept_not_found",
+                "doctor_not_found", None,
+            }
+            if not knowledge_result.found and knowledge_result.missing in _no_answer_missing:
+                logger.info("freeform_escalation", missing=knowledge_result.missing,
+                            transcript=stt_result.transcript[:60])
+                freeform = self._knowledge.answer_freeform(stt_result.transcript)
+                if freeform.found and freeform.text_ml:
+                    knowledge_result = freeform
+
             response_text = self._composer.compose(knowledge_result)
 
         except Exception as e:
