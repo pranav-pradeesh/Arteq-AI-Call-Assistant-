@@ -1,8 +1,8 @@
 """
 Gemini 2.5 Flash brain — multilingual hospital AI receptionist.
 
-Replaces keyword engine + Groq with a single function-calling LLM pipeline.
-Language auto-detection: responds in the caller's detected language.
+Single function-calling LLM pipeline with language auto-detection.
+Responds in the caller's detected language.
 """
 from __future__ import annotations
 

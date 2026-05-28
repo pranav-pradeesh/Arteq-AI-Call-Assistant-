@@ -75,7 +75,6 @@ class ResponseComposer:
     Priority:
       1. result.text_ml  (pre-built by KnowledgeService — zero latency)
       2. Template from result.data  (backward-compat, still zero latency)
-      3. Groq LLM (edge cases only)
     """
 
     def __init__(self, hospital_name: str = "ഈ Hospital"):
