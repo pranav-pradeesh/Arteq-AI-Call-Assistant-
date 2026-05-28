@@ -28,6 +28,7 @@ from src.intent.keywords import (
     INTENT_CONSULTATION_FEE, INTENT_CONTACT, INTENT_DEPARTMENT_EXISTS,
     INTENT_DOCTOR_AVAILABILITY, INTENT_DOCTOR_TIMING, INTENT_EMERGENCY,
     INTENT_HOSPITAL_TIMING, INTENT_LOCATION, INTENT_SYMPTOM,
+    DEPARTMENT_SYNONYMS,
 )
 
 INDIA_TZ = pytz.timezone("Asia/Kolkata")
@@ -935,26 +936,71 @@ def build_hospital_summary(ctx: HospitalContext) -> str:
                 hr_parts.append(f"{d.capitalize()} {h[d][0]}-{h[d][1]}")
         lines.append("OPENING HOURS: " + "; ".join(hr_parts) + ". Emergency 24x7.")
 
-    # Departments
+    # Departments (bilingual: English name + Malayalam name from DB + keyword synonyms)
     if ctx.departments:
         dept_lines = []
         for d in ctx.departments:
             extra = f" ({d.floor}, {d.location_hint})" if d.floor else ""
-            dept_lines.append(f"{d.name}{extra} ext {d.phone_ext}")
+            ml_part = f" / {d.name_ml}" if d.name_ml else ""
+            dept_lines.append(f"{d.name}{ml_part}{extra} ext {d.phone_ext}")
         lines.append("DEPARTMENTS AVAILABLE: " + " | ".join(dept_lines) + ".")
+
+        # Malayalam and common-variant aliases per department so the LLM can
+        # understand caller terms like "NILA", "prasava vibagham", "stree roga", etc.
+        alias_lines = []
+        for d in ctx.departments:
+            dept_key = d.name.lower()
+            # Find the matching canonical key in DEPARTMENT_SYNONYMS
+            syn_list: list[str] = []
+            for key, syns in DEPARTMENT_SYNONYMS.items():
+                if key in dept_key or dept_key in key or dept_key.startswith(key):
+                    syn_list = syns
+                    break
+            if not syn_list and " " in dept_key:
+                # Try matching by first word (e.g. "cardiology" from "Cardiology Unit")
+                first_word = dept_key.split()[0]
+                syn_list = DEPARTMENT_SYNONYMS.get(first_word, [])
+
+            # Separate Malayalam script synonyms from Manglish/English
+            ml_syns = [s for s in syn_list if any(ord(c) > 0x0D00 for c in s)]
+            en_syns = [s for s in syn_list
+                       if all(ord(c) < 128 for c in s) and s not in (d.name.lower(), dept_key)]
+            # Build a compact alias note
+            all_aliases = []
+            if d.name_ml:
+                all_aliases.append(d.name_ml)
+            all_aliases.extend(ml_syns[:3])
+            all_aliases.extend(en_syns[:3])
+            if all_aliases:
+                alias_lines.append(f"  {d.name}: {', '.join(all_aliases)}")
+
+        if alias_lines:
+            lines.append("DEPARTMENT ALIASES (Malayalam / local names):\n"
+                         + "\n".join(alias_lines))
 
     # Services NOT available (anything in _DEPT_KEYWORDS that doesn't map to a real dept)
     available_canonical = {d.name.lower() for d in ctx.departments}
+    # Expand to include all DEPARTMENT_SYNONYMS keys/synonyms for available depts,
+    # so spelling variants ("gynaecology" vs "gynecology") don't falsely appear as absent.
+    available_syns: set[str] = set(available_canonical)
+    for d in ctx.departments:
+        dept_lower = d.name.lower()
+        for key, syns in DEPARTMENT_SYNONYMS.items():
+            if (key in dept_lower or dept_lower in key
+                    or any(s in dept_lower for s in syns)):
+                available_syns.add(key)
+                available_syns.update(s.lower() for s in syns)
+                break
     not_offered = set()
     for kw, canon in _DEPT_KEYWORDS.items():
-        if canon.lower() not in available_canonical and not any(
-            canon.lower() in d.name.lower() for d in ctx.departments
-        ):
+        canon_lower = canon.lower()
+        if (canon_lower not in available_syns
+                and not any(canon_lower in d.name.lower() for d in ctx.departments)):
             not_offered.add(canon)
     if not_offered:
         lines.append("SERVICES NOT OFFERED HERE: " + ", ".join(sorted(not_offered)) + ".")
 
-    # Doctors with schedules
+    # Doctors with schedules (include Malayalam name so caller can ask by Malayalam name)
     if ctx.doctors:
         lines.append("DOCTORS:")
         for d in ctx.doctors:
@@ -963,7 +1009,9 @@ def build_hospital_summary(ctx: HospitalContext) -> str:
             ]
             sched = "; ".join(sched_parts) if sched_parts else "no schedule"
             qual = f", {d.qualifications}" if d.qualifications else ""
-            lines.append(f"- {d.name} ({d.dept_name}{qual}): {sched}")
+            ml_name = f" / {d.name_ml}" if d.name_ml else ""
+            dept_ml = f" / {d.dept_name_ml}" if d.dept_name_ml else ""
+            lines.append(f"- {d.name}{ml_name} ({d.dept_name}{dept_ml}{qual}): {sched}")
 
     # Billing
     if ctx.billing:
@@ -986,7 +1034,12 @@ def build_hospital_summary(ctx: HospitalContext) -> str:
         lines.append("ADDITIONAL INFORMATION:")
         for faq in ctx.faqs:
             lines.append(f"Q: {faq.question}")
-            lines.append(f"A: {faq.answer}")
+            # Include Malayalam answer when available so the LLM uses it directly
+            if faq.answer_ml:
+                lines.append(f"A (English): {faq.answer}")
+                lines.append(f"A (Malayalam): {faq.answer_ml}")
+            else:
+                lines.append(f"A: {faq.answer}")
 
     # Instruction so the LLM knows where to redirect unknown questions.
     if ctx.phone:

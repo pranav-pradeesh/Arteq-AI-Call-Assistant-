@@ -547,6 +547,14 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "gynecology", "gynecologist", "gynaecology", "obs", "obstetrics",
         "delivery", "prasavam", "strirog", "streerog", "women",
         "maternity",
+        # STT transcription variants (Sarvam sometimes drops trailing nasal)
+        "prasava", "prasava vibagham", "prasava ward",
+        "gyne", "gyna", "gynec",
+        # Malayalam/Manglish variants
+        "stree roga", "sthree roga", "sthreeroga", "sthree rogam",
+        "mahila vibagham", "mahila ward", "mahila rogam", "mahila",
+        "ladies ward", "ladies doctor", "ladies",
+        "women doctor", "women ward",
         # expanded
         "uterus", "ovary", "fallopian", "cervix", "menstruation", "period",
         "dysmenorrhea", "amenorrhea", "menopause", "hysterectomy",
@@ -556,6 +564,8 @@ DEPARTMENT_SYNONYMS: Dict[str, List[str]] = {
         "endometriosis", "fibroid", "cyst", "ovarian cyst", "garbhakosham",
         "masam kuthi", "artavam", "artava kramakettu", "stree rogam",
         "mahilarogam", "pregnant aano", "kutti undu",
+        # phonetic STT variants
+        "jinecology", "ginecology", "gynacology",
     ],
     "ophthalmology": [
         "ophthalmology", "eye", "kannu", "kanninu", "ophthal",

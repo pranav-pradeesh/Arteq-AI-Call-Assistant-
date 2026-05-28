@@ -236,6 +236,15 @@ class IntentEngine:
         # Entity extraction
         entities = _extract_entities(tokens, result_intent)
 
+        # If no intent could be scored but a department entity was extracted,
+        # the caller is naming a department without extra context words.
+        # Default to doctor_availability — the most common reason to name a dept.
+        if result_intent == INTENT_UNKNOWN and entities.department:
+            from src.intent.keywords import INTENT_DOCTOR_AVAILABILITY
+            result_intent = INTENT_DOCTOR_AVAILABILITY
+            confidence = 0.55
+            needs_clarification = False
+
         processing_ms = int((time.monotonic() - t_start) * 1000)
 
         return IntentResult(

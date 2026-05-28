@@ -66,6 +66,47 @@ def _time_greeting() -> str:
         return "ശുഭ രാത്രി"       # Good Night
 
 
+# Words that appear in department names but are not department identifiers.
+_DEPT_NAME_SKIP_WORDS = frozenset({
+    "dept", "department", "wing", "unit", "ward", "centre", "center",
+    "section", "the", "and", "of", "for", "a", "an",
+})
+
+
+def _build_dept_keyword_rules(ctx: "HospitalContext") -> list[dict]:
+    """
+    Build per-call tenant keyword rules from the hospital's actual department
+    names (both English name and Malayalam name_ml) stored in the DB.
+
+    This lets the intent engine recognise hospital-specific branding like
+    "NILA" (which is the hospital's gynecology ward name) even if "NILA"
+    is not in the global DEPARTMENT_SYNONYMS dictionary.
+    """
+    from src.intent.keywords import INTENT_DOCTOR_AVAILABILITY
+    rules: list[dict] = []
+    for dept in ctx.departments:
+        for raw_name in (dept.name, dept.name_ml):
+            if not raw_name:
+                continue
+            name_lower = raw_name.lower().strip()
+            # Register the full name
+            rules.append({
+                "keyword": name_lower,
+                "maps_to_intent": INTENT_DOCTOR_AVAILABILITY,
+                "weight": 2.0,
+            })
+            # Register each significant word individually
+            for word in name_lower.split():
+                word = word.strip(".,/()")
+                if len(word) > 2 and word not in _DEPT_NAME_SKIP_WORDS:
+                    rules.append({
+                        "keyword": word,
+                        "maps_to_intent": INTENT_DOCTOR_AVAILABILITY,
+                        "weight": 1.5,
+                    })
+    return rules
+
+
 class CallHandler:
     """
     Handles the full lifecycle of a single call.
@@ -113,7 +154,9 @@ class CallHandler:
             call_id=self.call_id,
             tenant_id=self._ctx.hospital_id,
         )
-        self._intent_engine = IntentEngine()
+        self._intent_engine = IntentEngine(
+            tenant_keyword_rules=_build_dept_keyword_rules(self._ctx)
+        )
         self._knowledge = HospitalKnowledgeService(self._ctx)
         self._composer = ResponseComposer(
             hospital_name=self._ctx.name_ml or self._ctx.name
@@ -175,8 +218,39 @@ class CallHandler:
             )
             self._state.update_from_result(intent_result)
 
+            # Secondary dept scan: if the standard keyword index missed the
+            # department (e.g. caller said "NILA" — the hospital's Malayalam ward
+            # name that isn't in the global synonym list), scan the transcript
+            # against the actual DB department names and name_ml values.
+            if intent_result.entities.department is None and self._ctx.departments:
+                transcript_lower = stt_result.transcript.lower()
+                for dept in self._ctx.departments:
+                    matched = False
+                    for candidate in (dept.name, dept.name_ml):
+                        if not candidate:
+                            continue
+                        cand_lower = candidate.lower()
+                        if cand_lower in transcript_lower:
+                            intent_result.entities.department = dept.name
+                            matched = True
+                            break
+                        # Also check individual words of the dept name
+                        for word in cand_lower.split():
+                            word = word.strip(".,/()")
+                            if (len(word) > 3
+                                    and word not in _DEPT_NAME_SKIP_WORDS
+                                    and word in transcript_lower):
+                                intent_result.entities.department = dept.name
+                                matched = True
+                                break
+                        if matched:
+                            break
+                    if matched:
+                        break
+
             logger.info("intent_result", intent=intent_result.intent,
                         confidence=intent_result.confidence,
+                        dept=intent_result.entities.department,
                         latency_ms=int((time.monotonic() - intent_start) * 1000))
 
             # Special intents
