@@ -31,9 +31,13 @@ class Settings(BaseSettings):
     SARVAM_TTS_VOICE_ML: str = "kavitha"
     SARVAM_TTS_VOICE_EN: str = "kavitha"
 
+    # TTS provider
+    TTS_PROVIDER: str = "sarvam"     # "sarvam" or "google"
+
     # STT
     STT_PROVIDER: str = "sarvam"
     STT_CONFIDENCE_THRESHOLD: float = 0.55
+    STT_LANGUAGES: str = "ml-IN,en-IN,hi-IN"  # Comma-separated fallback languages for Google STT
 
     # Groq LLM
     GROQ_API_KEY: str = ""
@@ -41,6 +45,10 @@ class Settings(BaseSettings):
     GROQ_MODEL_SMART: str = "llama-3.3-70b-versatile"
     GROQ_MAX_TOKENS: int = 100
     GROQ_TIMEOUT_S: int = 8
+
+    # AI Brain
+    AI_BRAIN: str = "groq"           # "groq" (keyword+Groq) or "gemini" (Gemini 2.5 Flash)
+    DEFAULT_LANGUAGE: str = "ml-IN"  # Fallback language if STT detection fails
 
     # Database
     DATABASE_URL: str = ""
@@ -62,8 +70,10 @@ class Settings(BaseSettings):
     AGENT_NAME: str = "Arya"
     AGENT_LANGUAGE: str = "ml-IN"
 
-    # Google Cloud (optional STT/TTS provider)
-    GOOGLE_API_KEY: str = ""
+    # Google Cloud — STT, TTS, and Gemini AI
+    GOOGLE_API_KEY: str = ""         # Legacy: kept for Google STT REST API key
+    GOOGLE_CLOUD_TTS_KEY: str = ""   # Google Cloud TTS API key (can be same as GOOGLE_API_KEY)
+    GEMINI_API_KEY: str = ""         # Gemini API key from Google AI Studio
 
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"

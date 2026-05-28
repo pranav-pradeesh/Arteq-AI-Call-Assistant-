@@ -47,6 +47,7 @@ from src.response.composer import (
 )
 from src.stt.providers import CompositeSTT
 from src.tts.engine import CompositeTTS
+from src.ai.gemini_brain import GeminiBrain, BrainResult
 
 logger = get_logger(__name__)
 
@@ -134,6 +135,7 @@ class CallHandler:
         self._tts = CompositeTTS()
         self._consecutive_failures = 0
         self._call_dead = False
+        self._brain: Optional[GeminiBrain] = None
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -161,6 +163,13 @@ class CallHandler:
         self._composer = ResponseComposer(
             hospital_name=self._ctx.name_ml or self._ctx.name
         )
+
+        # Initialize Gemini brain if configured
+        if settings.AI_BRAIN == "gemini":
+            self._brain = GeminiBrain(
+                hospital_context=self._ctx,
+                agent_name=settings.AGENT_NAME,
+            )
 
         time_greet = _time_greeting()
         hosp_name = self._ctx.name_ml or self._ctx.name
@@ -208,6 +217,40 @@ class CallHandler:
                 logger.info("recording_announcement_ignored",
                             transcript=stt_result.transcript[:80])
                 return b""
+
+            # ── Gemini Brain path (when AI_BRAIN=gemini) ─────────────────────
+            if self._brain and self._brain.is_available():
+                # Noise/greeting guard — don't feed backchannels to Gemini
+                if self._looks_like_noise_or_greeting(stt_result.transcript):
+                    hosp_name = self._ctx.name_ml or self._ctx.name if self._ctx else "ഈ hospital"
+                    response_text = (
+                        f"Hello! ഞാൻ {settings.AGENT_NAME} ആണ്, {hosp_name}-ലെ AI assistant. "
+                        f"Doctor timing, fees, departments, emergency — "
+                        f"എന്ത് സഹായം വേണം?"
+                    )
+                    await save_state(self._state)
+                    return await self._synthesize(response_text, stt_result.language_detected or settings.DEFAULT_LANGUAGE)
+
+                brain_result = await self._brain.process(
+                    transcript=stt_result.transcript,
+                    language_detected=stt_result.language_detected or settings.DEFAULT_LANGUAGE,
+                )
+
+                if brain_result.should_end:
+                    audio = await self._synthesize(brain_result.text, brain_result.language)
+                    await self._end_call_gracefully()
+                    return audio
+
+                if brain_result.should_transfer:
+                    if self._state:
+                        self._state.transfer_requested = True
+                    audio = await self._synthesize(brain_result.text, brain_result.language)
+                    if self._state:
+                        await save_state(self._state)
+                    return audio
+
+                await save_state(self._state)
+                return await self._synthesize(brain_result.text, brain_result.language)
 
             # ── Intent ───────────────────────────────────────────────────────
             intent_start = time.monotonic()
@@ -361,10 +404,10 @@ class CallHandler:
 
     # ── Helpers ───────────────────────────────────────────────────────────────
 
-    async def _synthesize(self, text: str) -> bytes:
+    async def _synthesize(self, text: str, language: str = "ml-IN") -> bytes:
         if not text or self._call_dead:
             return b""
-        audio = await self._tts.synthesize(text, language="ml-IN")
+        audio = await self._tts.synthesize(text, language=language)
         if not audio:
             self._consecutive_failures += 1
             if self._consecutive_failures >= 5:

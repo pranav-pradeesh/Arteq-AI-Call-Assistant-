@@ -148,14 +148,20 @@ class GoogleSTT:
         import base64 as _b64
         t_start = time.monotonic()
         try:
-            # Map "unknown" (Sarvam's auto-detect) to ml-IN with English fallback
-            lang_code = "ml-IN" if language == "unknown" else language
+            # Parse STT_LANGUAGES: "ml-IN,en-IN,hi-IN" → primary + alternatives
+            # Google STT v1 supports up to 3 alternativeLanguageCodes.
+            lang_list = [l.strip() for l in settings.STT_LANGUAGES.split(",") if l.strip()]
+            if not lang_list:
+                lang_list = ["ml-IN", "en-IN"]
+            # "unknown" → use configured primary language for auto-detection
+            lang_code = lang_list[0] if language == "unknown" else language
+            alt_langs = [l for l in lang_list[1:4] if l != lang_code]  # max 3 alternatives
             payload = {
                 "config": {
                     "encoding": "LINEAR16",
                     "sampleRateHertz": 16000,
                     "languageCode": lang_code,
-                    "alternativeLanguageCodes": ["en-IN"],
+                    "alternativeLanguageCodes": alt_langs,
                     "model": "default",
                     "useEnhanced": False,
                     "enableAutomaticPunctuation": False,

@@ -32,6 +32,18 @@ services:
         value: kavitha
       - key: STT_PROVIDER
         value: sarvam
+      - key: TTS_PROVIDER
+        value: sarvam
+      - key: AI_BRAIN
+        value: groq
+      - key: DEFAULT_LANGUAGE
+        value: ml-IN
+      - key: STT_LANGUAGES
+        value: ml-IN,en-IN,hi-IN
+      - key: AGENT_NAME
+        value: Arya
+      - key: AGENT_LANGUAGE
+        value: ml-IN
       - key: GROQ_MODEL_FAST
         value: llama-3.1-8b-instant
       - key: GROQ_MODEL_SMART
@@ -67,6 +79,12 @@ services:
       - key: EXOTEL_API_TOKEN
         sync: false
       - key: EXOTEL_CALLER_ID
+        sync: false
+      - key: GOOGLE_CLOUD_TTS_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
         sync: false
 
       # Public URL — set this AFTER deploy completes

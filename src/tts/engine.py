@@ -19,6 +19,7 @@ import httpx
 from src.cache.store import tts_cache, TTS_CACHE_TTL
 from src.config.settings import settings
 from src.observability.logger import get_logger
+from src.tts.google_tts import GoogleTTS
 
 logger = get_logger(__name__)
 
@@ -140,9 +141,17 @@ class CompositeTTS:
     """
     TTS with in-memory audio cache.
     Cache key = hash(text + language).
+
+    Provider selection (via settings.TTS_PROVIDER):
+      - "google"  → Google Cloud TTS Neural2, falls back to Sarvam on failure
+      - "sarvam"  → Sarvam Bulbul v3 only (default)
     """
 
     def __init__(self):
+        self._google: Optional[GoogleTTS] = None
+        if settings.TTS_PROVIDER == "google" and settings.GOOGLE_CLOUD_TTS_KEY:
+            self._google = GoogleTTS()
+
         self._sarvam: Optional[SarvamTTS] = None
         if settings.SARVAM_API_KEY:
             self._sarvam = SarvamTTS(
@@ -169,11 +178,20 @@ class CompositeTTS:
         return result.audio_bytes
 
     async def _synthesize_raw(self, text: str, language: str) -> Optional[TTSResult]:
+        # Try Google TTS first if configured
+        if self._google:
+            t_start = time.monotonic()
+            pcm = await self._google.synthesize(text, language=language)
+            if pcm is not None:
+                return TTSResult(audio_bytes=pcm, latency_ms=int((time.monotonic() - t_start) * 1000))
+            logger.warning("google_tts_fallback_to_sarvam")
+        # Sarvam fallback
         if self._sarvam:
             return await self._sarvam.synthesize(text, language=language)
         return None
 
     async def close(self) -> None:
+        # GoogleTTS is stateless (no persistent client), nothing to close
         if self._sarvam:
             await self._sarvam.close()
 
