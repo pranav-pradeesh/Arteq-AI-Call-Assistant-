@@ -60,6 +60,12 @@ class Settings(BaseSettings):
     AGENT_NAME: str = "Arya"
     AGENT_LANGUAGE: str = "ml-IN"
 
+    # Outbound / transfer
+    INTERNAL_API_KEY: str = ""
+    EXOTEL_SUBDOMAIN: str = "api.exotel.com"
+    REMINDERS_ENABLED: bool = True
+    REMINDER_INTERVAL_SECONDS: int = 900
+
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"

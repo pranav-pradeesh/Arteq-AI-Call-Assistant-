@@ -66,6 +66,16 @@ services:
         sync: false
       - key: EXOTEL_CALLER_ID
         sync: false
+      - key: INTERNAL_API_KEY
+        sync: false
+
+      # Non-secret outbound config
+      - key: EXOTEL_SUBDOMAIN
+        value: api.exotel.com
+      - key: REMINDERS_ENABLED
+        value: "true"
+      - key: REMINDER_INTERVAL_SECONDS
+        value: "900"
 
       # Public URL — set AFTER first deploy completes
       - key: PUBLIC_BASE_URL

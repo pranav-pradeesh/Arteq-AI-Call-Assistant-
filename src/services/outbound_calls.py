@@ -7,6 +7,7 @@ to our WebSocket handler where the AI (Arya) handles the reminder conversation.
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import httpx
 import structlog
@@ -17,6 +18,12 @@ logger = structlog.get_logger(__name__)
 
 _CONNECT_URL = "https://api.exotel.in/v1/Accounts/{sid}/Calls/connect.json"
 
+try:
+    import pytz as _pytz
+    _INDIA_TZ = _pytz.timezone("Asia/Kolkata")
+except ImportError:
+    _INDIA_TZ = None  # type: ignore[assignment]
+
 
 class OutboundCallService:
     """Schedules and manages outbound appointment reminder calls via Exotel."""
@@ -26,10 +33,11 @@ class OutboundCallService:
         patient_phone: str,
         patient_name: str,
         doctor_name: str,
-        appointment_date: str,
-        appointment_time: str,
-        hospital_id: str,
-        tenant_slug: str,
+        slot_time: datetime | None = None,
+        hospital_id: str = "",
+        tenant_slug: str = "default",
+        appointment_date: str | None = None,
+        appointment_time: str | None = None,
     ) -> bool:
         """
         Trigger an outbound reminder call to the patient via Exotel.
@@ -37,8 +45,28 @@ class OutboundCallService:
         Exotel dials the patient and, once answered, bridges the call to our
         inbound webhook URL where Arya handles the reminder conversation.
 
+        Prefer passing ``slot_time`` (a timestamp, timezone-aware preferred):
+        the human-readable date/time strings are derived in Asia/Kolkata.
+        For backward compatibility, ``appointment_date``/``appointment_time``
+        strings may be passed directly instead.
+
         Returns True on success, False on failure.
         """
+        if slot_time is not None and _INDIA_TZ is not None:
+            if slot_time.tzinfo is None:
+                slot_local = _INDIA_TZ.localize(slot_time)
+            else:
+                slot_local = slot_time.astimezone(_INDIA_TZ)
+            appointment_date = slot_local.strftime("%Y-%m-%d")
+            appointment_time = slot_local.strftime("%H:%M")
+        else:
+            appointment_date = appointment_date or (
+                slot_time.strftime("%Y-%m-%d") if slot_time else ""
+            )
+            appointment_time = appointment_time or (
+                slot_time.strftime("%H:%M") if slot_time else ""
+            )
+
         url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
@@ -102,19 +130,19 @@ class OutboundCallService:
         """
         query = """
             SELECT
-                id,
-                patient_phone,
-                patient_name,
-                doctor_name,
-                appointment_date::text,
-                appointment_time::text,
-                hospital_id,
-                tenant_slug
-            FROM appointments
+                a.id,
+                a.patient_phone,
+                a.patient_name,
+                a.slot_time,
+                a.hospital_id,
+                d.name AS doctor_name
+            FROM appointments a
+            LEFT JOIN doctors d ON a.doctor_id = d.id
             WHERE
-                reminder_sent = FALSE
-                AND appointment_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '1 day'
-            ORDER BY appointment_date, appointment_time
+                a.reminder_sent = false
+                AND a.status IN ('booked', 'confirmed')
+                AND a.slot_time BETWEEN now() AND now() + interval '24 hours'
+            ORDER BY a.slot_time
         """
         try:
             async with db_pool.acquire() as conn:

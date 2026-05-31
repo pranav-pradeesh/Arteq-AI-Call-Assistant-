@@ -47,8 +47,24 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("db_connection_failed", error=str(e))
 
+    # Reminder scheduler
+    _scheduler_task = None
+    try:
+        from src.services.scheduler import start_scheduler
+        _scheduler_task = start_scheduler()
+    except Exception as e:
+        logger.error("scheduler_start_failed", error=str(e))
+
     logger.info("arteq_ready", port=settings.PORT)
     yield
+
+    # Shutdown scheduler before closing DB pool
+    if _scheduler_task is not None:
+        try:
+            from src.services.scheduler import stop_scheduler
+            await stop_scheduler(_scheduler_task)
+        except Exception:
+            pass
 
     await close_pool()
     logger.info("arteq_shutdown")

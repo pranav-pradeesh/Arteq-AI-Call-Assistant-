@@ -4,17 +4,22 @@ Outbound Call API — endpoints for scheduling reminder calls and checking statu
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Form, Response
+from fastapi import APIRouter, Depends, Form, Response
 from pydantic import BaseModel
 
+from src.api.security import rate_limit, require_api_key
 from src.config.settings import settings
 from src.services.outbound_calls import OutboundCallService
 
 logger = structlog.get_logger(__name__)
 
-router = APIRouter(prefix="/api/v1/outbound", tags=["outbound"])
+router = APIRouter(
+    prefix="/api/v1/outbound",
+    tags=["outbound"],
+    dependencies=[Depends(require_api_key), Depends(rate_limit(30))],
+)
 
-# Separate router for Exotel callbacks (different prefix)
+# Separate router for Exotel callbacks (no auth — Exotel posts from its own IPs)
 callback_router = APIRouter(tags=["outbound"])
 
 _outbound_service = OutboundCallService()

@@ -40,7 +40,7 @@ class SarvamSTT:
     Sarvam Saarika v2 speech-to-text.
 
     Requires SARVAM_API_KEY in environment / .env.
-    language_code="" triggers auto-detection across all Indian languages + English.
+    language_code="unknown" triggers auto-detection across all Indian languages + English.
     """
 
     def __init__(self) -> None:
@@ -70,7 +70,7 @@ class SarvamSTT:
                         },
                         data={
                             "model": "saarika:v2",
-                            "language_code": "",  # empty = auto-detect
+                            "language_code": "unknown",  # "unknown" = auto-detect
                         },
                     )
 
