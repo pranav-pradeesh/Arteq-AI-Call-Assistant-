@@ -52,9 +52,6 @@ class Settings(BaseSettings):
     SESSION_TTL_S: int = 300
     CACHE_MAX_SIZE: int = 512
 
-    # Concurrency
-    MAX_CONCURRENT_CALLS: int = 10        # hard cap per process (free tier safety)
-
     # Intent thresholds
     INTENT_CONFIDENCE_THRESHOLD: float = 0.50
     MAX_CLARIFICATION_ATTEMPTS: int = 2

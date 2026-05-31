@@ -64,12 +64,17 @@ class CallRegistry:
 
 # ── Process-level singleton ────────────────────────────────────────────────────
 
+# Hard cap on simultaneous calls. Sized for the Render free tier (~512MB RAM,
+# shared CPU) and Groq's 30 RPM free limit. 8 gives a hospital reception line
+# enough headroom that callers rarely hit a busy signal, without overloading
+# the instance. Bump to 20-30 after upgrading the Render plan and Groq tier.
+MAX_CONCURRENT_CALLS = 8
+
 _registry: Optional[CallRegistry] = None
 
 
 def get_registry() -> CallRegistry:
     global _registry
     if _registry is None:
-        from src.config.settings import settings
-        _registry = CallRegistry(max_calls=settings.MAX_CONCURRENT_CALLS)
+        _registry = CallRegistry(max_calls=MAX_CONCURRENT_CALLS)
     return _registry
