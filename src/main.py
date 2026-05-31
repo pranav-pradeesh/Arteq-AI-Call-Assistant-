@@ -2,10 +2,13 @@
 Arteq Hospital Voice Agent — FastAPI entry point.
 
 Routes:
-  /ws/call/{tenant_slug}         WebSocket — Exotel audio stream
-  /api/v1/call/inbound/{slug}    POST — Exotel call webhook (returns XML)
-  /api/v1/health                 GET  — health check
-  /metrics                       GET  — Prometheus metrics
+  /ws/call/{tenant_slug}              WebSocket — Exotel audio stream
+  /api/v1/call/inbound/{slug}         POST — Exotel call webhook (returns XML)
+  /api/v1/outbound/reminder           POST — schedule outbound reminder call
+  /api/v1/outbound/health             GET  — outbound service health
+  /api/v1/call/status                 POST — Exotel call status callback
+  /api/v1/health                      GET  — health check
+  /metrics                            GET  — Prometheus metrics
 """
 from __future__ import annotations
 
@@ -14,7 +17,6 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
-
 from fastapi.staticfiles import StaticFiles
 
 from src.config.settings import settings
@@ -80,8 +82,8 @@ async def health_check():
         "status": "healthy",
         "version": "1.0.0",
         "env": settings.ENV,
-        "stt": "google/" + settings.STT_PROVIDER,
-        "tts": "gemini/" + settings.TTS_PROVIDER,
+        "stt": settings.STT_PROVIDER,
+        "tts": settings.TTS_PROVIDER,
         "hospital_id": settings.HOSPITAL_ID,
     }
 
@@ -117,6 +119,17 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     </Connect>
 </Response>"""
     return Response(content=xml, media_type="text/xml")
+
+
+# ── Outbound calls & SMS ──────────────────────────────────────────────────────
+
+try:
+    from src.api.outbound import router as outbound_router, callback_router
+    app.include_router(outbound_router)
+    app.include_router(callback_router)
+    logger.info("outbound_router_mounted")
+except Exception as e:
+    logger.error("outbound_router_mount_failed", error=str(e))
 
 
 # ── Admin Dashboard ───────────────────────────────────────────────────────────

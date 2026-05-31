@@ -11,7 +11,7 @@ asyncpg==0.29.0
 alembic==1.13.1
 
 # LLM
-google-genai>=1.0.0
+groq>=0.9.0
 
 # Validation
 pydantic==2.7.1

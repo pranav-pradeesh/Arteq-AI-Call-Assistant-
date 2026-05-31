@@ -23,17 +23,13 @@ services:
       - key: TELEPHONY_MODE
         value: stream
 
-      # AI stack
+      # AI stack — Sarvam STT/TTS + Groq LLaMA brain
       - key: STT_PROVIDER
-        value: gemini
+        value: sarvam
       - key: TTS_PROVIDER
-        value: gemini
-      - key: GEMINI_TTS_VOICE
-        value: Aoede
+        value: sarvam
       - key: DEFAULT_LANGUAGE
         value: ml-IN
-      - key: STT_LANGUAGES
-        value: ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN
 
       # Persona
       - key: AGENT_NAME
@@ -50,11 +46,9 @@ services:
         value: ""
 
       # Secrets — set these in Render dashboard (sync: false = prompt on deploy)
-      - key: GEMINI_API_KEY
+      - key: SARVAM_API_KEY
         sync: false
-      - key: GOOGLE_API_KEY
-        sync: false
-      - key: GOOGLE_CLOUD_TTS_KEY
+      - key: GROQ_API_KEY
         sync: false
       - key: DATABASE_URL
         sync: false

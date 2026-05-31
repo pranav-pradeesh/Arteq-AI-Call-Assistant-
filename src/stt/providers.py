@@ -1,19 +1,12 @@
 """
-STT Providers.
+STT Providers — Sarvam Saarika v2.
 
-Provider selection via STT_PROVIDER env var:
-  "gemini"  → Gemini 2.5 Flash multimodal (default — no Google Cloud billing needed)
-  "google"  → Google Cloud Speech-to-Text v1 (requires GOOGLE_API_KEY + billing)
-
-Language detected is passed to Gemini brain and TTS for response voice matching.
+Auto-detects language across all major Indian languages + Manglish.
 """
 from __future__ import annotations
 
-import time
 from dataclasses import dataclass
 from typing import Optional
-
-import httpx
 
 from src.config.settings import settings
 from src.observability.logger import get_logger
@@ -40,129 +33,28 @@ class STTError:
     recoverable: bool = True
 
 
-class GoogleSTT:
-    """
-    Google Cloud Speech-to-Text v1 REST API.
-
-    Multilingual: reads STT_LANGUAGES (comma-separated BCP-47 codes).
-    First code = primary language. Next up to 3 = alternativeLanguageCodes.
-    Requires GOOGLE_API_KEY with Cloud Speech billing enabled.
-    """
-
-    STT_URL = "https://speech.googleapis.com/v1/speech:recognize"
-
-    async def transcribe_chunk(
-        self,
-        audio_bytes: bytes,
-        language: str = "ml-IN",
-    ) -> STTResult | STTError:
-        import base64 as _b64
-        t_start = time.monotonic()
-        try:
-            lang_list = [l.strip() for l in settings.STT_LANGUAGES.split(",") if l.strip()]
-            if not lang_list:
-                lang_list = ["ml-IN", "en-IN", "hi-IN"]
-            lang_code = lang_list[0] if language == "unknown" else language
-            alt_langs = [l for l in lang_list[1:4] if l != lang_code]
-            payload = {
-                "config": {
-                    "encoding": "LINEAR16",
-                    "sampleRateHertz": 16000,
-                    "languageCode": lang_code,
-                    "alternativeLanguageCodes": alt_langs,
-                    "model": "default",
-                    "useEnhanced": False,
-                    "enableAutomaticPunctuation": False,
-                },
-                "audio": {"content": _b64.b64encode(audio_bytes).decode()},
-            }
-            async with httpx.AsyncClient(timeout=httpx.Timeout(10.0, connect=3.0)) as client:
-                response = await client.post(
-                    self.STT_URL,
-                    params={"key": settings.GOOGLE_API_KEY},
-                    json=payload,
-                )
-            latency_ms = int((time.monotonic() - t_start) * 1000)
-            if response.status_code >= 400:
-                logger.error("google_stt_http_error", status=response.status_code,
-                             body=response.text[:300])
-                return STTError(
-                    provider="google",
-                    error_code=f"HTTP_{response.status_code}",
-                    message=response.text[:200],
-                    recoverable=response.status_code in (429, 503, 504),
-                )
-            data = response.json()
-            results = data.get("results", [])
-            if not results:
-                return STTResult(transcript="", confidence=0.0, is_partial=False,
-                                 provider="google", latency_ms=latency_ms)
-            alt = results[0].get("alternatives", [{}])[0]
-            transcript = alt.get("transcript", "")
-            confidence = float(alt.get("confidence", 0.75))
-            detected_lang = results[0].get("languageCode", lang_code)
-            logger.info("google_stt_ok", transcript=transcript[:120],
-                        lang=detected_lang, latency_ms=latency_ms)
-            return STTResult(
-                transcript=transcript,
-                confidence=confidence,
-                is_partial=False,
-                provider="google",
-                latency_ms=latency_ms,
-                language_detected=detected_lang,
-            )
-        except httpx.TimeoutException:
-            return STTError(provider="google", error_code="TIMEOUT",
-                            message="Google STT timed out", recoverable=True)
-        except Exception as e:
-            return STTError(provider="google", error_code="UNKNOWN",
-                            message=str(e), recoverable=True)
-
-
 class CompositeSTT:
-    """
-    STT dispatcher. Provider chosen by STT_PROVIDER env var.
-
-    "gemini" (default) → GeminiSTT — one API key, no billing required
-    "google"           → GoogleSTT — Google Cloud Speech, requires billing
-    """
+    """STT dispatcher. Provider: Sarvam Saarika v2 (language auto-detect)."""
 
     def __init__(self):
-        from src.stt.gemini_stt import GeminiSTT
-
-        self._gemini: Optional[GeminiSTT] = None
-        self._google: Optional[GoogleSTT] = None
-
-        if settings.STT_PROVIDER == "gemini":
-            if settings.GEMINI_API_KEY:
-                self._gemini = GeminiSTT()
-            else:
-                logger.warning("gemini_stt_no_api_key")
+        from src.stt.sarvam_stt import SarvamSTT
+        self._sarvam: Optional[SarvamSTT] = None
+        if settings.SARVAM_API_KEY:
+            self._sarvam = SarvamSTT()
         else:
-            if settings.GOOGLE_API_KEY:
-                self._google = GoogleSTT()
-            else:
-                logger.warning("google_stt_no_api_key_set")
+            logger.warning("sarvam_stt_no_api_key")
 
     async def transcribe(self, audio_bytes: bytes, language: str = "ml-IN") -> STTResult:
-        if self._gemini:
-            transcript, lang, confidence = await self._gemini.transcribe(audio_bytes)
+        if self._sarvam:
+            transcript, lang, confidence = await self._sarvam.transcribe(audio_bytes)
             return STTResult(
                 transcript=transcript,
                 confidence=confidence,
                 is_partial=False,
-                provider="gemini",
+                provider="sarvam",
                 latency_ms=0,
                 language_detected=lang,
             )
-
-        if self._google:
-            result = await self._google.transcribe_chunk(audio_bytes, language=language)
-            if isinstance(result, STTResult):
-                return result
-            logger.warning("google_stt_error", error=result.error_code,
-                           msg=result.message[:100])
-
         return STTResult(transcript="", confidence=0.0, is_partial=False,
                          provider="none", latency_ms=0)
 

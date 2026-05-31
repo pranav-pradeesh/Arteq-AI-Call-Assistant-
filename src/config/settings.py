@@ -20,23 +20,25 @@ class Settings(BaseSettings):
     # Telephony
     TELEPHONY_MODE: str = "stream"
     EXOTEL_SID: str = ""
+    EXOTEL_API_KEY: str = ""
+    EXOTEL_API_TOKEN: str = ""
     EXOTEL_CALLER_ID: str = ""
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     PUBLIC_WS_URL: str = "ws://localhost:8000"
 
-    # TTS provider
-    TTS_PROVIDER: str = "gemini"     # "gemini" (default) | "google"
-    GEMINI_TTS_VOICE: str = "Aoede"  # Aoede/Kore/Zephyr (female) · Charon/Puck/Fenrir (male)
-
-    # STT
-    STT_PROVIDER: str = "google"
+    # Provider selection
+    TTS_PROVIDER: str = "sarvam"
+    STT_PROVIDER: str = "sarvam"
     STT_CONFIDENCE_THRESHOLD: float = 0.55
-    # All 22 scheduled Indian languages + English. Google STT v1 uses first as
-    # primary and next 1-3 as alternatives. Operators can trim to their region.
-    STT_LANGUAGES: str = "ml-IN,en-IN,hi-IN,ta-IN,te-IN,kn-IN,bn-IN,mr-IN,gu-IN,pa-IN,or-IN,ur-IN,ne-IN,as-IN,sd-IN,kok-IN,mai-IN,brx-IN,doi-IN,ks-IN,mni-IN,sat-IN,sa-IN"
 
     # AI Brain
-    DEFAULT_LANGUAGE: str = "ml-IN"  # Fallback language if STT detection fails
+    DEFAULT_LANGUAGE: str = "ml-IN"
+
+    # Sarvam AI — STT (Saarika v2) + TTS (Bulbul v3)
+    SARVAM_API_KEY: str = ""
+
+    # Groq AI — LLaMA brain
+    GROQ_API_KEY: str = ""
 
     # Database
     DATABASE_URL: str = ""
@@ -57,11 +59,6 @@ class Settings(BaseSettings):
     # Persona
     AGENT_NAME: str = "Arya"
     AGENT_LANGUAGE: str = "ml-IN"
-
-    # Google Cloud — STT, TTS, and Gemini AI
-    GOOGLE_API_KEY: str = ""         # Legacy: kept for Google STT REST API key
-    GOOGLE_CLOUD_TTS_KEY: str = ""   # Google Cloud TTS API key (can be same as GOOGLE_API_KEY)
-    GEMINI_API_KEY: str = ""         # Gemini API key from Google AI Studio
 
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"

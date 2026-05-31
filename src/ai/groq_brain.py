@@ -18,7 +18,7 @@ from typing import Optional
 
 import pytz
 
-from src.ai.gemini_brain import BrainResult
+from src.ai.base import BrainResult
 from src.config.settings import settings
 from src.db.queries import HospitalContext
 from src.observability.logger import get_logger

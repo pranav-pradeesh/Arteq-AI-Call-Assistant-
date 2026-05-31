@@ -1,9 +1,7 @@
 """
 Call Handler — orchestrates every hospital call.
 
-Pipeline: STT → Gemini Brain → TTS
-
-One instance per call — stateful via ConversationState in memory.
+Pipeline: STT (Sarvam) → Groq Brain (LLaMA) → TTS (Sarvam)
 """
 from __future__ import annotations
 
@@ -14,7 +12,7 @@ from typing import Optional
 
 import pytz
 
-from src.ai.gemini_brain import GeminiBrain
+from src.ai.groq_brain import GroqBrain, GroqBrainResult
 from src.config.settings import settings
 from src.conversation.state import (
     ConversationState,
@@ -28,6 +26,7 @@ from src.db.queries import (
     write_call_log,
 )
 from src.observability.logger import get_logger, bind_call_context, clear_call_context
+from src.services.sms_service import SMSService
 from src.stt.providers import CompositeSTT
 from src.tts.engine import CompositeTTS
 
@@ -52,16 +51,18 @@ class CallHandler:
 
         self._ctx: Optional[HospitalContext] = None
         self._state: Optional[ConversationState] = None
-        self._brain: Optional[GeminiBrain] = None
+        self._brain: Optional[GroqBrain] = None
         self._stt = CompositeSTT()
         self._tts = CompositeTTS()
+        self._sms = SMSService()
         self._consecutive_failures = 0
         self._call_dead = False
+        self._transcript: list[dict] = []
 
-    # ── Public interface ──────────────────────────────────────────────────────
+    # ── Public interface ──────────────────────────────────────────────────────────
 
     async def start_call(self) -> bytes:
-        """Load hospital context, initialise Gemini brain, return greeting audio."""
+        """Load hospital context, initialise Groq brain, return greeting audio."""
         bind_call_context(call_id=self.call_id, tenant_id=self.hospital_id)
         logger.info("call_started", call_id=self.call_id, caller=self.caller_number)
 
@@ -77,12 +78,13 @@ class CallHandler:
             call_id=self.call_id,
             tenant_id=self._ctx.hospital_id,
         )
-        self._brain = GeminiBrain(
+        self._brain = GroqBrain(
             hospital_context=self._ctx,
             agent_name=settings.AGENT_NAME,
         )
 
         greeting_result = await self._brain.generate_greeting()
+        self._transcript.append({"role": "assistant", "text": greeting_result.text})
         audio = await self._synthesize(
             greeting_result.text, language=greeting_result.language
         )
@@ -116,38 +118,47 @@ class CallHandler:
                     "ക്ഷമിക്കണം, ശരിക്ക് കേൾക്കാൻ കഴിഞ്ഞില്ല. ഒന്നുകൂടി പറയാമോ?",
                 )
 
-            # Filter automated recording announcements (Google dialer etc.)
+            # Filter automated recording announcements
             if self._is_recording_announcement(stt_result.transcript):
                 logger.info("recording_announcement_ignored",
                             transcript=stt_result.transcript[:80])
                 return b""
 
-            # Single-word backchannels ("hello", "hmm") — re-introduce the bot
+            # Single-word backchannels → re-introduce the bot
             if self._looks_like_noise_or_greeting(stt_result.transcript):
                 hosp_name = self._ctx.name_ml or self._ctx.name
                 response_text = (
-                    f"Hello! ഞാൻ {settings.AGENT_NAME} ആണ്, "
-                    f"{hosp_name}-ലെ AI assistant. "
-                    "Doctor timing, fees, departments, emergency — "
-                    "എന്ത് സഹായം വേണം?"
+                    f"ഞാൻ {settings.AGENT_NAME} — {hosp_name}-ലെ AI receptionist. "
+                    "Doctor timing, fees, departments, emergency — എന്ത് സഹായം വേണം?"
                 )
                 await save_state(self._state)
                 return await self._synthesize(response_text)
 
-            # ── Gemini Brain ──────────────────────────────────────────────────
+            self._transcript.append({"role": "caller", "text": stt_result.transcript})
+
+            # ── Groq Brain ────────────────────────────────────────────────────
             lang = stt_result.language_detected or settings.DEFAULT_LANGUAGE
             brain_result = await self._brain.process(
                 transcript=stt_result.transcript,
                 language_detected=lang,
             )
+            self._transcript.append({"role": "assistant", "text": brain_result.text})
 
             e2e_ms = int((time.monotonic() - turn_start) * 1000)
-            logger.info("turn_complete",
-                        response_preview=brain_result.text[:80],
-                        lang=brain_result.language,
-                        transfer=brain_result.should_transfer,
-                        end=brain_result.should_end,
-                        e2e_ms=e2e_ms)
+            logger.info(
+                "turn_complete",
+                response_preview=brain_result.text[:80],
+                lang=brain_result.language,
+                transfer=brain_result.should_transfer,
+                end=brain_result.should_end,
+                emergency=brain_result.is_emergency,
+                dest=brain_result.transfer_destination,
+                e2e_ms=e2e_ms,
+            )
+
+            # SMS actions triggered by brain (fire-and-forget)
+            if brain_result.sms_type and self.caller_number:
+                asyncio.create_task(self._handle_sms(brain_result))
 
             if brain_result.should_end:
                 audio = await self._synthesize(
@@ -156,7 +167,7 @@ class CallHandler:
                 await self._end_call_gracefully()
                 return audio
 
-            if brain_result.should_transfer:
+            if brain_result.should_transfer or brain_result.is_emergency:
                 self._state.transfer_requested = True
                 audio = await self._synthesize(
                     brain_result.text, language=brain_result.language
@@ -187,7 +198,7 @@ class CallHandler:
         finally:
             clear_call_context()
 
-    # ── Helpers ───────────────────────────────────────────────────────────────
+    # ── Helpers ───────────────────────────────────────────────────────────────────
 
     async def _synthesize(self, text: str, language: str = "ml-IN") -> bytes:
         if not text or self._call_dead:
@@ -221,6 +232,39 @@ class CallHandler:
     async def _end_call_gracefully(self) -> None:
         await self.end_call()
 
+    async def _handle_sms(self, result: GroqBrainResult) -> None:
+        """Fire-and-forget SMS based on brain routing decision."""
+        if not self.caller_number or not self._ctx:
+            return
+        try:
+            if result.sms_type == "maps":
+                await self._sms.send_maps_link(
+                    phone=self.caller_number,
+                    hospital_name=self._ctx.name,
+                    address=self._ctx.address,
+                )
+            elif result.sms_type == "appointment":
+                data = result.sms_data or {}
+                await self._sms.send_appointment_confirmation(
+                    phone=self.caller_number,
+                    hospital_name=self._ctx.name,
+                    patient_name=data.get("patient_name", ""),
+                    doctor_name=data.get("doctor_name", result.transfer_doctor),
+                    date=data.get("date", ""),
+                    time=data.get("time", ""),
+                )
+            elif result.sms_type == "lab_schedule":
+                data = result.sms_data or {}
+                await self._sms.send_lab_schedule(
+                    phone=self.caller_number,
+                    hospital_name=self._ctx.name,
+                    test_name=data.get("test_name", ""),
+                    instructions=data.get("instructions", "Please follow your doctor's advice."),
+                    lab_timing=data.get("timing", ""),
+                )
+        except Exception as exc:
+            logger.error("sms_action_failed", error=str(exc), sms_type=result.sms_type)
+
     @staticmethod
     def _looks_like_noise_or_greeting(transcript: str) -> bool:
         t = transcript.lower().strip()
@@ -251,6 +295,27 @@ class CallHandler:
         if not self._state:
             return
         try:
+            outcome = "transferred" if self._state.transfer_requested else "answered"
+
+            # Generate call summary if Groq is configured
+            if self._transcript and settings.GROQ_API_KEY:
+                try:
+                    from src.services.call_summary import CallSummaryService
+                    summary_svc = CallSummaryService()
+                    summary = await summary_svc.generate(
+                        conversation=self._transcript,
+                        caller_number=self.caller_number or "",
+                        hospital_name=self._ctx.name if self._ctx else "",
+                        outcome=outcome,
+                    )
+                    await summary_svc.notify_staff(
+                        summary=summary,
+                        caller_number=self.caller_number or "",
+                        hospital_id=self.hospital_id,
+                    )
+                except Exception as exc:
+                    logger.error("call_summary_error", error=str(exc))
+
             await write_call_log(
                 hospital_id=self._ctx.hospital_id if self._ctx else self.hospital_id,
                 call_id=self.call_id,
@@ -264,9 +329,9 @@ class CallHandler:
                     self._state.elapsed_ms() / max(self._state.turn_count, 1)
                 ),
                 cost_paise=0,
-                transcript=[],
+                transcript=self._transcript,
                 intents=[],
-                outcome="transferred" if self._state.transfer_requested else "answered",
+                outcome=outcome,
             )
         except Exception as e:
             logger.error("persist_call_log_failed", error=str(e))
