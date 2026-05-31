@@ -58,7 +58,7 @@ class SarvamSTT:
 
         try:
             async with httpx.AsyncClient(
-                timeout=httpx.Timeout(read=10.0, connect=3.0)
+                timeout=httpx.Timeout(10.0, connect=3.0)
             ) as client:
                 response = await client.post(
                     _SARVAM_STT_URL,
