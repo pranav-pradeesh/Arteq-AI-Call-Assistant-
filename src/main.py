@@ -78,6 +78,8 @@ app.add_middleware(
 
 @app.get("/api/v1/health")
 async def health_check():
+    from src.telephony.call_registry import get_registry
+    reg = get_registry()
     return {
         "status": "healthy",
         "version": "1.0.0",
@@ -85,6 +87,8 @@ async def health_check():
         "stt": settings.STT_PROVIDER,
         "tts": settings.TTS_PROVIDER,
         "hospital_id": settings.HOSPITAL_ID,
+        "active_calls": reg.active_count,
+        "max_calls": reg.max_calls,
     }
 
 

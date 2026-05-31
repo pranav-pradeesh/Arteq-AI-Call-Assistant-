@@ -9,6 +9,7 @@ Output: (transcript, language_code, confidence)
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import time
 import wave
@@ -56,49 +57,56 @@ class SarvamSTT:
         t_start = time.monotonic()
         wav_bytes = _pcm_to_wav(audio_bytes, sample_rate=16000)
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(10.0, connect=3.0)
-            ) as client:
-                response = await client.post(
-                    _SARVAM_STT_URL,
-                    headers={"api-subscription-key": self._api_key},
-                    files={
-                        "file": ("audio.wav", wav_bytes, "audio/wav"),
-                    },
-                    data={
-                        "model": "saarika:v2",
-                        "language_code": "",  # empty = auto-detect
-                    },
-                )
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(10.0, connect=3.0)
+                ) as client:
+                    response = await client.post(
+                        _SARVAM_STT_URL,
+                        headers={"api-subscription-key": self._api_key},
+                        files={
+                            "file": ("audio.wav", wav_bytes, "audio/wav"),
+                        },
+                        data={
+                            "model": "saarika:v2",
+                            "language_code": "",  # empty = auto-detect
+                        },
+                    )
 
-            latency_ms = int((time.monotonic() - t_start) * 1000)
+                latency_ms = int((time.monotonic() - t_start) * 1000)
 
-            if response.status_code >= 400:
-                logger.error(
-                    "sarvam_stt_error",
-                    error=f"HTTP {response.status_code}",
-                    status=response.status_code,
-                    body=response.text[:300],
+                if response.status_code in (429, 503) and attempt < 2:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+
+                if response.status_code >= 400:
+                    logger.error(
+                        "sarvam_stt_error",
+                        error=f"HTTP {response.status_code}",
+                        status=response.status_code,
+                        body=response.text[:300],
+                    )
+                    return ("", "ml-IN", 0.0)
+
+                data = response.json()
+                transcript: str = data.get("transcript", "")
+                language_code: str = data.get("language_code", "ml-IN")
+                confidence: float = 0.9
+
+                logger.info(
+                    "sarvam_stt_ok",
+                    transcript=transcript[:100],
+                    lang=language_code,
+                    latency_ms=latency_ms,
                 )
+                return (transcript, language_code, confidence)
+
+            except httpx.TimeoutException as exc:
+                logger.error("sarvam_stt_error", error=f"Timeout: {exc}")
+                return ("", "ml-IN", 0.0)
+            except Exception as exc:
+                logger.error("sarvam_stt_error", error=str(exc))
                 return ("", "ml-IN", 0.0)
 
-            data = response.json()
-            transcript: str = data.get("transcript", "")
-            language_code: str = data.get("language_code", "ml-IN")
-            confidence: float = 0.9
-
-            logger.info(
-                "sarvam_stt_ok",
-                transcript=transcript[:100],
-                lang=language_code,
-                latency_ms=latency_ms,
-            )
-            return (transcript, language_code, confidence)
-
-        except httpx.TimeoutException as exc:
-            logger.error("sarvam_stt_error", error=f"Timeout: {exc}")
-            return ("", "ml-IN", 0.0)
-        except Exception as exc:
-            logger.error("sarvam_stt_error", error=str(exc))
-            return ("", "ml-IN", 0.0)
+        return ("", "ml-IN", 0.0)

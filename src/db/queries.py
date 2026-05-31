@@ -67,20 +67,24 @@ def named_dow_to_db(name: str) -> Optional[int]:
 # ── Connection pool ──────────────────────────────────────────────────────────
 
 _pool: Optional[asyncpg.Pool] = None
+_pool_lock = asyncio.Lock()   # prevents duplicate pool creation under concurrent start
 
 
 async def get_pool() -> asyncpg.Pool:
     global _pool
-    if _pool is None:
-        url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-        _pool = await asyncpg.create_pool(
-            url,
-            min_size=1,
-            max_size=10,                # Render free tier holds ~10 conn comfortably
-            command_timeout=30,         # cold-start Supabase queries can be slow
-            ssl="require",
-            timeout=20,                 # per-connection connect timeout
-        )
+    if _pool is not None:
+        return _pool
+    async with _pool_lock:
+        if _pool is None:   # re-check after acquiring — another coroutine may have created it
+            url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+            _pool = await asyncpg.create_pool(
+                url,
+                min_size=1,
+                max_size=10,            # Render free tier holds ~10 conn comfortably
+                command_timeout=30,     # cold-start Supabase queries can be slow
+                ssl="require",
+                timeout=20,             # per-connection connect timeout
+            )
     return _pool
 
 
@@ -323,15 +327,26 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
     )
 
 
+# Per-hospital locks prevent multiple concurrent calls from all hitting the DB
+# at startup when the cache is cold (thundering herd).
+_ctx_locks: dict[str, asyncio.Lock] = {}
+
+
 async def get_or_load_hospital_context(hospital_id: str) -> HospitalContext:
     """Return cached HospitalContext, refreshing from DB every 5 minutes."""
     from src.cache.store import hospital_cache, HOSPITAL_CACHE_TTL
     cached = hospital_cache.get(hospital_id)
     if cached is not None:
         return cached
-    ctx = await load_hospital_context(hospital_id)
-    hospital_cache.set(hospital_id, ctx, ttl=HOSPITAL_CACHE_TTL)
-    return ctx
+    if hospital_id not in _ctx_locks:   # asyncio is single-threaded; no race here
+        _ctx_locks[hospital_id] = asyncio.Lock()
+    async with _ctx_locks[hospital_id]:
+        cached = hospital_cache.get(hospital_id)   # re-check inside lock
+        if cached is not None:
+            return cached
+        ctx = await load_hospital_context(hospital_id)
+        hospital_cache.set(hospital_id, ctx, ttl=HOSPITAL_CACHE_TTL)
+        return ctx
 
 
 async def write_call_log(

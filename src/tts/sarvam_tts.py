@@ -9,6 +9,7 @@ Output: raw PCM16 mono @ 8 kHz bytes, or None on failure
 """
 from __future__ import annotations
 
+import asyncio
 import base64
 import time
 from typing import Optional
@@ -111,48 +112,55 @@ class SarvamTTS:
             "eng_interpolation_wt": 123,
         }
 
-        try:
-            async with httpx.AsyncClient(
-                timeout=httpx.Timeout(15.0, connect=3.0)
-            ) as client:
-                response = await client.post(
-                    _SARVAM_TTS_URL,
-                    headers={
-                        "api-subscription-key": self._api_key,
-                        "Content-Type": "application/json",
-                    },
-                    json=payload,
-                )
+        for attempt in range(3):
+            try:
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(15.0, connect=3.0)
+                ) as client:
+                    response = await client.post(
+                        _SARVAM_TTS_URL,
+                        headers={
+                            "api-subscription-key": self._api_key,
+                            "Content-Type": "application/json",
+                        },
+                        json=payload,
+                    )
 
-            latency_ms = int((time.monotonic() - t_start) * 1000)
+                latency_ms = int((time.monotonic() - t_start) * 1000)
 
-            if response.status_code >= 400:
-                logger.error(
-                    "sarvam_tts_error",
-                    error=f"HTTP {response.status_code}: {response.text[:300]}",
+                if response.status_code in (429, 503) and attempt < 2:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+
+                if response.status_code >= 400:
+                    logger.error(
+                        "sarvam_tts_error",
+                        error=f"HTTP {response.status_code}: {response.text[:300]}",
+                    )
+                    return None
+
+                data = response.json()
+                audios = data.get("audios", [])
+                if not audios:
+                    logger.error("sarvam_tts_error", error="empty audios array in response")
+                    return None
+
+                wav_bytes = base64.b64decode(audios[0])
+                pcm_bytes = _wav_to_pcm_8k_mono(wav_bytes)
+
+                logger.info(
+                    "sarvam_tts_ok",
+                    latency_ms=latency_ms,
+                    text_len=len(text),
+                    pcm_bytes=len(pcm_bytes),
                 )
+                return pcm_bytes
+
+            except httpx.TimeoutException as exc:
+                logger.error("sarvam_tts_error", error=f"Timeout: {exc}")
+                return None
+            except Exception as exc:
+                logger.error("sarvam_tts_error", error=str(exc))
                 return None
 
-            data = response.json()
-            audios = data.get("audios", [])
-            if not audios:
-                logger.error("sarvam_tts_error", error="empty audios array in response")
-                return None
-
-            wav_bytes = base64.b64decode(audios[0])
-            pcm_bytes = _wav_to_pcm_8k_mono(wav_bytes)
-
-            logger.info(
-                "sarvam_tts_ok",
-                latency_ms=latency_ms,
-                text_len=len(text),
-                pcm_bytes=len(pcm_bytes),
-            )
-            return pcm_bytes
-
-        except httpx.TimeoutException as exc:
-            logger.error("sarvam_tts_error", error=f"Timeout: {exc}")
-            return None
-        except Exception as exc:
-            logger.error("sarvam_tts_error", error=str(exc))
-            return None
+        return None

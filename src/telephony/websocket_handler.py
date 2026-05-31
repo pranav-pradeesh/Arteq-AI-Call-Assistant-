@@ -95,11 +95,13 @@ async def handle_exotel_stream(
     tenant_slug: str,
 ) -> None:
     """Handle an Exotel Voicebot WebSocket session with barge-in support."""
+    from src.telephony.call_registry import get_registry
     hospital_id = await _resolve_hospital_id(tenant_slug)
     call_id = str(uuid.uuid4())
     stream_sid: Optional[str] = None
     handler: Optional[CallHandler] = None
     vad = SimpleVAD()
+    registry = get_registry()
 
     audio_buffer = bytearray()
     silence_count = 0
@@ -136,6 +138,11 @@ async def handle_exotel_stream(
 
     await websocket.accept()
     logger.info("ws_connected", tenant=tenant_slug)
+
+    if not await registry.try_register(call_id):
+        # All slots taken — close with 1013 "Try Again Later"
+        await websocket.close(code=1013)
+        return
 
     try:
         async for raw_msg in websocket.iter_text():
@@ -258,6 +265,7 @@ async def handle_exotel_stream(
     except Exception as e:
         logger.error("ws_error", call_id=call_id, error=str(e))
     finally:
+        await registry.unregister(call_id)
         if playback_task and not playback_task.done():
             playback_task.cancel()
         if handler:

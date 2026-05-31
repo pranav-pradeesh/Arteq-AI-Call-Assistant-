@@ -34,6 +34,10 @@ _MODEL_FAST = "llama-3.1-8b-instant"
 # History limit: keep last 20 messages (10 turns)
 _MAX_HISTORY = 20
 
+# Limit concurrent Groq API calls across all active calls.
+# Free tier: 30 RPM per model. With 5 slots × ~6 req/min max ≈ 30 RPM.
+_GROQ_SEM = asyncio.Semaphore(5)
+
 
 @dataclass
 class GroqBrainResult(BrainResult):
@@ -318,13 +322,24 @@ class GroqBrain:
         ]
 
         try:
-            response = await self._client.chat.completions.create(
-                model=model,
-                messages=messages,
-                temperature=0.3,
-                max_tokens=300,
-                response_format={"type": "json_object"},
-            )
+            response = None
+            for _attempt in range(3):
+                try:
+                    async with _GROQ_SEM:
+                        response = await self._client.chat.completions.create(
+                            model=model,
+                            messages=messages,
+                            temperature=0.3,
+                            max_tokens=300,
+                            response_format={"type": "json_object"},
+                        )
+                    break   # success
+                except Exception as _exc:
+                    _msg = str(_exc).lower()
+                    if ("rate_limit" in _msg or "rate limit" in _msg or "429" in _msg) and _attempt < 2:
+                        await asyncio.sleep(2 ** (_attempt + 1))   # 2 s, 4 s
+                        continue
+                    raise
 
             latency_ms = int((time.monotonic() - t_start) * 1000)
             raw_text: str = response.choices[0].message.content or ""
