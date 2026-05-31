@@ -166,6 +166,7 @@ class HospitalContext:
     billing: list[BillingRow]
     faqs: list[FaqRow]
     emergency: list[EmergencyContact]
+    knowledge_base: str = ""   # free-form staff handbook (parking, insurance, policies, …)
     loaded_at: float = 0.0
 
     # ── Quick lookup helpers ──────────────────────────────────────────────────
@@ -310,6 +311,18 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
             for r in emerg_rows
         ]
 
+        # Free-form knowledge base — graceful if the column doesn't exist yet.
+        # asyncpg autocommits each statement, so a missing-column error here
+        # does not poison the connection for the queries already run above.
+        knowledge_base = ""
+        try:
+            kb = await conn.fetchval(
+                "SELECT knowledge_base FROM hospitals WHERE id=$1", hospital_id
+            )
+            knowledge_base = kb or ""
+        except Exception:
+            knowledge_base = ""
+
     import time
     return HospitalContext(
         hospital_id=hospital_id,
@@ -323,6 +336,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         billing=billing,
         faqs=faqs,
         emergency=emergency,
+        knowledge_base=knowledge_base,
         loaded_at=time.time(),
     )
 

@@ -1,21 +1,30 @@
 """
-Groq LLaMA brain — multilingual hospital AI receptionist.
+Multilingual hospital AI receptionist brain — dual provider.
 
-Replaces keyword matching with full LLM understanding.
-Uses structured JSON output for routing decisions.
+Full LLM understanding (no keyword matching) with structured JSON output
+for routing decisions. Two backends share one conversation history and
+system prompt; the provider is chosen per turn by the caller's language:
 
-Models:
-  Primary (smart)  : llama-3.3-70b-versatile  — complex queries / emergencies
-  Fast             : llama-3.1-8b-instant      — simple / quick responses
+  English / emergency  → Groq LLaMA (fast, low latency)
+      llama-3.1-8b-instant   simple / quick English
+      llama-3.3-70b-versatile  emergencies / complex
+  Other Indian languages + Manglish → Sarvam-M (built for Indian languages)
+      sarvam-m   Malayalam, Hindi, Tamil, Telugu, Kannada, … and code-mixed
+
+Both endpoints are OpenAI-compatible (same {role, content} message list),
+so history is portable across providers within a single call.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
+import httpx
 import pytz
 
 from src.ai.base import BrainResult
@@ -31,12 +40,16 @@ _DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", 
 _MODEL_SMART = "llama-3.3-70b-versatile"
 _MODEL_FAST = "llama-3.1-8b-instant"
 
+_SARVAM_CHAT_URL = "https://api.sarvam.ai/v1/chat/completions"
+_SARVAM_MODEL = "sarvam-m"
+
 # History limit: keep last 20 messages (10 turns)
 _MAX_HISTORY = 20
 
-# Limit concurrent Groq API calls across all active calls.
-# Free tier: 30 RPM per model. With 5 slots × ~6 req/min max ≈ 30 RPM.
+# Limit concurrent API calls across all active calls (free-tier rate limits).
+# Groq free tier: 30 RPM per model. Sarvam: per-plan.
 _GROQ_SEM = asyncio.Semaphore(5)
+_SARVAM_SEM = asyncio.Semaphore(5)
 
 
 @dataclass
@@ -103,11 +116,20 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
 
     if ctx.faqs:
         lines.extend(["", "FAQ:"])
-        for faq in ctx.faqs[:10]:
+        for faq in ctx.faqs:
             lines.append(f"  Q: {faq.question}")
             lines.append(f"  A: {faq.answer}")
             if faq.answer_ml:
                 lines.append(f"  A (ML): {faq.answer_ml}")
+
+    kb = getattr(ctx, "knowledge_base", "") or ""
+    if kb.strip():
+        lines.extend([
+            "",
+            "HOSPITAL HANDBOOK (use this to answer ANY other enquiry — "
+            "parking, insurance, facilities, visiting hours, policies, etc.):",
+            kb.strip(),
+        ])
 
     return "\n".join(lines)
 
@@ -211,14 +233,95 @@ class GroqBrain:
             logger.warning("groq_not_installed")
             self._client = None
 
+        # Sarvam-M chat — raw httpx (OpenAI-compatible), reuses the Sarvam key.
+        self._sarvam_key: str = getattr(settings, "SARVAM_API_KEY", "")
+
     def is_available(self) -> bool:
-        return self._client is not None
+        return self._client is not None or bool(self._sarvam_key)
+
+    def _route(self, language_detected: str, use_smart: bool) -> tuple[str, str]:
+        """Pick (provider, model) for this turn based on language + urgency."""
+        lang = (language_detected or "").lower()
+        groq_ok = self._client is not None
+        sarvam_ok = bool(self._sarvam_key)
+        is_english = lang.startswith("en")
+
+        # Emergencies → Groq smart model for speed and reliability.
+        if use_smart and groq_ok:
+            return ("groq", _MODEL_SMART)
+        # Indian languages / Manglish → Sarvam-M (best multilingual quality).
+        if not is_english and sarvam_ok:
+            return ("sarvam", _SARVAM_MODEL)
+        # English (or Sarvam unavailable) → Groq fast.
+        if groq_ok:
+            return ("groq", _MODEL_FAST)
+        if sarvam_ok:
+            return ("sarvam", _SARVAM_MODEL)
+        return ("none", "")
+
+    async def _call_groq(self, messages: list[dict], model: str) -> str:
+        """Call Groq with concurrency cap + retry on rate limit."""
+        if not self._client:
+            raise RuntimeError("groq_unavailable")
+        response = None
+        for attempt in range(3):
+            try:
+                async with _GROQ_SEM:
+                    response = await self._client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.3,
+                        max_tokens=300,
+                        response_format={"type": "json_object"},
+                    )
+                break
+            except Exception as exc:
+                msg = str(exc).lower()
+                if ("rate_limit" in msg or "rate limit" in msg or "429" in msg) and attempt < 2:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                raise
+        return response.choices[0].message.content or ""
+
+    async def _call_sarvam(self, messages: list[dict]) -> str:
+        """Call Sarvam-M (OpenAI-compatible) with concurrency cap + retry."""
+        if not self._sarvam_key:
+            raise RuntimeError("sarvam_unavailable")
+        payload = {
+            "model": _SARVAM_MODEL,
+            "messages": messages,
+            "temperature": 0.3,
+            "max_tokens": 300,
+        }
+        headers = {
+            "api-subscription-key": self._sarvam_key,
+            "Content-Type": "application/json",
+        }
+        async with _SARVAM_SEM:
+            for attempt in range(3):
+                async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(12.0, connect=3.0)
+                ) as client:
+                    resp = await client.post(_SARVAM_CHAT_URL, headers=headers, json=payload)
+                if resp.status_code in (429, 503) and attempt < 2:
+                    await asyncio.sleep(2 ** (attempt + 1))
+                    continue
+                if resp.status_code >= 400:
+                    raise RuntimeError(
+                        f"sarvam_chat HTTP {resp.status_code}: {resp.text[:200]}"
+                    )
+                data = resp.json()
+                return data["choices"][0]["message"]["content"] or ""
+        return ""
 
     def _parse_response(self, raw: str, language_detected: str, latency_ms: int) -> GroqBrainResult:
         """Parse the JSON response from Groq into a GroqBrainResult."""
         try:
-            # Strip markdown code fences if present
             clean = raw.strip()
+            # Strip Sarvam-M hybrid-reasoning blocks if present
+            if "<think>" in clean:
+                clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
+            # Strip markdown code fences if present
             if clean.startswith("```"):
                 clean = clean.split("```")[1]
                 if clean.startswith("json"):
@@ -292,11 +395,10 @@ class GroqBrain:
         """
         Process a caller transcript and return a structured response.
 
-        Uses the fast model by default; switches to the smart model for
-        emergencies (detected via is_emergency flag in a first-pass or
-        by routing the call context).
+        Routes per turn: English/emergency → Groq LLaMA; other Indian
+        languages and Manglish → Sarvam-M. History is shared across both.
         """
-        if not self._client:
+        if not self._client and not self._sarvam_key:
             return GroqBrainResult(
                 text="ക്ഷമിക്കണം, AI service ലഭ്യമല്ല. ദയവായി staff-നോട് ബന്ധപ്പെടൂ.",
                 language="ml-IN",
@@ -307,14 +409,14 @@ class GroqBrain:
         # Append user turn
         self._history.append({"role": "user", "content": transcript})
 
-        # Choose model — default to fast; use smart for emergency keywords
+        # Emergency keywords force the fast, reliable Groq smart model.
         _emergency_hints = (
             "emergency", "ambulance", "chest pain", "unconscious", "breathing",
             "bleeding", "accident", "stroke", "seizure", "fits",
             "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം",
         )
         use_smart = any(kw in transcript.lower() for kw in _emergency_hints)
-        model = _MODEL_SMART if use_smart else _MODEL_FAST
+        provider, model = self._route(language_detected, use_smart)
 
         messages = [
             {"role": "system", "content": self._system_prompt},
@@ -322,39 +424,25 @@ class GroqBrain:
         ]
 
         try:
-            response = None
-            for _attempt in range(3):
-                try:
-                    async with _GROQ_SEM:
-                        response = await self._client.chat.completions.create(
-                            model=model,
-                            messages=messages,
-                            temperature=0.3,
-                            max_tokens=300,
-                            response_format={"type": "json_object"},
-                        )
-                    break   # success
-                except Exception as _exc:
-                    _msg = str(_exc).lower()
-                    if ("rate_limit" in _msg or "rate limit" in _msg or "429" in _msg) and _attempt < 2:
-                        await asyncio.sleep(2 ** (_attempt + 1))   # 2 s, 4 s
-                        continue
-                    raise
+            if provider == "sarvam":
+                raw_text = await self._call_sarvam(messages)
+            else:
+                raw_text = await self._call_groq(messages, model)
 
             latency_ms = int((time.monotonic() - t_start) * 1000)
-            raw_text: str = response.choices[0].message.content or ""
-
             result = self._parse_response(raw_text, language_detected, latency_ms)
 
-            # Append model turn
-            self._history.append({"role": "assistant", "content": raw_text})
+            # Append model turn (store the parsed text, not raw, so a switched
+            # provider on the next turn sees clean conversational history).
+            self._history.append({"role": "assistant", "content": result.text})
 
             # Trim history to last _MAX_HISTORY messages
             if len(self._history) > _MAX_HISTORY:
                 self._history = self._history[-_MAX_HISTORY:]
 
             logger.info(
-                "groq_brain_ok",
+                "brain_ok",
+                provider=provider,
                 model=model,
                 latency_ms=latency_ms,
                 language=result.language,
@@ -368,7 +456,8 @@ class GroqBrain:
 
         except Exception as exc:
             latency_ms = int((time.monotonic() - t_start) * 1000)
-            logger.error("groq_brain_error", error=str(exc), transcript=transcript[:60])
+            logger.error("brain_error", provider=provider, error=str(exc),
+                         transcript=transcript[:60])
             # Remove the user message we optimistically appended
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
