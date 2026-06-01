@@ -70,6 +70,24 @@ class GroqBrainResult(BrainResult):
     call_note: str = ""              # brief note for call log
 
 
+def _is_groq_exhausted(exc: Exception) -> bool:
+    """True if a Groq error means we should fall back to Sarvam-M.
+
+    Covers rate limits (429), token-per-minute caps (413 'request too large'),
+    and transient server/availability errors.
+    """
+    msg = str(exc).lower()
+    return any(
+        s in msg
+        for s in (
+            "rate_limit", "rate limit", "429",
+            "413", "too large", "payload too large",
+            "tokens per minute", "tpm",
+            "503", "502", "500", "overloaded", "service unavailable",
+        )
+    )
+
+
 def _build_hospital_summary(ctx: HospitalContext) -> str:
     """Build a rich text summary of the hospital for the system prompt."""
     lines = [
@@ -389,7 +407,21 @@ class GroqBrain:
             if provider == "sarvam":
                 raw_text = await self._call_sarvam(messages)
             else:
-                raw_text = await self._call_groq(messages, model)
+                try:
+                    raw_text = await self._call_groq(messages, model)
+                except Exception as groq_exc:
+                    # Groq exhausted (rate limit / 413 token cap / outage):
+                    # fall back to Sarvam-M so the call doesn't die. This makes
+                    # the system resilient even on Groq's free tier.
+                    if self._sarvam_key and _is_groq_exhausted(groq_exc):
+                        logger.warning(
+                            "groq_fallback_to_sarvam", error=str(groq_exc)[:200]
+                        )
+                        raw_text = await self._call_sarvam(messages)
+                        provider = "sarvam"
+                        model = _SARVAM_MODEL
+                    else:
+                        raise
 
             latency_ms = int((time.monotonic() - t_start) * 1000)
             result = self._parse_response(raw_text, language_detected, latency_ms)
