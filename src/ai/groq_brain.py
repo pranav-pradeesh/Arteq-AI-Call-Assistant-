@@ -313,25 +313,38 @@ class GroqBrain:
         OR unclosed) and markdown fences, then extracts the JSON object by its
         outermost braces so surrounding prose can't break parsing.
         """
+        # Strip any reasoning block first — closed (<think>…</think>) or not.
+        clean = raw.strip()
+        if "</think>" in clean:
+            clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
+        elif "<think>" in clean:
+            clean = clean.split("<think>", 1)[-1].strip()
+
         data = None
         try:
-            clean = raw.strip()
-            # Remove a reasoning block — closed (<think>…</think>) or unclosed.
-            if "</think>" in clean:
-                clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
-            elif "<think>" in clean:
-                # Unclosed: keep only whatever comes after the opening tag.
-                clean = clean.split("<think>", 1)[-1]
+            candidate = clean
             # Isolate the JSON object by its outermost braces (drops any prose,
             # markdown fences, or leftover reasoning text around it).
-            start, end = clean.find("{"), clean.rfind("}")
+            start, end = candidate.find("{"), candidate.rfind("}")
             if start != -1 and end != -1 and end > start:
-                clean = clean[start : end + 1]
-            data = json.loads(clean)
+                candidate = candidate[start : end + 1]
+            data = json.loads(candidate)
         except (json.JSONDecodeError, ValueError):
             data = None
 
         if not isinstance(data, dict):
+            # The model sometimes answers in plain prose instead of JSON. That
+            # prose is a perfectly good spoken reply — speak it rather than a
+            # canned apology. Only fall back to the apology if there's no usable
+            # text or it looks like broken JSON.
+            looks_like_json = clean.lstrip().startswith("{")
+            if clean and not looks_like_json:
+                logger.info("brain_prose_fallback", text=clean[:120])
+                return GroqBrainResult(
+                    text=clean,
+                    language=language_detected,
+                    latency_ms=latency_ms,
+                )
             logger.warning("groq_brain_json_parse_error", raw=raw[:200])
             return GroqBrainResult(
                 text="ക്ഷമിക്കണം, ഒരു നിമിഷം — ഞാൻ വീണ്ടും ശ്രമിക്കാം.",

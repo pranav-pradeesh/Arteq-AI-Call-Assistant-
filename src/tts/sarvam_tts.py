@@ -39,6 +39,29 @@ _LANG_SPEAKER: dict[str, str] = {
 # Fallback if an unknown language code is requested.
 _DEFAULT_SPEAKER = "ritu"
 
+# Valid target_language_code values accepted by the Bulbul v3 TTS API.
+# Anything outside this set (e.g. "manglish", "unknown") is rejected with a
+# 400, so we normalise to a valid code before calling.
+_VALID_TTS_LANGS = {
+    "as-IN", "bn-IN", "brx-IN", "doi-IN", "en-IN", "gu-IN", "hi-IN", "kn-IN",
+    "kok-IN", "ks-IN", "mai-IN", "ml-IN", "mni-IN", "mr-IN", "ne-IN", "od-IN",
+    "pa-IN", "sa-IN", "sat-IN", "sd-IN", "ta-IN", "te-IN", "ur-IN",
+}
+_DEFAULT_TTS_LANG = "ml-IN"
+
+
+def _normalize_tts_lang(language: str) -> str:
+    """Map a brain/STT language label to a TTS-accepted target_language_code.
+
+    'manglish' (Malayalam in English script) and any unknown/empty value fall
+    back to Malayalam, which renders mixed Malayalam+English text naturally.
+    """
+    lang = (language or "").strip()
+    if lang in _VALID_TTS_LANGS:
+        return lang
+    # "manglish", "unknown", "", or a bare code like "ml" → Malayalam.
+    return _DEFAULT_TTS_LANG
+
 
 def _wav_to_pcm_8k_mono(wav_bytes: bytes) -> bytes:
     """Convert WAV bytes to raw PCM16 mono @ 8 kHz."""
@@ -95,6 +118,10 @@ class SarvamTTS:
         """
         if not text:
             return None
+
+        # Normalise to a TTS-accepted code ("manglish"/"unknown" → ml-IN) so
+        # the API doesn't 400 on labels the brain/STT may emit.
+        language = _normalize_tts_lang(language)
 
         # Truncate to Sarvam's limit
         if len(text) > _MAX_TEXT_LEN:
