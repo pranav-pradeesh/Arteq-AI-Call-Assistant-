@@ -23,6 +23,18 @@ logger = get_logger(__name__)
 
 _SARVAM_STT_URL = "https://api.sarvam.ai/speech-to-text"
 
+# Languages plausible on a Kerala hospital line. Sarvam's auto-detect
+# occasionally mislabels short/noisy Malayalam clips as Punjabi (pa-IN),
+# Odia (od-IN), Assamese, etc. Anything outside this set is treated as
+# Malayalam so the brain and TTS don't reply in the wrong language.
+_PLAUSIBLE_LANGS = {"ml-IN", "en-IN", "ta-IN", "kn-IN", "te-IN", "hi-IN"}
+_DEFAULT_LANG = "ml-IN"
+
+
+def _normalize_detected_lang(lang: str) -> str:
+    """Keep South-Indian/Hindi/English detections; map the rest to Malayalam."""
+    return lang if lang in _PLAUSIBLE_LANGS else _DEFAULT_LANG
+
 
 def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 16000) -> bytes:
     """Wrap raw PCM16 mono data in a standard WAV container."""
@@ -91,13 +103,15 @@ class SarvamSTT:
 
                 data = response.json()
                 transcript: str = data.get("transcript", "")
-                language_code: str = data.get("language_code", "ml-IN")
+                raw_lang: str = data.get("language_code", "ml-IN") or "ml-IN"
+                language_code = _normalize_detected_lang(raw_lang)
                 confidence: float = 0.9
 
                 logger.info(
                     "sarvam_stt_ok",
                     transcript=transcript[:100],
                     lang=language_code,
+                    raw_lang=raw_lang,
                     latency_ms=latency_ms,
                 )
                 return (transcript, language_code, confidence)
