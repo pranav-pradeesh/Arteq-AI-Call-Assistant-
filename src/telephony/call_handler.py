@@ -144,6 +144,15 @@ class CallHandler:
             )
             self._transcript.append({"role": "assistant", "text": brain_result.text})
 
+            # Clean, full-text conversation line — grep "conversation" to read
+            # the whole dialogue without the STT/metric noise.
+            logger.info(
+                "conversation",
+                caller_said=stt_result.transcript,
+                arya_replied=brain_result.text,
+                lang=brain_result.language,
+            )
+
             e2e_ms = int((time.monotonic() - turn_start) * 1000)
             logger.info(
                 "turn_complete",
