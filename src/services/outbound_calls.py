@@ -16,7 +16,8 @@ from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
 
-_CONNECT_URL = "https://api.exotel.in/v1/Accounts/{sid}/Calls/connect.json"
+def _connect_url(sid: str) -> str:
+    return f"https://{settings.EXOTEL_SUBDOMAIN}/v1/Accounts/{sid}/Calls/connect.json"
 
 try:
     import pytz as _pytz
@@ -67,7 +68,7 @@ class OutboundCallService:
                 slot_time.strftime("%H:%M") if slot_time else ""
             )
 
-        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        url = _connect_url(settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
         custom_field = json.dumps(
@@ -130,7 +131,7 @@ class OutboundCallService:
         tenant_slug: str = "default",
     ) -> bool:
         """Trigger an outbound callback call via Exotel."""
-        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        url = _connect_url(settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
         custom_field = json.dumps({
@@ -182,7 +183,7 @@ class OutboundCallService:
             appointment_date = ""
             appointment_time = ""
 
-        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        url = _connect_url(settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         custom_field = json.dumps({
             "call_type": "confirmation",
@@ -227,7 +228,7 @@ class OutboundCallService:
         tenant_slug: str = "default",
     ) -> bool:
         """Call patient 3 days after appointment to check on their well-being."""
-        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        url = _connect_url(settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         custom_field = json.dumps({
             "call_type": "followup",
@@ -269,7 +270,7 @@ class OutboundCallService:
         tenant_slug: str = "default",
     ) -> bool:
         """Place an outbound health campaign call."""
-        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        url = _connect_url(settings.EXOTEL_SID)
         webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
         custom_field = json.dumps({
             "call_type": "campaign",

@@ -2,7 +2,7 @@ services:
   - type: web
     name: arteq-voice-agent
     runtime: python
-    plan: free
+    plan: starter
     region: singapore
     branch: claude/hospital-voice-agent-ml-XCG0G
     buildCommand: pip install -r requirements.txt
@@ -71,7 +71,7 @@ services:
 
       # Non-secret outbound config
       - key: EXOTEL_SUBDOMAIN
-        value: api.exotel.com
+        value: api.exotel.in
       - key: REMINDERS_ENABLED
         value: "true"
       - key: REMINDER_INTERVAL_SECONDS

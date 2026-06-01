@@ -1,5 +1,7 @@
 """Settings — reads directly from the project .env file."""
 from __future__ import annotations
+import os
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -25,6 +27,22 @@ class Settings(BaseSettings):
     EXOTEL_CALLER_ID: str = ""
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     PUBLIC_WS_URL: str = "ws://localhost:8000"
+
+    @model_validator(mode="after")
+    def _auto_detect_render_url(self) -> "Settings":
+        """On Render, RENDER_EXTERNAL_URL is injected automatically.
+        Use it if the user hasn't set PUBLIC_BASE_URL explicitly."""
+        render_url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        if render_url and self.PUBLIC_BASE_URL in (
+            "http://localhost:8000", "http://localhost:8000/"
+        ):
+            self.PUBLIC_BASE_URL = render_url.rstrip("/")
+            self.PUBLIC_WS_URL = (
+                render_url.rstrip("/")
+                .replace("https://", "wss://")
+                .replace("http://", "ws://")
+            )
+        return self
 
     # Provider selection
     TTS_PROVIDER: str = "sarvam"
@@ -62,7 +80,7 @@ class Settings(BaseSettings):
 
     # Outbound / transfer
     INTERNAL_API_KEY: str = ""
-    EXOTEL_SUBDOMAIN: str = "api.exotel.com"
+    EXOTEL_SUBDOMAIN: str = "api.exotel.in"
     REMINDERS_ENABLED: bool = True
     REMINDER_INTERVAL_SECONDS: int = 900
 

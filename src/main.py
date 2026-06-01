@@ -36,6 +36,19 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("arteq_starting", env=settings.ENV)
 
+    # Validate critical URL config — misconfigured URLs cause silent call failures
+    if "localhost" in settings.PUBLIC_BASE_URL or "localhost" in settings.PUBLIC_WS_URL:
+        logger.error(
+            "misconfigured_public_urls",
+            hint="Set PUBLIC_BASE_URL and PUBLIC_WS_URL to your Render service URL. "
+                 "Exotel cannot reach localhost — all calls will fail.",
+            PUBLIC_BASE_URL=settings.PUBLIC_BASE_URL,
+            PUBLIC_WS_URL=settings.PUBLIC_WS_URL,
+        )
+    else:
+        logger.info("public_urls_ok",
+                    base=settings.PUBLIC_BASE_URL, ws=settings.PUBLIC_WS_URL)
+
     # DB probe — best-effort, server starts regardless
     try:
         pool = await asyncio.wait_for(get_pool(), timeout=15)
