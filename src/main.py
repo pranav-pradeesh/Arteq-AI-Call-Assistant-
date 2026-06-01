@@ -47,6 +47,27 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("db_connection_failed", error=str(e))
 
+    # Pre-warm the TTS cache (greeting + common phrases) for instant playback
+    try:
+        from src.ai.groq_brain import build_greeting_text
+        from src.db.queries import get_or_load_hospital_context
+        from src.telephony.call_handler import common_warm_phrases
+        from src.tts.engine import warm_tts_cache
+
+        ctx = await get_or_load_hospital_context(settings.HOSPITAL_ID)
+        hosp = ctx.name_ml or ctx.name
+        lang = settings.DEFAULT_LANGUAGE
+        # All three time-of-day greeting variants, so any call hour is instant.
+        phrases = [
+            (build_greeting_text(hosp, settings.AGENT_NAME, h), lang)
+            for h in (8, 14, 20)
+        ]
+        phrases += common_warm_phrases()
+        warmed = await warm_tts_cache(phrases)
+        logger.info("tts_cache_warmed", count=warmed, total=len(phrases))
+    except Exception as e:
+        logger.warning("tts_warm_failed", error=str(e))
+
     # Reminder scheduler
     _scheduler_task = None
     try:

@@ -34,6 +34,26 @@ logger = get_logger(__name__)
 
 _INDIA_TZ = pytz.timezone("Asia/Kolkata")
 
+# Fixed phrases reused across calls. Kept as constants so they can be
+# pre-warmed into the TTS cache at startup (instant playback, no live TTS).
+CLARIFY_PHRASE = "ക്ഷമിക്കണം, ശരിക്ക് കേൾക്കാൻ കഴിഞ്ഞില്ല. ഒന്നുകൂടി പറയാമോ?"
+SPEAK_UP_PHRASE = (
+    "ക്ഷമിക്കണം, നിങ്ങളുടെ ശബ്ദം വ്യക്തമായി കേൾക്കുന്നില്ല. "
+    "ഒന്നുകൂടി, അൽപ്പം ഉറക്കെ പറയാമോ?"
+)
+TECH_PROBLEM_PHRASE = "ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. Staff-നോട് ബന്ധപ്പെടൂ."
+SERVICE_DOWN_PHRASE = "ക്ഷമിക്കണം, ഈ സേവനം ഇപ്പോൾ ലഭ്യമല്ല."
+
+# All fixed phrases to pre-warm (text, language).
+def common_warm_phrases() -> list[tuple[str, str]]:
+    lang = settings.DEFAULT_LANGUAGE
+    return [
+        (CLARIFY_PHRASE, lang),
+        (SPEAK_UP_PHRASE, lang),
+        (TECH_PROBLEM_PHRASE, lang),
+        (SERVICE_DOWN_PHRASE, lang),
+    ]
+
 
 class CallHandler:
     """Handles the full lifecycle of a single call."""
@@ -58,6 +78,10 @@ class CallHandler:
         self._consecutive_failures = 0
         self._call_dead = False
         self._transcript: list[dict] = []
+        # Sticky language for the call — stabilises native-language detection so
+        # short/noisy clips don't flip the reply language mid-conversation.
+        self._call_language = settings.DEFAULT_LANGUAGE
+        self._empty_audio_streak = 0
 
     # ── Public interface ──────────────────────────────────────────────────────────
 
@@ -70,9 +94,7 @@ class CallHandler:
             self._ctx = await get_or_load_hospital_context(self.hospital_id)
         except Exception as e:
             logger.error("hospital_context_load_failed", error=str(e))
-            return await self._synthesize(
-                "ക്ഷമിക്കണം, ഈ സേവനം ഇപ്പോൾ ലഭ്യമല്ല."
-            ) or b""
+            return await self._synthesize(SERVICE_DOWN_PHRASE) or b""
 
         self._state = await create_state(
             call_id=self.call_id,
@@ -108,15 +130,20 @@ class CallHandler:
                         confidence=stt_result.confidence, latency_ms=stt_ms,
                         lang=stt_result.language_detected)
 
-            # Empty transcript → ask to repeat
+            # Empty transcript → audio was silent, too quiet, or garbled.
+            # First miss: gently ask to repeat. Repeated misses: ask the caller
+            # to speak up (line/range problem). Persistent: hand off to staff.
             if not stt_result.transcript.strip():
+                self._empty_audio_streak += 1
                 self._state.increment_clarification()
                 if self._state.should_transfer(settings.MAX_CLARIFICATION_ATTEMPTS):
                     return await self._do_transfer()
                 await save_state(self._state)
-                return await self._synthesize(
-                    "ക്ഷമിക്കണം, ശരിക്ക് കേൾക്കാൻ കഴിഞ്ഞില്ല. ഒന്നുകൂടി പറയാമോ?",
-                )
+                phrase = SPEAK_UP_PHRASE if self._empty_audio_streak >= 2 else CLARIFY_PHRASE
+                return await self._synthesize(phrase, language=self._call_language)
+
+            # Got a real transcript — reset the empty-audio streak.
+            self._empty_audio_streak = 0
 
             # Filter automated recording announcements
             if self._is_recording_announcement(stt_result.transcript):
@@ -136,8 +163,17 @@ class CallHandler:
 
             self._transcript.append({"role": "caller", "text": stt_result.transcript})
 
+            # ── Sticky language ────────────────────────────────────────────────
+            # Update the call's language only on a confident (multi-word) clip,
+            # OR while still on the default — so a one-word "mm/yes" on a noisy
+            # line doesn't flip Malayalam → Tamil mid-call.
+            detected = stt_result.language_detected or self._call_language
+            if len(stt_result.transcript.split()) >= 2 or \
+                    self._call_language == settings.DEFAULT_LANGUAGE:
+                self._call_language = detected
+            lang = self._call_language
+
             # ── Groq Brain ────────────────────────────────────────────────────
-            lang = stt_result.language_detected or settings.DEFAULT_LANGUAGE
             brain_result = await self._brain.process(
                 transcript=stt_result.transcript,
                 language_detected=lang,
@@ -191,9 +227,7 @@ class CallHandler:
 
         except Exception as e:
             logger.error("call_handler_error", error=str(e), call_id=self.call_id)
-            return await self._synthesize(
-                "ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. Staff-നോട് ബന്ധപ്പെടൂ."
-            )
+            return await self._synthesize(TECH_PROBLEM_PHRASE, language=self._call_language)
 
     async def end_call(self) -> None:
         try:

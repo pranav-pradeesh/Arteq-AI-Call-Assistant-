@@ -70,3 +70,22 @@ class CompositeTTS:
 
 def _text_hash(text: str) -> str:
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:12]
+
+
+async def warm_tts_cache(phrases: list[tuple[str, str]]) -> int:
+    """Pre-synthesize fixed (text, language) phrases into the process TTS cache.
+
+    Run once at startup so the greeting and common prompts play instantly on
+    the first call instead of waiting on a cold-start Sarvam TTS request.
+    Returns the number of phrases successfully warmed.
+    """
+    tts = CompositeTTS()
+    warmed = 0
+    for text, language in phrases:
+        try:
+            audio = await tts.synthesize(text, language=language)
+            if audio:
+                warmed += 1
+        except Exception as exc:
+            logger.warning("tts_warm_phrase_failed", error=str(exc), text=text[:40])
+    return warmed

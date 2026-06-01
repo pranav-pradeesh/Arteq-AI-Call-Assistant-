@@ -38,6 +38,31 @@ logger = get_logger(__name__)
 _INDIA_TZ = pytz.timezone("Asia/Kolkata")
 _DOW_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
 
+# Human-readable language names used to steer the reply language each turn.
+_LANG_NAMES = {
+    "ml-IN": "Malayalam",
+    "en-IN": "English",
+    "ta-IN": "Tamil",
+    "hi-IN": "Hindi",
+    "kn-IN": "Kannada",
+    "te-IN": "Telugu",
+    "manglish": "Manglish (Malayalam written in English/Latin script)",
+}
+
+
+def build_greeting_text(hosp_name: str, agent_name: str, hour: int) -> str:
+    """Time-of-day Malayalam greeting. Pure function so it can be pre-warmed."""
+    if 5 <= hour < 12:
+        opener = "സുപ്രഭാതം!"        # morning
+    elif 12 <= hour < 17:
+        opener = "ശുഭ ഉച്ചനേരം!"      # afternoon
+    else:
+        opener = "ശുഭ സന്ധ്യ!"        # evening
+    return (
+        f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. "
+        f"ഞാൻ {agent_name} — എന്ത് സഹായം വേണം?"
+    )
+
 _MODEL_SMART = "llama-3.3-70b-versatile"
 _MODEL_FAST = "llama-3.1-8b-instant"
 
@@ -181,7 +206,7 @@ HOSPITAL INFORMATION:
 
 WHAT YOU DO: route calls (reception, emergency, opd, billing, pharmacy, lab, patient_relations, or a specific doctor); answer enquiries (timings, schedules, fees, services, insurance, parking, visiting hours) using the info above; detect emergencies and route immediately; help with appointments, directions, lab/pharmacy/billing questions.
 
-LANGUAGE: reply ENTIRELY in the caller's language/dialect — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Malayalam/Manglish should be warm and conversational, not formal.
+LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Never switch to English unless the caller spoke English. If the caller speaks Malayalam, reply in Malayalam script; if Manglish, reply in Manglish. Malayalam/Manglish should be warm and conversational, not formal.
 
 VOICE (your text becomes speech): max 2 SHORT sentences. Sound human — "Sure,", "Of course,", "Let me check…". Vary your openings. For emergencies, speak urgently but calmly.
 
@@ -376,29 +401,8 @@ class GroqBrain:
         Warm, human, with hospital name and agent name.
         """
         now_ist = datetime.now(_INDIA_TZ)
-        hour = now_ist.hour
-
         hosp_name = self._ctx.name_ml or self._ctx.name
-
-        if 5 <= hour < 12:
-            # Morning: സുപ്രഭാതം!
-            greeting = (
-                f"സുപ്രഭാതം! {hosp_name}-ലേക്ക് സ്വാഗതം. "
-                f"ഞാൻ {self._agent_name} — എന്ത് സഹായം വേണം?"
-            )
-        elif 12 <= hour < 17:
-            # Afternoon: ശുഭ ഉച്ചനേരം!
-            greeting = (
-                f"ശുഭ ഉച്ചനേരം! {hosp_name}-ലേക്ക് സ്വാഗതം. "
-                f"ഞാൻ {self._agent_name} — എന്ത് സഹായം വേണം?"
-            )
-        else:
-            # Evening: ശുഭ സന്ധ്യ!
-            greeting = (
-                f"ശുഭ സന്ധ്യ! {hosp_name}-ലേക്ക് സ്വാഗതം. "
-                f"ഞാൻ {self._agent_name} — എന്ത് സഹായം വേണം?"
-            )
-
+        greeting = build_greeting_text(hosp_name, self._agent_name, now_ist.hour)
         return GroqBrainResult(
             text=greeting,
             language=settings.DEFAULT_LANGUAGE,
@@ -435,9 +439,22 @@ class GroqBrain:
         use_smart = any(kw in transcript.lower() for kw in _emergency_hints)
         provider, model = self._route(language_detected, use_smart)
 
+        # Per-turn language steer: mirror the caller's detected language exactly.
+        # Placed AFTER history so it's the freshest instruction the model sees.
+        lang_name = _LANG_NAMES.get(language_detected, "the caller's language")
+        lang_hint = {
+            "role": "system",
+            "content": (
+                f"The caller's latest message is in {lang_name}. "
+                f"Reply ONLY in {lang_name}, matching their script and dialect. "
+                f"Do not switch languages."
+            ),
+        }
+
         messages = [
             {"role": "system", "content": self._system_prompt},
             *self._history,
+            lang_hint,
         ]
 
         try:
