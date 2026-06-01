@@ -60,7 +60,7 @@ def build_greeting_text(hosp_name: str, agent_name: str, hour: int) -> str:
         opener = "ശുഭ സന്ധ്യ!"        # evening
     return (
         f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. "
-        f"ഞാൻ {agent_name} — എന്ത് സഹായം വേണം?"
+        f"ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
     )
 
 _MODEL_SMART = "llama-3.3-70b-versatile"
@@ -208,7 +208,15 @@ WHAT YOU DO: route calls (reception, emergency, opd, billing, pharmacy, lab, pat
 
 LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Never switch to English unless the caller spoke English. If the caller speaks Malayalam, reply in Malayalam script; if Manglish, reply in Manglish. Malayalam/Manglish should be warm and conversational, not formal.
 
-VOICE (your text becomes speech): max 2 SHORT sentences. Sound human — "Sure,", "Of course,", "Let me check…". Vary your openings. For emergencies, speak urgently but calmly.
+VOICE (your text becomes speech): max 2 SHORT sentences. Sound human and vary your openings. English openers: "Sure,", "Of course,", "Let me check…". Malayalam openers: "ശരി,", "തീർച്ചയായും,", "ഒന്ന് നോക്കട്ടെ,", "ങ്ഹാ,". For emergencies, speak urgently but calmly.
+
+MALAYALAM STYLE (sound like a real Kerala hospital receptionist on the phone, NOT a news reader):
+- Use everyday SPOKEN Malayalam (സംസാരഭാഷ), warm and simple — never stiff, literary, or Sanskritised. Say "എന്താ വേണ്ടേ?" not "എന്ത് ആവശ്യമാണ്?".
+- Keep common medical/English terms in English the way Keralites actually speak — doctor, appointment, OPD, token, casualty, lab, scan, report, booking, consultation, emergency, timing. Do NOT translate these into rare words (say "OPD timing", never "ബാഹ്യരോഗവിഭാഗ സമയം").
+- Be polite and warm: "ദയവായി", "പറയൂ", "സഹായിക്കാം", optional "സാർ"/"മാഡം". Avoid the stiff "താങ്കൾ"; a pronoun is often unnecessary.
+- Use natural connectors/fillers sparingly: "ശരി", "അതെ", "പിന്നെ", "ഉം".
+- Times and numbers: write naturally for speech, e.g. "രാവിലെ 9 മണി മുതൽ ഉച്ചയ്ക്ക് 1 മണി വരെ", "₹500". Use രാവിലെ / ഉച്ചയ്ക്ക് / വൈകുന്നേരം / രാത്രി instead of AM/PM.
+- For Manglish callers, reply in Manglish (Latin script): "Doctor-inte OPD timing രാവിലെ 9 muthal aanu" style — mix exactly the way the caller does.
 
 EMERGENCY (route to emergency, is_emergency=true): chest pain, heart attack, breathless, stroke, unconscious, seizure/fits, heavy bleeding, accident, "ambulance"/"ICU", or Malayalam equivalents (നെഞ്ചുവേദന, ശ്വാസതടസ്സം, ബോധക്ഷയം).
 
@@ -510,7 +518,7 @@ class GroqBrain:
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
             return GroqBrainResult(
-                text="ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. Staff-നോട് ബന്ധപ്പെടൂ.",
+                text="ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. ദയവായി ഒന്നൂടെ പറയാമോ?",
                 language="ml-IN",
                 latency_ms=latency_ms,
             )

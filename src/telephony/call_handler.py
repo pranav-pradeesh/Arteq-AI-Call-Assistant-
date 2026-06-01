@@ -36,13 +36,15 @@ _INDIA_TZ = pytz.timezone("Asia/Kolkata")
 
 # Fixed phrases reused across calls. Kept as constants so they can be
 # pre-warmed into the TTS cache at startup (instant playback, no live TTS).
-CLARIFY_PHRASE = "ക്ഷമിക്കണം, ശരിക്ക് കേൾക്കാൻ കഴിഞ്ഞില്ല. ഒന്നുകൂടി പറയാമോ?"
+CLARIFY_PHRASE = "ക്ഷമിക്കണം, ശരിക്ക് കേട്ടില്ല. ഒന്നൂടെ പറയാമോ?"
 SPEAK_UP_PHRASE = (
-    "ക്ഷമിക്കണം, നിങ്ങളുടെ ശബ്ദം വ്യക്തമായി കേൾക്കുന്നില്ല. "
-    "ഒന്നുകൂടി, അൽപ്പം ഉറക്കെ പറയാമോ?"
+    "ക്ഷമിക്കണം, ശബ്ദം നന്നായി കേൾക്കുന്നില്ല. "
+    "ഒന്നൂടെ, അൽപം ഉറക്കെ പറയാമോ?"
 )
-TECH_PROBLEM_PHRASE = "ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. Staff-നോട് ബന്ധപ്പെടൂ."
-SERVICE_DOWN_PHRASE = "ക്ഷമിക്കണം, ഈ സേവനം ഇപ്പോൾ ലഭ്യമല്ല."
+TECH_PROBLEM_PHRASE = "ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. ദയവായി ഒന്നൂടെ പറയാമോ?"
+SERVICE_DOWN_PHRASE = (
+    "ക്ഷമിക്കണം, ഈ service ഇപ്പോൾ ലഭ്യമല്ല. ദയവായി കുറച്ച് കഴിഞ്ഞ് വിളിക്കൂ."
+)
 
 # All fixed phrases to pre-warm (text, language).
 def common_warm_phrases() -> list[tuple[str, str]]:
@@ -155,8 +157,8 @@ class CallHandler:
             if self._looks_like_noise_or_greeting(stt_result.transcript):
                 hosp_name = self._ctx.name_ml or self._ctx.name
                 response_text = (
-                    f"ഞാൻ {settings.AGENT_NAME} — {hosp_name}-ലെ AI receptionist. "
-                    "Doctor timing, fees, departments, emergency — എന്ത് സഹായം വേണം?"
+                    f"ഞാൻ {settings.AGENT_NAME}, {hosp_name}-ലെ AI receptionist. "
+                    "Doctor timing, fees, department, emergency — എന്താ വേണ്ടേ, പറയൂ."
                 )
                 await save_state(self._state)
                 return await self._synthesize(response_text)
