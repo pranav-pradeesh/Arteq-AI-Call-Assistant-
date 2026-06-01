@@ -66,6 +66,19 @@ class Settings(BaseSettings):
     REMINDERS_ENABLED: bool = True
     REMINDER_INTERVAL_SECONDS: int = 900
 
+    # Callbacks
+    CALLBACK_LOOP_INTERVAL_SECONDS: int = 300
+    CALLBACKS_ENABLED: bool = True
+
+    # After-hours
+    AFTER_HOURS_CALLBACK_ENABLED: bool = True
+
+    # Post-call SMS summary (opt-in — costs per SMS)
+    POST_CALL_SMS_ENABLED: bool = False
+
+    # DTMF fallback
+    DTMF_ENABLED: bool = True
+
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"

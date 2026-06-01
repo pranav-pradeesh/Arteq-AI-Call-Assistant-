@@ -108,6 +108,7 @@ async def handle_exotel_stream(
     utterance_chunks = 0
     speech_chunks = 0
     bargein_speech_chunks = 0
+    dead_air_chunks = 0          # consecutive bot-silent chunks with no speech at all
     playback_task: Optional[asyncio.Task] = None
     playback_started_at: float = 0.0   # monotonic timestamp when playback began
 
@@ -174,7 +175,15 @@ async def handle_exotel_stream(
                 continue
 
             if event == "dtmf":
-                logger.info("ws_dtmf", digit=msg.get("dtmf", {}).get("digit"))
+                digit = msg.get("dtmf", {}).get("digit", "")
+                logger.info("ws_dtmf", digit=digit)
+                if handler and stream_sid and getattr(settings, "DTMF_ENABLED", True):
+                    from src.telephony.call_handler import _DTMF_UTTERANCES
+                    synthetic = _DTMF_UTTERANCES.get(digit)
+                    if synthetic:
+                        response_pcm = await handler.process_text_turn(synthetic)
+                        if response_pcm:
+                            start_playback(response_pcm)
                 continue
 
             if event == "stop":
@@ -237,8 +246,24 @@ async def handle_exotel_stream(
             if is_speech_chunk:
                 speech_chunks += 1
                 silence_count = 0
+                dead_air_chunks = 0
             elif vad.is_silence(pcm_chunk):
                 silence_count += 1
+                dead_air_chunks += 1
+            else:
+                dead_air_chunks += 1
+
+            # Dead-air escalation: 3 s → "Are you there?", 6 s → transfer
+            if dead_air_chunks == 30 and handler:   # 30 × 100 ms = 3 s
+                dead_air_chunks = 0
+                response_pcm = await handler.process_text_turn("(silence prompt)")
+                if response_pcm:
+                    start_playback(response_pcm)
+            elif dead_air_chunks >= 60 and handler:  # 60 × 100 ms = 6 s
+                dead_air_chunks = 0
+                response_pcm = await handler._do_transfer()
+                if response_pcm:
+                    start_playback(response_pcm)
 
             utterance_complete = (
                 (speech_chunks >= MIN_SPEECH_CHUNKS and silence_count >= SILENCE_THRESHOLD_CHUNKS)

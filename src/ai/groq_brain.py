@@ -90,10 +90,15 @@ class GroqBrainResult(BrainResult):
     """Extended BrainResult with Groq-specific routing fields."""
     transfer_destination: str = ""   # reception|emergency|opd|billing|pharmacy|lab|patient_relations|doctor
     transfer_doctor: str = ""        # specific doctor name if routing to doctor
-    sms_type: str = ""               # maps|appointment|lab_schedule
+    sms_type: str = ""               # maps|appointment|appointment_cancel|callback_confirm|lab_schedule|call_summary
     sms_data: dict = field(default_factory=dict)
     is_emergency: bool = False
     call_note: str = ""              # brief note for call log
+    # Extended action types for IVR features
+    action_type: str = ""            # book_appointment|cancel_appointment|reschedule_appointment|request_callback|repeat_last
+    appointment_data: dict = field(default_factory=dict)  # {patient_name,doctor_name,dept,date,time,notes}
+    callback_data: dict = field(default_factory=dict)     # {reason,preferred_time}
+    repeat_requested: bool = False
 
 
 def _is_groq_exhausted(exc: Exception) -> bool:
@@ -168,11 +173,15 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
 
     if ctx.faqs:
         lines.extend(["", "FAQ:"])
-        # English answers only — the model translates as needed. Storing the
-        # ML duplicate here would roughly double the FAQ token cost.
+        # English answers only — the model translates as needed.
         for faq in ctx.faqs:
             lines.append(f"  Q: {faq.question}")
             lines.append(f"  A: {faq.answer}")
+
+    if ctx.queue_data:
+        lines.extend(["", "OPD QUEUE TODAY (approximate):"])
+        for dept_name, count in ctx.queue_data.items():
+            lines.append(f"  {dept_name}: ~{count} patients in queue")
 
     kb = (getattr(ctx, "knowledge_base", "") or "").strip()
     if kb:
@@ -206,6 +215,57 @@ HOSPITAL INFORMATION:
 
 WHAT YOU DO: route calls (reception, emergency, opd, billing, pharmacy, lab, patient_relations, or a specific doctor); answer enquiries (timings, schedules, fees, services, insurance, parking, visiting hours) using the info above; detect emergencies and route immediately; help with appointments, directions, lab/pharmacy/billing questions.
 
+APPOINTMENT BOOKING (multi-turn conversation):
+When a caller wants to book an appointment, collect these details across turns:
+  1. Patient name (ask if not given)
+  2. Preferred doctor or department
+  3. Preferred date and time
+  Once all details are collected, respond with action_type="book_appointment" and fill appointment_data.
+  appointment_data format: {{"patient_name":"...","doctor_name":"...","dept":"...","date":"YYYY-MM-DD","time":"HH:MM","notes":"..."}}
+  Always offer to SMS the confirmation (set sms_type="appointment").
+
+APPOINTMENT CANCELLATION / RESCHEDULE:
+  If caller says cancel/reschedule appointment → use action_type="cancel_appointment" or "reschedule_appointment".
+  For cancel: appointment_data={{"patient_name":"...","doctor_name":"...","date":"..."}}
+  For reschedule: appointment_data={{"patient_name":"...","new_date":"YYYY-MM-DD","new_time":"HH:MM"}}
+  Offer SMS confirmation (sms_type="appointment_cancel" or "appointment").
+
+CALLBACK REQUEST:
+  If caller says "call me back", "oru call back venam", "oru call back cheyyaamo", "later call cheyyanam" →
+  Confirm their request, ask reason and preferred time.
+  Use action_type="request_callback", callback_data={{"reason":"...","preferred_time":"..."}}
+  Offer SMS confirmation (sms_type="callback_confirm").
+
+AFTER-HOURS:
+  Check TODAY's time against OPERATING HOURS above. If the hospital is currently CLOSED and the caller needs OPD/doctor:
+  - Tell them the next opening time.
+  - Offer: (a) book for tomorrow / next opening (action_type="book_appointment"), or
+           (b) callback when open (action_type="request_callback"), or
+           (c) if urgent — transfer to emergency immediately.
+  Never say "we are closed, goodbye." Always offer an option.
+
+OPD QUEUE / WAIT TIME:
+  If OPD QUEUE TODAY data is shown above, use it to give an estimate.
+  Without data, say "token number depends on arrival time — come early for less wait."
+
+REPEAT LAST RESPONSE:
+  If caller says "pardon", "sorry?", "what?", "oru kuri koodi", "oru kuri koodi parayaamo", "kettu", "again", "again parayo" →
+  Use action_type="repeat_last". Do NOT generate new content.
+
+DTMF DIGIT FALLBACK:
+  If caller says a digit or number as their entire message ("1", "2", "ഒന്ന്", "two", etc.) →
+  Treat it as selecting from this menu: 1=OPD, 2=Emergency/Casualty, 3=Lab/Laboratory, 4=Pharmacy, 5=Billing, 0=Reception, *=repeat.
+  Respond as if they asked about that department.
+
+POST-CALL SMS:
+  After completing any transaction (booking / cancellation / callback registered), if the caller is ending,
+  set sms_type="call_summary" and include a brief summary in sms_data={{"summary":"..."}}.
+
+LAB REPORTS: Direct to the lab counter or give the WhatsApp/pickup info from the handbook.
+BILL INQUIRY: Give estimated cost from CONSULTATION FEES; offer to transfer to billing for exact amount.
+VISITING HOURS / INSURANCE / BLOOD BANK / PARKING: Answer from HOSPITAL HANDBOOK.
+DIRECTIONS: Send maps SMS (sms_type="maps").
+
 LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Never switch to English unless the caller spoke English. If the caller speaks Malayalam, reply in Malayalam script; if Manglish, reply in Manglish. Malayalam/Manglish should be warm and conversational, not formal.
 
 VOICE (your text becomes speech): max 2 SHORT sentences. Sound human and vary your openings. English openers: "Sure,", "Of course,", "Let me check…". Malayalam openers: "ശരി,", "തീർച്ചയായും,", "ഒന്ന് നോക്കട്ടെ,", "ങ്ഹാ,". For emergencies, speak urgently but calmly.
@@ -222,9 +282,25 @@ EMERGENCY (route to emergency, is_emergency=true): chest pain, heart attack, bre
 
 SMS: offer maps SMS for directions/location; offer appointment SMS for confirmations.
 
-ALWAYS respond with valid JSON only:
-{{"text":"1-2 natural sentences","language":"ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|manglish","action":"continue|transfer|end_call|send_sms","transfer_destination":null,"transfer_doctor":null,"sms_type":null,"is_emergency":false,"call_note":"5-word log note"}}
-transfer_destination ∈ {{reception, emergency, opd, billing, pharmacy, lab, patient_relations, doctor}} or null. sms_type ∈ {{maps, appointment, lab_schedule}} or null."""
+ALWAYS respond with valid JSON only — no extra text, no markdown:
+{{"text":"1-2 natural sentences","language":"ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|manglish","action":"continue|transfer|end_call|send_sms","action_type":"","transfer_destination":null,"transfer_doctor":null,"sms_type":null,"sms_data":{{}},"appointment_data":{{}},"callback_data":{{}},"is_emergency":false,"call_note":"5-word log note"}}
+
+action_type values:
+  "book_appointment"       — appointment_data has all booking fields; will be written to DB
+  "cancel_appointment"     — appointment_data identifies which appointment to cancel
+  "reschedule_appointment" — appointment_data has new_date/new_time
+  "request_callback"       — callback_data has reason+preferred_time; will be written to DB
+  "repeat_last"            — replay previous response (do not generate new text)
+  ""                       — normal turn (no side-effect)
+
+action values:
+  "continue"   — keep call going (default)
+  "transfer"   — route to transfer_destination
+  "end_call"   — hang up after speaking text
+  "send_sms"   — send SMS (also set sms_type)
+
+transfer_destination ∈ {{reception, emergency, opd, billing, pharmacy, lab, patient_relations, doctor}} or null.
+sms_type ∈ {{maps, appointment, appointment_cancel, callback_confirm, lab_schedule, call_summary}} or null."""
 
 
 class GroqBrain:
@@ -386,6 +462,7 @@ class GroqBrain:
             )
 
         action = data.get("action", "continue")
+        action_type = data.get("action_type") or ""
         transfer_dest = data.get("transfer_destination") or ""
         is_emergency = bool(data.get("is_emergency", False))
 
@@ -398,9 +475,13 @@ class GroqBrain:
             transfer_destination=transfer_dest,
             transfer_doctor=data.get("transfer_doctor") or "",
             sms_type=data.get("sms_type") or "",
-            sms_data={},
+            sms_data=data.get("sms_data") or {},
             is_emergency=is_emergency,
             call_note=data.get("call_note") or "",
+            action_type=action_type,
+            appointment_data=data.get("appointment_data") or {},
+            callback_data=data.get("callback_data") or {},
+            repeat_requested=(action_type == "repeat_last"),
         )
 
     async def generate_greeting(self) -> GroqBrainResult:

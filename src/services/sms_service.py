@@ -77,6 +77,53 @@ class SMSService:
         )
         return await self._send(phone, message)
 
+    async def send_appointment_cancellation(
+        self,
+        phone: str,
+        hospital_name: str,
+        patient_name: str,
+        doctor_name: str,
+        date: str,
+    ) -> bool:
+        """Notify patient that their appointment has been cancelled."""
+        message = (
+            f"Appointment Cancelled\n"
+            f"Hospital: {hospital_name}\n"
+            f"Patient: {patient_name}\n"
+            f"Doctor: Dr. {doctor_name}\n"
+            f"Date: {date}\n"
+            "Contact us to rebook. Arya."
+        )
+        return await self._send(phone, message)
+
+    async def send_callback_confirmation(
+        self,
+        phone: str,
+        hospital_name: str,
+        preferred_time: str,
+    ) -> bool:
+        """Confirm a callback request was registered."""
+        message = (
+            f"Callback Registered — {hospital_name}\n"
+            f"We will call you back {preferred_time}.\n"
+            "Arya, your hospital assistant."
+        )
+        return await self._send(phone, message)
+
+    async def send_call_summary(
+        self,
+        phone: str,
+        hospital_name: str,
+        summary: str,
+    ) -> bool:
+        """Send a brief call summary after the call ends."""
+        message = (
+            f"{hospital_name}\n"
+            f"Call summary: {summary[:140]}\n"
+            "Arya"
+        )
+        return await self._send(phone, message)
+
     async def send_custom(self, phone: str, message: str) -> bool:
         """Send a custom message to the given phone number."""
         return await self._send(phone, message)

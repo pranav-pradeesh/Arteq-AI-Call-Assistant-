@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import uuid as _uuid_mod
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Optional
@@ -167,6 +168,7 @@ class HospitalContext:
     faqs: list[FaqRow]
     emergency: list[EmergencyContact]
     knowledge_base: str = ""   # free-form staff handbook (parking, insurance, policies, …)
+    queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
     loaded_at: float = 0.0
 
     # ── Quick lookup helpers ──────────────────────────────────────────────────
@@ -395,3 +397,177 @@ async def write_call_log(
     except Exception as e:
         import logging
         logging.error(f"call_log write failed: {e}")
+
+
+# ── Appointments ──────────────────────────────────────────────────────────────
+
+async def create_appointment(
+    hospital_id: str,
+    patient_name: str,
+    patient_phone: str,
+    doctor_id: Optional[str],
+    dept_id: Optional[str],
+    slot_time: Optional[datetime],
+    notes: str,
+    call_id: str,
+) -> str:
+    """Insert a new appointment; returns the new UUID as a string."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO appointments
+               (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
+                slot_time, notes, call_id, status, reminder_sent)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false)
+               RETURNING id""",
+            hospital_id,
+            patient_name,
+            patient_phone,
+            _uuid_mod.UUID(doctor_id) if doctor_id else None,
+            _uuid_mod.UUID(dept_id) if dept_id else None,
+            slot_time,
+            notes or "",
+            call_id,
+        )
+    return str(row["id"])
+
+
+async def cancel_appointment_by_id(appointment_id: str, hospital_id: str) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE appointments SET status='cancelled', updated_at=NOW() "
+            "WHERE id=$1 AND hospital_id=$2",
+            _uuid_mod.UUID(appointment_id),
+            hospital_id,
+        )
+    return result.split()[-1] != "0"
+
+
+async def reschedule_appointment_by_id(
+    appointment_id: str, new_slot_time: datetime
+) -> bool:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        result = await conn.execute(
+            "UPDATE appointments SET slot_time=$2, status='rescheduled', "
+            "updated_at=NOW() WHERE id=$1",
+            _uuid_mod.UUID(appointment_id),
+            new_slot_time,
+        )
+    return result.split()[-1] != "0"
+
+
+async def get_appointments_by_phone(
+    phone: str, hospital_id: str
+) -> list[dict]:
+    """Return the last 3 active appointments for a caller phone number."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT a.id, a.patient_name, a.slot_time, a.status,
+                      d.name AS doctor_name, dep.name AS dept_name
+               FROM appointments a
+               LEFT JOIN doctors d ON a.doctor_id = d.id
+               LEFT JOIN departments dep ON a.dept_id = dep.id
+               WHERE a.patient_phone=$1 AND a.hospital_id=$2
+                 AND a.status IN ('pending','booked','confirmed')
+               ORDER BY a.created_at DESC
+               LIMIT 3""",
+            phone, hospital_id,
+        )
+    return [dict(r) for r in rows]
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
+
+async def create_callback(
+    hospital_id: str,
+    patient_phone: str,
+    patient_name: str,
+    reason: str,
+    preferred_time: str,
+    call_id: str,
+) -> str:
+    """Insert a callback request; returns the new UUID as a string."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """INSERT INTO callbacks
+               (hospital_id, patient_phone, patient_name, reason, preferred_time,
+                call_id, status)
+               VALUES ($1,$2,$3,$4,$5,$6,'pending')
+               RETURNING id""",
+            hospital_id, patient_phone, patient_name or "",
+            reason or "", preferred_time or "", call_id,
+        )
+    return str(row["id"])
+
+
+# ── OPD queue ─────────────────────────────────────────────────────────────────
+
+async def get_opd_queue_estimate(dept_id: str) -> int:
+    """Return today's booked appointment count for a department (0 if unknown)."""
+    pool = await get_pool()
+    try:
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT queue_count FROM opd_queue_today WHERE dept_id=$1",
+                _uuid_mod.UUID(dept_id),
+            )
+        return int(row["queue_count"]) if row else 0
+    except Exception:
+        return 0
+
+
+# ── Doctor / dept fuzzy lookup (for booking from voice transcript) ────────────
+
+async def get_doctor_by_name_fuzzy(name_fragment: str, hospital_id: str) -> Optional[dict]:
+    """Find a doctor by partial name match (case-insensitive)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id::text, name, name_ml FROM doctors
+               WHERE hospital_id=$1
+                 AND (LOWER(name) LIKE $2 OR name_ml LIKE $2)
+               LIMIT 1""",
+            hospital_id,
+            f"%{name_fragment.lower()}%",
+        )
+    return dict(row) if row else None
+
+
+async def get_dept_by_name_fuzzy(name_fragment: str, hospital_id: str) -> Optional[dict]:
+    """Find a department by partial name match (case-insensitive)."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT id::text, name, name_ml FROM departments
+               WHERE hospital_id=$1 AND active=true
+                 AND (LOWER(name) LIKE $2 OR LOWER(COALESCE(name_ml,'')) LIKE $2)
+               LIMIT 1""",
+            hospital_id,
+            f"%{name_fragment.lower()}%",
+        )
+    return dict(row) if row else None
+
+
+# ── Call feedback ─────────────────────────────────────────────────────────────
+
+async def write_call_feedback(
+    call_id: str,
+    hospital_id: str,
+    rating: Optional[int],
+    comments: str,
+) -> None:
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO call_feedback (call_id, hospital_id, rating, comments)
+                   VALUES ($1,$2,$3,$4)""",
+                call_id, hospital_id, rating, comments or "",
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"call_feedback write failed: {e}")

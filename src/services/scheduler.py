@@ -25,6 +25,7 @@ logger = get_logger(__name__)
 _stop = asyncio.Event()
 
 _MARK_SENT = "UPDATE appointments SET reminder_sent = true WHERE id = $1"
+_MARK_CALLBACK_SCHEDULED = "UPDATE callbacks SET status = 'scheduled' WHERE id = $1"
 
 
 async def reminder_loop(interval_seconds: int = 900) -> None:
@@ -86,6 +87,49 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
     logger.info("reminder_loop_stopped")
 
 
+async def callback_loop(interval_seconds: int = 300) -> None:
+    """Poll for pending callback requests and place outbound calls until stopped."""
+    service = OutboundCallService()
+    logger.info("callback_loop_started", interval_seconds=interval_seconds)
+
+    while not _stop.is_set():
+        try:
+            pool = await get_pool()
+            pending = await service.get_pending_callbacks(pool)
+            if pending:
+                logger.info("callback_pass", pending=len(pending))
+
+            for cb in pending:
+                if _stop.is_set():
+                    break
+                cb_id = cb.get("id")
+                try:
+                    ok = await service.schedule_callback_call(
+                        patient_phone=cb["patient_phone"],
+                        patient_name=cb.get("patient_name") or "",
+                        reason=cb.get("reason") or "",
+                        hospital_id=str(cb.get("hospital_id") or ""),
+                    )
+                    if ok:
+                        async with pool.acquire() as conn:
+                            await conn.execute(_MARK_CALLBACK_SCHEDULED, cb_id)
+                        logger.info("callback_scheduled", callback_id=str(cb_id))
+                    else:
+                        logger.warning("callback_not_scheduled", callback_id=str(cb_id))
+                except Exception as exc:
+                    logger.error("callback_item_failed",
+                                 callback_id=str(cb_id), error=str(exc))
+        except Exception as exc:
+            logger.error("callback_pass_failed", error=str(exc))
+
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("callback_loop_stopped")
+
+
 def start_scheduler() -> asyncio.Task | None:
     """Create and return the background reminder task.
 
@@ -99,6 +143,12 @@ def start_scheduler() -> asyncio.Task | None:
     interval = getattr(settings, "REMINDER_INTERVAL_SECONDS", 900)
     task = asyncio.create_task(reminder_loop(interval), name="reminder_loop")
     logger.info("reminder_scheduler_started", interval_seconds=interval)
+
+    if getattr(settings, "CALLBACKS_ENABLED", True):
+        cb_interval = getattr(settings, "CALLBACK_LOOP_INTERVAL_SECONDS", 300)
+        asyncio.create_task(callback_loop(cb_interval), name="callback_loop")
+        logger.info("callback_scheduler_started", interval_seconds=cb_interval)
+
     return task
 
 

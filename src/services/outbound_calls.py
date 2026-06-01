@@ -121,6 +121,66 @@ class OutboundCallService:
             )
             return False
 
+    async def schedule_callback_call(
+        self,
+        patient_phone: str,
+        patient_name: str,
+        reason: str,
+        hospital_id: str,
+        tenant_slug: str = "default",
+    ) -> bool:
+        """Trigger an outbound callback call via Exotel."""
+        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
+        custom_field = json.dumps({
+            "call_type": "callback",
+            "patient_name": patient_name,
+            "reason": reason,
+            "hospital_id": hospital_id,
+        })
+        payload = {
+            "From": patient_phone,
+            "To": settings.EXOTEL_CALLER_ID,
+            "CallerId": settings.EXOTEL_CALLER_ID,
+            "Url": webhook_url,
+            "CustomField": custom_field,
+            "TimeLimit": "180",
+            "StatusCallback": status_callback_url,
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    url, data=payload,
+                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
+                )
+            if response.status_code in (200, 201):
+                logger.info("outbound_callback_scheduled", patient=patient_phone[-4:])
+                return True
+            logger.warning("outbound_callback_failed",
+                           status_code=response.status_code, error=response.text[:200])
+            return False
+        except Exception as exc:
+            logger.error("outbound_callback_failed", error=str(exc))
+            return False
+
+    async def get_pending_callbacks(self, db_pool) -> list[dict]:
+        """Fetch pending callback requests (up to 10 at a time)."""
+        query = """
+            SELECT id, patient_phone, patient_name, reason, hospital_id, preferred_time
+            FROM callbacks
+            WHERE status = 'pending'
+            ORDER BY created_at
+            LIMIT 10
+        """
+        try:
+            async with db_pool.acquire() as conn:
+                rows = await conn.fetch(query)
+            return [dict(row) for row in rows]
+        except Exception as exc:
+            logger.debug("get_pending_callbacks_skipped", reason=str(exc))
+            return []
+
     async def get_pending_reminders(self, db_pool) -> list[dict]:
         """
         Query appointments scheduled in the next 24 hours where reminder_sent = False.
