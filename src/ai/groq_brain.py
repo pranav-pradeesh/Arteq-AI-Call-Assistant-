@@ -447,22 +447,19 @@ class GroqBrain:
         use_smart = any(kw in transcript.lower() for kw in _emergency_hints)
         provider, model = self._route(language_detected, use_smart)
 
-        # Per-turn language steer: mirror the caller's detected language exactly.
-        # Placed AFTER history so it's the freshest instruction the model sees.
+        # Per-turn language steer: append to the system prompt (Sarvam-M only
+        # allows ONE system message — a second "role":"system" gets HTTP 400).
         lang_name = _LANG_NAMES.get(language_detected, "the caller's language")
-        lang_hint = {
-            "role": "system",
-            "content": (
-                f"The caller's latest message is in {lang_name}. "
-                f"Reply ONLY in {lang_name}, matching their script and dialect. "
-                f"Do not switch languages."
-            ),
-        }
+        per_turn_system = (
+            self._system_prompt
+            + f"\n\nCURRENT TURN: The caller just spoke in {lang_name}. "
+            f"Reply ONLY in {lang_name}, matching their script and dialect. "
+            f"Do not switch languages."
+        )
 
         messages = [
-            {"role": "system", "content": self._system_prompt},
+            {"role": "system", "content": per_turn_system},
             *self._history,
-            lang_hint,
         ]
 
         try:
