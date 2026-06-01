@@ -3,14 +3,15 @@ Multilingual hospital AI receptionist brain — dual provider.
 
 Full LLM understanding (no keyword matching) with structured JSON output
 for routing decisions. Two backends share one conversation history and
-system prompt; the provider is chosen per turn by the caller's language:
+system prompt; the provider is chosen per turn:
 
-  English / emergency  → Groq LLaMA (fast, low latency)
-      llama-3.1-8b-instant   simple / quick English
-      llama-3.3-70b-versatile  emergencies / complex
-  Other Indian languages + Manglish → Sarvam-M (built for Indian languages)
-      sarvam-m   Malayalam, Hindi, Tamil, Telugu, Kannada, … and code-mixed
+  All languages (default)  → Sarvam-M (built for Indian languages, incl. English)
+      sarvam-m   Malayalam, Hindi, Tamil, Telugu, Kannada, Manglish, English …
+  Emergencies              → Groq llama-3.3-70b-versatile (fast, high quality)
+      auto-falls-back to Sarvam-M if Groq is rate-limited
 
+Sarvam-M is primary because Groq's free tier (6000 TPM) cannot sustain a
+multi-turn voice call and the Dev-tier upgrade is currently unavailable.
 Both endpoints are OpenAI-compatible (same {role, content} message list),
 so history is portable across providers within a single call.
 """
@@ -220,23 +221,28 @@ class GroqBrain:
         return self._client is not None or bool(self._sarvam_key)
 
     def _route(self, language_detected: str, use_smart: bool) -> tuple[str, str]:
-        """Pick (provider, model) for this turn based on language + urgency."""
-        lang = (language_detected or "").lower()
+        """Pick (provider, model) for this turn based on language + urgency.
+
+        Sarvam-M is primary for ALL languages (including English) because
+        Groq's free tier (6000 TPM) cannot sustain a multi-turn voice call and
+        the Dev-tier upgrade is currently unavailable. Groq's smart model is
+        used only for emergencies (and auto-falls-back to Sarvam-M if Groq is
+        rate-limited). If Groq Dev tier becomes available later, English can be
+        routed back to Groq fast for lower latency.
+        """
         groq_ok = self._client is not None
         sarvam_ok = bool(self._sarvam_key)
-        is_english = lang.startswith("en")
 
-        # Emergencies → Groq smart model for speed and reliability.
+        # Emergencies → Groq smart model for speed/quality (falls back to
+        # Sarvam-M automatically in process() if Groq is rate-limited).
         if use_smart and groq_ok:
             return ("groq", _MODEL_SMART)
-        # Indian languages / Manglish → Sarvam-M (best multilingual quality).
-        if not is_english and sarvam_ok:
-            return ("sarvam", _SARVAM_MODEL)
-        # English (or Sarvam unavailable) → Groq fast.
-        if groq_ok:
-            return ("groq", _MODEL_FAST)
+        # Default for every language: Sarvam-M (no free-tier TPM bottleneck).
         if sarvam_ok:
             return ("sarvam", _SARVAM_MODEL)
+        # Last resort if Sarvam is not configured.
+        if groq_ok:
+            return ("groq", _MODEL_FAST)
         return ("none", "")
 
     async def _call_groq(self, messages: list[dict], model: str) -> str:
