@@ -168,13 +168,16 @@ async def handle_exotel_stream(
                 # can open the call with a purpose-specific greeting instead of
                 # the generic inbound welcome.
                 outbound_context = None
-                if custom.get("call_type") in ("confirmation", "reminder", "callback"):
+                _OUTBOUND_TYPES = ("confirmation", "reminder", "callback", "followup", "campaign")
+                if custom.get("call_type") in _OUTBOUND_TYPES:
                     outbound_context = {
                         "call_type": custom.get("call_type"),
                         "patient_name": custom.get("patient_name", ""),
                         "doctor_name": custom.get("doctor_name", ""),
                         "appointment_date": custom.get("appointment_date", ""),
                         "appointment_time": custom.get("appointment_time", ""),
+                        "campaign_type": custom.get("campaign_type", ""),
+                        "campaign_message": custom.get("campaign_message", ""),
                     }
 
                 handler = CallHandler(
@@ -267,13 +270,13 @@ async def handle_exotel_stream(
             else:
                 dead_air_chunks += 1
 
-            # Dead-air escalation: 3 s → "Are you there?", 6 s → transfer
-            if dead_air_chunks == 30 and handler:   # 30 × 100 ms = 3 s
-                dead_air_chunks = 0
+            # Dead-air escalation: 3 s → "Are you there?", 6 s total → transfer
+            # NOTE: do NOT reset dead_air_chunks at 30 — let it keep counting to 60.
+            if dead_air_chunks == 30 and handler:   # 3 s of silence → gentle prompt
                 response_pcm = await handler.process_text_turn("(silence prompt)")
                 if response_pcm:
                     start_playback(response_pcm)
-            elif dead_air_chunks >= 60 and handler:  # 60 × 100 ms = 6 s
+            elif dead_air_chunks >= 60 and handler:  # 6 s total → transfer to staff
                 dead_air_chunks = 0
                 response_pcm = await handler._do_transfer()
                 if response_pcm:

@@ -520,6 +520,23 @@ async def get_opd_queue_estimate(dept_id: str) -> int:
         return 0
 
 
+async def get_all_opd_queue_estimates(hospital_id: str) -> dict[str, int]:
+    """Return {dept_name: queue_count} for all departments in one query."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT d.name AS dept_name, q.queue_count
+                   FROM opd_queue_today q
+                   JOIN departments d ON d.id = q.dept_id
+                   WHERE d.hospital_id = $1 AND q.queue_count > 0""",
+                hospital_id,
+            )
+        return {row["dept_name"]: int(row["queue_count"]) for row in rows}
+    except Exception:
+        return {}
+
+
 # ── Doctor / dept fuzzy lookup (for booking from voice transcript) ────────────
 
 async def get_doctor_by_name_fuzzy(name_fragment: str, hospital_id: str) -> Optional[dict]:
@@ -637,20 +654,22 @@ async def get_available_slots(
             """SELECT to_char(start_time,'HH24:MI') AS start,
                       to_char(end_time,'HH24:MI') AS end
                FROM schedules
-               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true""",
-            _uuid_mod.UUID(doctor_id), db_dow,
+               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true
+                 AND hospital_id = $3""",
+            _uuid_mod.UUID(doctor_id), db_dow, hospital_id,
         )
         if not schedule:
             return []
 
-        # Already booked slots for this doctor on this date
+        # Already booked slots for this doctor on this date (scoped to hospital)
         booked = await conn.fetch(
             """SELECT to_char(slot_time AT TIME ZONE 'Asia/Kolkata','HH24:MI') AS slot
                FROM appointments
                WHERE doctor_id = $1
                  AND slot_time::date = $2
+                 AND hospital_id = $3
                  AND status IN ('booked','confirmed','requested')""",
-            _uuid_mod.UUID(doctor_id), date,
+            _uuid_mod.UUID(doctor_id), date, hospital_id,
         )
         booked_times = {r["slot"] for r in booked}
 

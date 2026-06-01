@@ -472,8 +472,14 @@ class GroqBrain:
                     raise RuntimeError(
                         f"sarvam_chat HTTP {resp.status_code}: {resp.text[:200]}"
                     )
-                data = resp.json()
-                return data["choices"][0]["message"]["content"] or ""
+                try:
+                    data = resp.json()
+                except Exception:
+                    raise RuntimeError(f"sarvam_chat non-JSON response: {resp.text[:200]}")
+                choices = data.get("choices") or []
+                if not choices:
+                    raise RuntimeError(f"sarvam_chat empty choices: {resp.text[:200]}")
+                return (choices[0].get("message", {}).get("content") or "")
         return ""
 
     def _parse_response(self, raw: str, language_detected: str, latency_ms: int) -> GroqBrainResult:

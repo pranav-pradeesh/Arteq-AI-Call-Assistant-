@@ -28,9 +28,9 @@ from src.db.queries import (
     create_callback,
     get_appointments_by_phone,
     get_available_slots,
+    get_all_opd_queue_estimates,
     get_dept_by_name_fuzzy,
     get_doctor_by_name_fuzzy,
-    get_opd_queue_estimate,
     get_or_load_hospital_context,
     get_patient_profile,
     log_missed_question,
@@ -126,32 +126,35 @@ class CallHandler:
         """Load hospital context, initialise brain, inject queue data, return greeting audio."""
         bind_call_context(call_id=self.call_id, tenant_id=self.hospital_id)
         logger.info("call_started", call_id=self.call_id, caller=self.caller_number)
+        try:
+            return await self._start_call_inner()
+        except Exception as e:
+            logger.error("start_call_unhandled", error=str(e), call_id=self.call_id)
+            return await self._synthesize(SERVICE_DOWN_PHRASE) or b""
 
+    async def _start_call_inner(self) -> bytes:
+        """Inner start_call — raises on failure so start_call() can catch and respond."""
         try:
             ctx = await get_or_load_hospital_context(self.hospital_id)
         except Exception as e:
             logger.error("hospital_context_load_failed", error=str(e))
             return await self._synthesize(SERVICE_DOWN_PHRASE) or b""
 
-        # Fetch live OPD queue counts (non-blocking, per-call copy so cache stays clean)
+        # Single query for all OPD queue counts (replaces N sequential per-dept calls)
         try:
-            queue_data: dict = {}
-            for dept in ctx.departments:
-                if dept.id:
-                    count = await get_opd_queue_estimate(dept.id)
-                    if count > 0:
-                        queue_data[dept.name] = count
+            queue_data = await get_all_opd_queue_estimates(self.hospital_id)
             if queue_data:
                 ctx = dataclasses.replace(ctx, queue_data=queue_data)
         except Exception:
-            pass  # queue data is optional
+            pass  # queue data is optional — never block a call for it
 
         self._ctx = ctx
         self._state = await create_state(
             call_id=self.call_id,
             tenant_id=self._ctx.hospital_id,
         )
-        # Patient recognition — fetch returning patient profile
+
+        # Patient recognition — non-blocking, personalises the greeting
         patient_context = None
         if self.caller_number and getattr(settings, "PATIENT_RECOGNITION_ENABLED", True):
             try:
@@ -363,12 +366,13 @@ class CallHandler:
         audio = await self._tts.synthesize(text, language=language)
         if not audio:
             self._consecutive_failures += 1
-            if self._consecutive_failures >= 5:
+            if self._consecutive_failures >= 8:
                 logger.error("circuit_break_tts", call_id=self.call_id)
                 self._call_dead = True
                 if self._state:
                     self._state.transfer_requested = True
             return b""
+        # TTS recovered — clear failure streak
         self._consecutive_failures = 0
         self._last_response_audio = audio
         self._last_response_text = text
