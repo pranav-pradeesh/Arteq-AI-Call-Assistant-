@@ -277,7 +277,13 @@ class GroqBrain:
             "model": _SARVAM_MODEL,
             "messages": messages,
             "temperature": 0.3,
-            "max_tokens": 300,
+            # sarvam-m is a hybrid-reasoning model. With a small budget its
+            # <think> phase eats every token and no JSON is emitted. Disable
+            # thinking (documented: reasoning_effort=None) AND keep a generous
+            # budget so that even if a think block slips through it can close
+            # and still leave room for the JSON answer.
+            "reasoning_effort": None,
+            "max_tokens": 800,
         }
         headers = {
             "api-subscription-key": self._sarvam_key,
@@ -301,19 +307,31 @@ class GroqBrain:
         return ""
 
     def _parse_response(self, raw: str, language_detected: str, latency_ms: int) -> GroqBrainResult:
-        """Parse the JSON response from Groq into a GroqBrainResult."""
+        """Parse the JSON response (Groq or Sarvam-M) into a GroqBrainResult.
+
+        Robust to Sarvam-M reasoning artefacts: strips <think> blocks (closed
+        OR unclosed) and markdown fences, then extracts the JSON object by its
+        outermost braces so surrounding prose can't break parsing.
+        """
+        data = None
         try:
             clean = raw.strip()
-            # Strip Sarvam-M hybrid-reasoning blocks if present
-            if "<think>" in clean:
-                clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL).strip()
-            # Strip markdown code fences if present
-            if clean.startswith("```"):
-                clean = clean.split("```")[1]
-                if clean.startswith("json"):
-                    clean = clean[4:]
+            # Remove a reasoning block — closed (<think>…</think>) or unclosed.
+            if "</think>" in clean:
+                clean = re.sub(r"<think>.*?</think>", "", clean, flags=re.DOTALL)
+            elif "<think>" in clean:
+                # Unclosed: keep only whatever comes after the opening tag.
+                clean = clean.split("<think>", 1)[-1]
+            # Isolate the JSON object by its outermost braces (drops any prose,
+            # markdown fences, or leftover reasoning text around it).
+            start, end = clean.find("{"), clean.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                clean = clean[start : end + 1]
             data = json.loads(clean)
         except (json.JSONDecodeError, ValueError):
+            data = None
+
+        if not isinstance(data, dict):
             logger.warning("groq_brain_json_parse_error", raw=raw[:200])
             return GroqBrainResult(
                 text="ക്ഷമിക്കണം, ഒരു നിമിഷം — ഞാൻ വീണ്ടും ശ്രമിക്കാം.",
