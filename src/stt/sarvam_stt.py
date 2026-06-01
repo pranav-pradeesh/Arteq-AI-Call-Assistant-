@@ -1,5 +1,5 @@
 """
-Sarvam Saarika v2 STT provider.
+Sarvam Saarika v2.5 STT provider.
 
 Handles Manglish (Malayalam in English script) natively alongside all
 major Indian languages and English.
@@ -40,7 +40,7 @@ class SarvamSTT:
     Sarvam Saarika v2 speech-to-text.
 
     Requires SARVAM_API_KEY in environment / .env.
-    language_code="unknown" triggers auto-detection across all Indian languages + English.
+    Uses saarika:v2.5; language_code="unknown" triggers auto-detection.
     """
 
     def __init__(self) -> None:
@@ -69,7 +69,7 @@ class SarvamSTT:
                             "file": ("audio.wav", wav_bytes, "audio/wav"),
                         },
                         data={
-                            "model": "saarika:v2",
+                            "model": "saarika:v2.5",
                             "language_code": "unknown",  # "unknown" = auto-detect
                         },
                     )

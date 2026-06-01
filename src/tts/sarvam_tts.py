@@ -24,15 +24,15 @@ logger = get_logger(__name__)
 _SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
 _MAX_TEXT_LEN = 500  # Sarvam API limit
 
-# Best Bulbul v3 speaker per language
+# Best Bulbul v3 speaker per language (verified against current Sarvam speaker list)
 _LANG_SPEAKER: dict[str, str] = {
-    "ml-IN": "meera",
-    "ta-IN": "pavithra",
-    "hi-IN": "maitreyi",
-    "kn-IN": "meera",
-    "te-IN": "meera",
-    "en-IN": "ananya",
-    "manglish": "meera",
+    "ml-IN": "anushka",
+    "ta-IN": "priya",
+    "hi-IN": "manisha",
+    "kn-IN": "anushka",
+    "te-IN": "anushka",
+    "en-IN": "priya",
+    "manglish": "anushka",
 }
 
 
