@@ -164,6 +164,60 @@ class OutboundCallService:
             logger.error("outbound_callback_failed", error=str(exc))
             return False
 
+    async def schedule_confirmation_call(
+        self,
+        patient_phone: str,
+        patient_name: str,
+        doctor_name: str,
+        slot_time: datetime | None,
+        hospital_id: str,
+        tenant_slug: str = "default",
+    ) -> bool:
+        """Trigger an outbound advance confirmation call 1–2 weeks before appointment."""
+        if slot_time is not None and _INDIA_TZ is not None:
+            slot_local = slot_time.astimezone(_INDIA_TZ) if slot_time.tzinfo else _INDIA_TZ.localize(slot_time)
+            appointment_date = slot_local.strftime("%d %B %Y")   # human-readable for Arya
+            appointment_time = slot_local.strftime("%I:%M %p")
+        else:
+            appointment_date = ""
+            appointment_time = ""
+
+        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        custom_field = json.dumps({
+            "call_type": "confirmation",
+            "patient_name": patient_name,
+            "doctor_name": doctor_name,
+            "appointment_date": appointment_date,
+            "appointment_time": appointment_time,
+            "hospital_id": hospital_id,
+        })
+        payload = {
+            "From": patient_phone,
+            "To": settings.EXOTEL_CALLER_ID,
+            "CallerId": settings.EXOTEL_CALLER_ID,
+            "Url": webhook_url,
+            "CustomField": custom_field,
+            "TimeLimit": "180",
+            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    url, data=payload,
+                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
+                )
+            if response.status_code in (200, 201):
+                logger.info("outbound_confirmation_scheduled",
+                            patient=patient_phone[-4:], doctor=doctor_name, date=appointment_date)
+                return True
+            logger.warning("outbound_confirmation_failed",
+                           status_code=response.status_code, error=response.text[:200])
+            return False
+        except Exception as exc:
+            logger.error("outbound_confirmation_failed", error=str(exc))
+            return False
+
     async def get_pending_callbacks(self, db_pool) -> list[dict]:
         """Fetch pending callback requests (up to 10 at a time)."""
         query = """

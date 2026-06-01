@@ -91,6 +91,7 @@ class CallHandler:
         hospital_id: Optional[str] = None,
         caller_number: Optional[str] = None,
         tenant_slug: Optional[str] = None,
+        outbound_context: Optional[dict] = None,
     ):
         self.call_id = call_id
         self.hospital_id = hospital_id or settings.HOSPITAL_ID
@@ -111,6 +112,8 @@ class CallHandler:
         self._last_response_audio: bytes = b""
         self._last_response_text: str = ""
         self._last_response_lang: str = settings.DEFAULT_LANGUAGE
+        # For outbound calls (confirmation/reminder/callback): context from Exotel CustomField
+        self._outbound_context: Optional[dict] = outbound_context
 
     # ── Public interface ──────────────────────────────────────────────────────
 
@@ -148,7 +151,9 @@ class CallHandler:
             agent_name=settings.AGENT_NAME,
         )
 
-        greeting_result = await self._brain.generate_greeting()
+        greeting_result = await self._brain.generate_greeting(
+            outbound_context=self._outbound_context
+        )
         self._transcript.append({"role": "assistant", "text": greeting_result.text})
         audio = await self._synthesize(greeting_result.text, language=greeting_result.language)
         if audio:

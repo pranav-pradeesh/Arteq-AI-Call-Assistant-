@@ -484,18 +484,65 @@ class GroqBrain:
             repeat_requested=(action_type == "repeat_last"),
         )
 
-    async def generate_greeting(self) -> GroqBrainResult:
+    async def generate_greeting(
+        self,
+        outbound_context: Optional[dict] = None,
+    ) -> GroqBrainResult:
+        """Return an instant greeting — no API call.
+
+        For inbound calls: warm time-of-day greeting in Malayalam.
+        For outbound confirmation/reminder calls: context-aware opening that
+        states the purpose immediately so the patient knows why we called.
+
+        outbound_context keys (all optional):
+          call_type        — "confirmation" | "reminder" | "callback"
+          patient_name     — patient's name
+          doctor_name      — doctor's name
+          appointment_date — "YYYY-MM-DD" or human-readable
+          appointment_time — "HH:MM"
         """
-        Return an instant time-aware greeting in Malayalam (no API call).
-        Warm, human, with hospital name and agent name.
-        """
+        if outbound_context:
+            text = self._build_outbound_greeting(outbound_context)
+            return GroqBrainResult(text=text, language=settings.DEFAULT_LANGUAGE)
+
         now_ist = datetime.now(_INDIA_TZ)
         hosp_name = self._ctx.name_ml or self._ctx.name
         greeting = build_greeting_text(hosp_name, self._agent_name, now_ist.hour)
-        return GroqBrainResult(
-            text=greeting,
-            language=settings.DEFAULT_LANGUAGE,
-        )
+        return GroqBrainResult(text=greeting, language=settings.DEFAULT_LANGUAGE)
+
+    def _build_outbound_greeting(self, ctx: dict) -> str:
+        """Build an outbound call opening in Malayalam."""
+        hosp_name = self._ctx.name_ml or self._ctx.name
+        agent = self._agent_name
+        patient = ctx.get("patient_name", "")
+        doctor = ctx.get("doctor_name", "")
+        date = ctx.get("appointment_date", "")
+        time_ = ctx.get("appointment_time", "")
+        call_type = ctx.get("call_type", "")
+
+        patient_addr = f"{patient}-ക്ക്" if patient else "ആദരണീയ രോഗിക്ക്"
+        doctor_part = f"ഡോക്ടർ {doctor}-യുടെ" if doctor else "നിങ്ങളുടെ"
+        date_part = f"{date}-ന്" if date else ""
+        time_part = f"{time_}-ന്" if time_ else ""
+        slot = f"{date_part} {time_part}".strip()
+
+        if call_type == "confirmation":
+            return (
+                f"ഹലോ, {patient_addr} — ഞാൻ {agent}, {hosp_name}-ൽ നിന്ന് വിളിക്കുന്നു. "
+                f"{doctor_part} appointment {slot + ' ആണ്' if slot else 'ഉണ്ട്'}. "
+                "Confirm ചെയ്യാമോ, അതോ reschedule വേണോ?"
+            )
+        elif call_type == "reminder":
+            return (
+                f"ഹലോ, {patient_addr} — ഞാൻ {agent}, {hosp_name}-ൽ നിന്ന് വിളിക്കുന്നു. "
+                f"നാളെ {slot + ' ' if slot else ''}{doctor_part} appointment ഉണ്ടെന്ന് ഓർമ്മിപ്പിക്കാൻ വിളിച്ചതാണ്. "
+                "എത്തിച്ചേരാൻ കഴിയുമോ?"
+            )
+        else:
+            return (
+                f"ഹലോ, {patient_addr} — ഞാൻ {agent}, {hosp_name}-ൽ നിന്ന് വിളിക്കുന്നു. "
+                "എങ്ങനെ സഹായിക്കാം?"
+            )
 
     async def process(
         self,

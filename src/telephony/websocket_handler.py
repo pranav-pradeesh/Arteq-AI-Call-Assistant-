@@ -164,10 +164,24 @@ async def handle_exotel_stream(
                 custom = start.get("custom_parameters", {}) or {}
                 caller = custom.get("from") or start.get("from")
 
+                # Pass outbound context (call_type, patient_name, etc.) so Arya
+                # can open the call with a purpose-specific greeting instead of
+                # the generic inbound welcome.
+                outbound_context = None
+                if custom.get("call_type") in ("confirmation", "reminder", "callback"):
+                    outbound_context = {
+                        "call_type": custom.get("call_type"),
+                        "patient_name": custom.get("patient_name", ""),
+                        "doctor_name": custom.get("doctor_name", ""),
+                        "appointment_date": custom.get("appointment_date", ""),
+                        "appointment_time": custom.get("appointment_time", ""),
+                    }
+
                 handler = CallHandler(
                     call_id=call_sid,
                     hospital_id=hospital_id,
                     caller_number=caller,
+                    outbound_context=outbound_context,
                 )
                 greeting_pcm = await handler.start_call()
                 if greeting_pcm:

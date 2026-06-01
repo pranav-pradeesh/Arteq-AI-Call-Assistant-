@@ -554,6 +554,44 @@ async def get_dept_by_name_fuzzy(name_fragment: str, hospital_id: str) -> Option
 
 # ── Call feedback ─────────────────────────────────────────────────────────────
 
+async def get_pending_confirmations(db_pool, days_min: int = 5, days_max: int = 14) -> list[dict]:
+    """Appointments in the [days_min, days_max] window that haven't had a confirmation call."""
+    query = """
+        SELECT
+            a.id,
+            a.patient_phone,
+            a.patient_name,
+            a.slot_time,
+            a.hospital_id,
+            d.name AS doctor_name
+        FROM appointments a
+        LEFT JOIN doctors d ON a.doctor_id = d.id
+        WHERE
+            a.confirmation_sent = false
+            AND a.status IN ('booked', 'confirmed', 'requested')
+            AND a.slot_time BETWEEN now() + ($1 || ' days')::interval
+                                 AND now() + ($2 || ' days')::interval
+        ORDER BY a.slot_time
+    """
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(query, str(days_min), str(days_max))
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        import logging
+        logging.debug(f"get_pending_confirmations skipped: {exc}")
+        return []
+
+
+async def mark_confirmation_sent(appointment_id: str) -> None:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE appointments SET confirmation_sent = true WHERE id = $1",
+            _uuid_mod.UUID(appointment_id),
+        )
+
+
 async def write_call_feedback(
     call_id: str,
     hospital_id: str,

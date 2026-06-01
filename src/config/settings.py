@@ -66,6 +66,12 @@ class Settings(BaseSettings):
     REMINDERS_ENABLED: bool = True
     REMINDER_INTERVAL_SECONDS: int = 900
 
+    # Advance confirmation calls (1–2 weeks before appointment)
+    CONFIRMATIONS_ENABLED: bool = True
+    CONFIRMATION_LOOP_INTERVAL_SECONDS: int = 3600   # check every hour
+    CONFIRMATION_DAYS_MIN: int = 5                   # start calling 5 days before
+    CONFIRMATION_DAYS_MAX: int = 14                  # stop calling 14 days before
+
     # Callbacks
     CALLBACK_LOOP_INTERVAL_SECONDS: int = 300
     CALLBACKS_ENABLED: bool = True
