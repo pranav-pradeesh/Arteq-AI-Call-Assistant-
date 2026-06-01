@@ -19,7 +19,10 @@ load_dotenv(dotenv_path=".env", override=False)
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from src.ai.groq_brain import GroqBrain
-from src.db.queries import HospitalContext, DeptInfo, DoctorInfo, BillingItem, EmergencyContact, FAQItem
+from src.db.queries import (
+    HospitalContext, DeptInfo, DoctorInfo, SlotInfo, BillingRow as BillingItem,
+    EmergencyContact, FaqRow as FAQItem,
+)
 
 
 def _mock_hospital() -> HospitalContext:
@@ -36,27 +39,29 @@ def _mock_hospital() -> HospitalContext:
             "sun": ["09:00", "14:00"],
         },
         departments=[
-            DeptInfo(name="OPD", name_ml="ഒ.പി.ഡി", floor=1, phone_ext="101"),
-            DeptInfo(name="Emergency / Casualty", name_ml="അടിയന്തിര വിഭാഗം", floor=0, phone_ext="100"),
-            DeptInfo(name="Cardiology", name_ml="ഹൃദ്രോഗ വിഭാഗം", floor=3, phone_ext="301"),
-            DeptInfo(name="Orthopaedics", name_ml="അസ്ഥിരോഗ വിഭാഗം", floor=2, phone_ext="201"),
-            DeptInfo(name="Radiology / Scan", name_ml="റേഡിയോളജി", floor=1, phone_ext="110"),
-            DeptInfo(name="Laboratory", name_ml="ലാബ്", floor=1, phone_ext="105"),
-            DeptInfo(name="Pharmacy", name_ml="മെഡിക്കൽ ഷോപ്പ്", floor=0, phone_ext="102"),
+            DeptInfo(id="d1", name="OPD", name_ml="ഒ.പി.ഡി", floor="1", location_hint="Ground floor, main entrance", phone_ext="101"),
+            DeptInfo(id="d2", name="Emergency / Casualty", name_ml="അടിയന്തിര വിഭാഗം", floor="G", location_hint="24×7, separate entrance", phone_ext="100"),
+            DeptInfo(id="d3", name="Cardiology", name_ml="ഹൃദ്രോഗ വിഭാഗം", floor="3", location_hint="Block B, 3rd floor", phone_ext="301"),
+            DeptInfo(id="d4", name="Orthopaedics", name_ml="അസ്ഥിരോഗ വിഭാഗം", floor="2", location_hint="Block A, 2nd floor", phone_ext="201"),
+            DeptInfo(id="d6", name="Radiology / Scan", name_ml="റേഡിയോളജി", floor="1", location_hint="Near main entrance", phone_ext="110"),
+            DeptInfo(id="d7", name="Laboratory", name_ml="ലാബ്", floor="1", location_hint="Opposite pharmacy", phone_ext="105"),
+            DeptInfo(id="d8", name="Pharmacy", name_ml="മെഡിക്കൽ ഷോപ്പ്", floor="G", location_hint="Ground floor", phone_ext="102"),
         ],
         doctors=[
-            DoctorInfo(name="Rajan Nair", name_ml="ഡോ. രാജൻ നായർ", dept_name="Cardiology",
-                       slots=[type('S', (), {'dow': 1, 'start': '09:00', 'end': '13:00'})(),
-                              type('S', (), {'dow': 3, 'start': '10:00', 'end': '12:00'})()]),
-            DoctorInfo(name="Priya Menon", name_ml="ഡോ. പ്രിയ മേനോൻ", dept_name="Orthopaedics",
-                       slots=[type('S', (), {'dow': 2, 'start': '08:00', 'end': '12:00'})(),
-                              type('S', (), {'dow': 5, 'start': '14:00', 'end': '17:00'})()]),
-            DoctorInfo(name="Arun Kumar", name_ml="ഡോ. അരുൺ കുമാർ", dept_name="OPD",
-                       slots=[type('S', (), {'dow': 1, 'start': '08:00', 'end': '14:00'})(),
-                              type('S', (), {'dow': 2, 'start': '08:00', 'end': '14:00'})(),
-                              type('S', (), {'dow': 3, 'start': '08:00', 'end': '14:00'})(),
-                              type('S', (), {'dow': 4, 'start': '08:00', 'end': '14:00'})(),
-                              type('S', (), {'dow': 5, 'start': '08:00', 'end': '14:00'})()]),
+            DoctorInfo(id="doc1", name="Dr. Rajan Nair", name_ml="ഡോ. രാജൻ നായർ",
+                       specialty="Cardiologist", qualifications="MD, DM Cardiology",
+                       dept_name="Cardiology", dept_name_ml="ഹൃദ്രോഗ വിഭാഗം",
+                       slots=[SlotInfo(dow=1, start="09:00", end="13:00", room="301"),
+                              SlotInfo(dow=3, start="10:00", end="12:00", room="301")]),
+            DoctorInfo(id="doc2", name="Dr. Priya Menon", name_ml="ഡോ. പ്രിയ മേനോൻ",
+                       specialty="Orthopaedic Surgeon", qualifications="MS Orthopaedics",
+                       dept_name="Orthopaedics", dept_name_ml="അസ്ഥിരോഗ വിഭാഗം",
+                       slots=[SlotInfo(dow=2, start="08:00", end="12:00", room="201"),
+                              SlotInfo(dow=5, start="14:00", end="17:00", room="201")]),
+            DoctorInfo(id="doc3", name="Dr. Arun Kumar", name_ml="ഡോ. അരുൺ കുമാർ",
+                       specialty="General Physician", qualifications="MBBS, MD",
+                       dept_name="OPD", dept_name_ml="ഒ.പി.ഡി",
+                       slots=[SlotInfo(dow=i, start="08:00", end="14:00", room="101") for i in range(1, 6)]),
         ],
         billing=[
             BillingItem(item="consultation:OPD", item_ml="ഒ.പി.ഡി കൺസൾട്ടേഷൻ",
@@ -70,12 +75,15 @@ def _mock_hospital() -> HospitalContext:
             EmergencyContact(label="Emergency / Ambulance", label_ml="അടിയന്തിരം / ആംബുലൻസ്", phone="1800-425-7012"),
         ],
         faqs=[
-            FAQItem(question="Do you have parking?",
-                    answer="Yes, free parking for patients in the basement."),
-            FAQItem(question="What insurance do you accept?",
-                    answer="We accept Star Health, New India, IFFCO Tokio, and CGHS cards."),
-            FAQItem(question="How to book an appointment?",
-                    answer="Call OPD reception (Ext 101) or visit our front desk."),
+            FAQItem(category="facilities", question="Do you have parking?",
+                    answer="Yes, free parking for patients in the basement.",
+                    answer_ml="", tags=[]),
+            FAQItem(category="billing", question="What insurance do you accept?",
+                    answer="We accept Star Health, New India, IFFCO Tokio, and CGHS cards.",
+                    answer_ml="", tags=[]),
+            FAQItem(category="booking", question="How to book an appointment?",
+                    answer="Call OPD reception (Ext 101) or visit our front desk.",
+                    answer_ml="", tags=[]),
         ],
         knowledge_base=(
             "Visiting hours: 10am–12pm and 5pm–7pm. No visiting on ICU floor.\n"

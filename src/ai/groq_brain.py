@@ -101,11 +101,30 @@ class GroqBrainResult(BrainResult):
     repeat_requested: bool = False
 
 
+_EMERGENCY_KEYWORDS = (
+    "emergency", "ambulance", "chest pain", "unconscious", "breathing",
+    "bleeding", "accident", "stroke", "seizure", "fits", "heart attack",
+    "critical", "dying", "collapsed",
+    "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം", "അടിയന്തിരം", "ആംബുലൻസ്",
+    "हार्ट", "दुर्घटना",
+)
+
+_FALLBACK_MESSAGES = {
+    "ml-IN": "ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. ദയവായി ഒന്നൂടെ പറയാമോ?",
+    "en-IN": "I'm sorry, there was a technical issue. Could you please repeat that?",
+    "hi-IN": "क्षमा करें, तकनीकी समस्या आई। कृपया दोबारा बोलें।",
+    "ta-IN": "மன்னிக்கவும், தொழில்நுட்ப சிக்கல். மீண்டும் சொல்லுங்கள்.",
+    "manglish": "Sorry, oru technical problem aayi. Onnu koodi paranjalo?",
+}
+
+
 def _is_groq_exhausted(exc: Exception) -> bool:
     """True if a Groq error means we should fall back to Sarvam-M.
 
     Covers rate limits (429), token-per-minute caps (413 'request too large'),
-    and transient server/availability errors.
+    transient server errors, and auth/IP-restriction errors (403/allowlist)
+    that prevent this environment from using Groq — in all these cases, Sarvam
+    is worth trying as a fallback.
     """
     msg = str(exc).lower()
     return any(
@@ -115,6 +134,7 @@ def _is_groq_exhausted(exc: Exception) -> bool:
             "413", "too large", "payload too large",
             "tokens per minute", "tpm",
             "503", "502", "500", "overloaded", "service unavailable",
+            "403", "allowlist", "not allowed", "forbidden",
         )
     )
 
@@ -608,12 +628,7 @@ class GroqBrain:
         self._history.append({"role": "user", "content": transcript})
 
         # Emergency keywords force the fast, reliable Groq smart model.
-        _emergency_hints = (
-            "emergency", "ambulance", "chest pain", "unconscious", "breathing",
-            "bleeding", "accident", "stroke", "seizure", "fits",
-            "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം",
-        )
-        use_smart = any(kw in transcript.lower() for kw in _emergency_hints)
+        use_smart = any(kw in transcript.lower() for kw in _EMERGENCY_KEYWORDS)
         provider, model = self._route(language_detected, use_smart)
 
         # Per-turn language steer: append to the system prompt (Sarvam-M only
@@ -683,8 +698,23 @@ class GroqBrain:
             # Remove the user message we optimistically appended
             if self._history and self._history[-1]["role"] == "user":
                 self._history.pop()
+
+            # Safety: if transcript contained emergency keywords, always transfer
+            # to emergency even when the LLM is unavailable — never leave a patient
+            # in distress with just a "technical problem" message.
+            if use_smart:
+                return GroqBrainResult(
+                    text="ഒരു നിമിഷം — ഇത് emergency ആണ്. ഞാൻ ഉടനെ Emergency-ലേക്ക് transfer ചെയ്യുന്നു.",
+                    language="ml-IN",
+                    latency_ms=latency_ms,
+                    should_transfer=True,
+                    transfer_destination="emergency",
+                    is_emergency=True,
+                )
+
+            fallback_text = _FALLBACK_MESSAGES.get(language_detected, _FALLBACK_MESSAGES["ml-IN"])
             return GroqBrainResult(
-                text="ക്ഷമിക്കണം, ഒരു technical problem ഉണ്ടായി. ദയവായി ഒന്നൂടെ പറയാമോ?",
-                language="ml-IN",
+                text=fallback_text,
+                language=language_detected,
                 latency_ms=latency_ms,
             )
