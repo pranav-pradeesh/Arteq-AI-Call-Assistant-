@@ -173,6 +173,16 @@ except Exception as e:
     logger.error("outbound_router_mount_failed", error=str(e))
 
 
+# ── Campaigns ─────────────────────────────────────────────────────────────────
+
+try:
+    from src.api.campaigns import router as campaign_router
+    app.include_router(campaign_router)
+    logger.info("campaign_router_mounted")
+except Exception as e:
+    logger.error("campaign_router_mount_failed", error=str(e))
+
+
 # ── Admin Dashboard ───────────────────────────────────────────────────────────
 
 try:

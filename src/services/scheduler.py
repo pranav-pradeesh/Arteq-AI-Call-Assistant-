@@ -27,6 +27,7 @@ _stop = asyncio.Event()
 _MARK_SENT = "UPDATE appointments SET reminder_sent = true WHERE id = $1"
 _MARK_CONFIRMATION_SENT = "UPDATE appointments SET confirmation_sent = true WHERE id = $1"
 _MARK_CALLBACK_SCHEDULED = "UPDATE callbacks SET status = 'scheduled' WHERE id = $1"
+_MARK_FOLLOWUP_SENT = "UPDATE appointments SET followup_sent = true WHERE id = $1"
 
 
 async def reminder_loop(interval_seconds: int = 900) -> None:
@@ -186,6 +187,54 @@ async def callback_loop(interval_seconds: int = 300) -> None:
     logger.info("callback_loop_stopped")
 
 
+async def followup_loop(interval_seconds: int = 3600, days_after: int = 3) -> None:
+    """Hourly loop: call patients 3 days after their appointment to check on their well-being.
+
+    Mirrors confirmation_loop: fetches pending follow-ups, places outbound calls via Exotel,
+    then marks followup_sent = true on success. All failures are caught and logged.
+    """
+    service = OutboundCallService()
+    logger.info("followup_loop_started", interval_seconds=interval_seconds, days_after=days_after)
+
+    while not _stop.is_set():
+        try:
+            pool = await get_pool()
+            from src.db.queries import get_pending_followups
+            pending = await get_pending_followups(pool, days_after=days_after)
+            if pending:
+                logger.info("followup_pass", pending=len(pending))
+
+            for appt in pending:
+                if _stop.is_set():
+                    break
+                appt_id = appt.get("id")
+                try:
+                    ok = await service.schedule_followup_call(
+                        patient_phone=appt["patient_phone"],
+                        patient_name=appt.get("patient_name") or "",
+                        doctor_name=appt.get("doctor_name") or "",
+                        hospital_id=str(appt.get("hospital_id") or ""),
+                    )
+                    if ok:
+                        async with pool.acquire() as conn:
+                            await conn.execute(_MARK_FOLLOWUP_SENT, appt_id)
+                        logger.info("followup_call_placed", appointment_id=str(appt_id))
+                    else:
+                        logger.warning("followup_call_failed", appointment_id=str(appt_id))
+                except Exception as exc:
+                    logger.error("followup_item_failed",
+                                 appointment_id=str(appt_id), error=str(exc))
+        except Exception as exc:
+            logger.error("followup_pass_failed", error=str(exc))
+
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("followup_loop_stopped")
+
+
 def start_scheduler() -> asyncio.Task | None:
     """Create and return the background reminder task.
 
@@ -215,6 +264,16 @@ def start_scheduler() -> asyncio.Task | None:
         )
         logger.info("confirmation_scheduler_started",
                     interval_seconds=conf_interval, days_min=days_min, days_max=days_max)
+
+    if getattr(settings, "FOLLOWUPS_ENABLED", True):
+        fu_interval = getattr(settings, "FOLLOWUP_LOOP_INTERVAL_SECONDS", 3600)
+        fu_days = getattr(settings, "FOLLOWUP_DAYS_AFTER", 3)
+        asyncio.create_task(
+            followup_loop(fu_interval, fu_days),
+            name="followup_loop",
+        )
+        logger.info("followup_scheduler_started",
+                    interval_seconds=fu_interval, days_after=fu_days)
 
     return task
 

@@ -554,6 +554,152 @@ async def get_dept_by_name_fuzzy(name_fragment: str, hospital_id: str) -> Option
 
 # ── Call feedback ─────────────────────────────────────────────────────────────
 
+async def get_patient_profile(phone: str, hospital_id: str) -> Optional[dict]:
+    """Return patient name + last 3 appointments for a phone number.
+
+    Used for personalized greetings: Arya recognises returning patients.
+    Returns None if the patient has never called/booked before.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT a.patient_name, a.slot_time, a.status,
+                      d.name AS doctor_name, dep.name AS dept_name
+               FROM appointments a
+               LEFT JOIN doctors d ON a.doctor_id = d.id
+               LEFT JOIN departments dep ON a.dept_id = dep.id
+               WHERE a.patient_phone = $1 AND a.hospital_id = $2
+               ORDER BY a.created_at DESC
+               LIMIT 3""",
+            phone, hospital_id,
+        )
+    if not rows:
+        return None
+    name = rows[0]["patient_name"] or ""
+    history = [
+        {
+            "doctor": r["doctor_name"] or "",
+            "dept": r["dept_name"] or "",
+            "slot": str(r["slot_time"])[:10] if r["slot_time"] else "",
+            "status": r["status"],
+        }
+        for r in rows
+    ]
+    return {"name": name, "history": history}
+
+
+async def log_missed_question(
+    hospital_id: str,
+    call_id: str,
+    question: str,
+    language: str,
+    context: str = "",
+) -> None:
+    """Record a question Arya couldn't answer for later KB improvement."""
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                """INSERT INTO missed_questions
+                   (hospital_id, call_id, question, language, context)
+                   VALUES ($1,$2,$3,$4,$5)""",
+                hospital_id, call_id, question[:500], language, context[:200],
+            )
+    except Exception as e:
+        import logging
+        logging.debug(f"log_missed_question failed: {e}")
+
+
+async def get_available_slots(
+    doctor_id: str,
+    date_str: str,
+    hospital_id: str,
+    slot_duration_minutes: int = 15,
+) -> list[str]:
+    """Return available HH:MM slot strings for a doctor on a given date.
+
+    Derives availability by subtracting booked appointments from the
+    doctor's schedule for that day of week.
+    date_str: "YYYY-MM-DD"
+    """
+    import datetime as _dt
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            date = _dt.date.fromisoformat(date_str)
+        except ValueError:
+            return []
+        # DB convention: 0=Sun, 1=Mon, ..., 6=Sat
+        py_dow = date.weekday()  # 0=Mon ... 6=Sun
+        db_dow = (py_dow + 1) % 7
+
+        schedule = await conn.fetch(
+            """SELECT to_char(start_time,'HH24:MI') AS start,
+                      to_char(end_time,'HH24:MI') AS end
+               FROM schedules
+               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true""",
+            _uuid_mod.UUID(doctor_id), db_dow,
+        )
+        if not schedule:
+            return []
+
+        # Already booked slots for this doctor on this date
+        booked = await conn.fetch(
+            """SELECT to_char(slot_time AT TIME ZONE 'Asia/Kolkata','HH24:MI') AS slot
+               FROM appointments
+               WHERE doctor_id = $1
+                 AND slot_time::date = $2
+                 AND status IN ('booked','confirmed','requested')""",
+            _uuid_mod.UUID(doctor_id), date,
+        )
+        booked_times = {r["slot"] for r in booked}
+
+        # Generate all possible slots from schedule windows
+        available = []
+        for row in schedule:
+            start_h, start_m = map(int, row["start"].split(":"))
+            end_h, end_m = map(int, row["end"].split(":"))
+            current = start_h * 60 + start_m
+            end_total = end_h * 60 + end_m
+            while current + slot_duration_minutes <= end_total:
+                slot = f"{current // 60:02d}:{current % 60:02d}"
+                if slot not in booked_times:
+                    available.append(slot)
+                current += slot_duration_minutes
+
+        return available[:10]  # return up to 10 next available slots
+
+
+async def get_pending_followups(db_pool, days_after: int = 3) -> list[dict]:
+    """Appointments from ~days_after days ago needing a follow-up call."""
+    query = """
+        SELECT
+            a.id,
+            a.hospital_id,
+            a.patient_phone,
+            a.patient_name,
+            a.slot_time,
+            d.name AS doctor_name
+        FROM appointments a
+        LEFT JOIN doctors d ON a.doctor_id = d.id
+        WHERE
+            a.followup_sent = false
+            AND a.status IN ('booked','confirmed','requested')
+            AND a.slot_time BETWEEN now() - ($1 || ' days')::interval - interval '12 hours'
+                                 AND now() - ($1 || ' days')::interval + interval '12 hours'
+        ORDER BY a.slot_time
+        LIMIT 20
+    """
+    try:
+        async with db_pool.acquire() as conn:
+            rows = await conn.fetch(query, str(days_after))
+        return [dict(row) for row in rows]
+    except Exception as exc:
+        import logging
+        logging.debug(f"get_pending_followups skipped: {exc}")
+        return []
+
+
 async def get_pending_confirmations(db_pool, days_min: int = 5, days_max: int = 14) -> list[dict]:
     """Appointments in the [days_min, days_max] window that haven't had a confirmation call."""
     query = """

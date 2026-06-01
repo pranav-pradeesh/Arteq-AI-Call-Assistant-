@@ -197,7 +197,35 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
     return "\n".join(lines)
 
 
-def _build_system_prompt(ctx: HospitalContext, agent_name: str) -> str:
+def _build_patient_context_block(patient_context: dict) -> str:
+    """Format the returning patient block injected into the system prompt."""
+    name = patient_context.get("name", "")
+    history = patient_context.get("history", [])
+    if not name and not history:
+        return ""
+    lines = ["RETURNING PATIENT:"]
+    if name:
+        lines.append(f"  Name: {name}")
+    for i, h in enumerate(history[:3]):
+        label = "Last visit" if i == 0 else f"Previous visit {i}"
+        doc = f"Dr. {h['doctor']}" if h.get("doctor") else ""
+        dept = h.get("dept", "")
+        slot = h.get("slot", "")
+        status = h.get("status", "")
+        parts = [p for p in [doc, dept, slot, status] if p]
+        lines.append(f"  {label}: {', '.join(parts)}")
+    lines.append(
+        f"  → Greet {name or 'them'} warmly by name. "
+        "Reference their recent visit naturally if it's relevant to their question."
+    )
+    return "\n".join(lines)
+
+
+def _build_system_prompt(
+    ctx: HospitalContext,
+    agent_name: str,
+    patient_context: Optional[dict] = None,
+) -> str:
     """Construct the full system prompt for the Groq LLaMA model."""
     hospital_summary = _build_hospital_summary(ctx)
     now_ist = datetime.now(_INDIA_TZ)
@@ -206,10 +234,16 @@ def _build_system_prompt(ctx: HospitalContext, agent_name: str) -> str:
     today_name = _DOW_NAMES[today_dow]
     current_time = now_ist.strftime("%H:%M")
 
+    patient_block = ""
+    if patient_context:
+        block = _build_patient_context_block(patient_context)
+        if block:
+            patient_block = f"\n{block}\n"
+
     return f"""You are {agent_name}, the warm AI voice receptionist for {ctx.name}. Patients should feel they're talking to a caring human.
 
 TODAY: {today_name}, {current_time} IST
-
+{patient_block}
 HOSPITAL INFORMATION:
 {hospital_summary}
 
@@ -309,11 +343,18 @@ class GroqBrain:
     One instance per call — maintains multi-turn conversation history.
     """
 
-    def __init__(self, hospital_context: HospitalContext, agent_name: str = "Arya") -> None:
+    def __init__(
+        self,
+        hospital_context: HospitalContext,
+        agent_name: str = "Arya",
+        patient_context: Optional[dict] = None,
+    ) -> None:
         self._ctx = hospital_context
         self._agent_name = agent_name
         self._history: list[dict] = []
-        self._system_prompt = _build_system_prompt(hospital_context, agent_name)
+        self._system_prompt = _build_system_prompt(
+            hospital_context, agent_name, patient_context=patient_context
+        )
 
         try:
             from groq import AsyncGroq  # type: ignore[import-untyped]

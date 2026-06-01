@@ -76,6 +76,20 @@ class Settings(BaseSettings):
     CALLBACK_LOOP_INTERVAL_SECONDS: int = 300
     CALLBACKS_ENABLED: bool = True
 
+    # Staff alerts — SMS sent to duty manager on key events
+    STAFF_ALERT_PHONE: str = ""          # duty manager mobile; leave blank to disable
+    STAFF_ALERT_ON_BOOKING: bool = True
+    STAFF_ALERT_ON_EMERGENCY: bool = True
+    STAFF_ALERT_ON_CANCEL: bool = True
+
+    # Follow-up calls (3 days after appointment)
+    FOLLOWUPS_ENABLED: bool = True
+    FOLLOWUP_LOOP_INTERVAL_SECONDS: int = 3600
+    FOLLOWUP_DAYS_AFTER: int = 3         # call patient this many days after appointment
+
+    # Patient recognition
+    PATIENT_RECOGNITION_ENABLED: bool = True
+
     # After-hours
     AFTER_HOURS_CALLBACK_ENABLED: bool = True
 

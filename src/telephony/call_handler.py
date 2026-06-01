@@ -27,12 +27,16 @@ from src.db.queries import (
     cancel_appointment_by_id,
     create_callback,
     get_appointments_by_phone,
+    get_available_slots,
     get_dept_by_name_fuzzy,
     get_doctor_by_name_fuzzy,
     get_opd_queue_estimate,
     get_or_load_hospital_context,
+    get_patient_profile,
+    log_missed_question,
     write_call_log,
 )
+from src.services.staff_alert import StaffAlertService
 from src.observability.logger import get_logger, bind_call_context, clear_call_context
 from src.services.sms_service import SMSService
 from src.stt.providers import CompositeSTT
@@ -103,6 +107,7 @@ class CallHandler:
         self._stt = CompositeSTT()
         self._tts = CompositeTTS()
         self._sms = SMSService()
+        self._alerts = StaffAlertService()
         self._consecutive_failures = 0
         self._call_dead = False
         self._transcript: list[dict] = []
@@ -146,9 +151,20 @@ class CallHandler:
             call_id=self.call_id,
             tenant_id=self._ctx.hospital_id,
         )
+        # Patient recognition — fetch returning patient profile
+        patient_context = None
+        if self.caller_number and getattr(settings, "PATIENT_RECOGNITION_ENABLED", True):
+            try:
+                patient_context = await get_patient_profile(
+                    self.caller_number, self.hospital_id
+                )
+            except Exception:
+                pass
+
         self._brain = GroqBrain(
             hospital_context=self._ctx,
             agent_name=settings.AGENT_NAME,
+            patient_context=patient_context,
         )
 
         greeting_result = await self._brain.generate_greeting(
@@ -302,6 +318,22 @@ class CallHandler:
         elif brain_result.action_type == "request_callback":
             asyncio.create_task(self._persist_callback(brain_result))
 
+        # ── Staff alert: emergency ─────────────────────────────────────────────
+        if brain_result.is_emergency and self.caller_number:
+            asyncio.create_task(self._alerts.alert_emergency(
+                patient_phone=self.caller_number,
+                transcript_snippet=transcript,
+                call_id=self.call_id,
+            ))
+
+        # ── Missed question logging ────────────────────────────────────────────
+        # Transfer to generic reception with no specific destination = Arya couldn't help
+        if (brain_result.should_transfer
+                and brain_result.transfer_destination in ("reception", "")
+                and not brain_result.is_emergency
+                and transcript):
+            asyncio.create_task(self._log_missed_question(transcript, lang))
+
         # ── Call routing ──────────────────────────────────────────────────────
         if brain_result.should_end:
             audio = await self._synthesize(brain_result.text, language=brain_result.language)
@@ -447,6 +479,15 @@ class CallHandler:
             )
             logger.info("appointment_booked", appt_id=appt_id, call_id=self.call_id)
 
+            asyncio.create_task(self._alerts.alert_new_booking(
+                patient_name=data.get("patient_name", ""),
+                patient_phone=self.caller_number or "",
+                doctor_name=data.get("doctor_name", ""),
+                date=data.get("date", ""),
+                time=data.get("time", ""),
+                call_id=self.call_id,
+            ))
+
             if brain_result.sms_type == "appointment" and self.caller_number:
                 await self._sms.send_appointment_confirmation(
                     phone=self.caller_number,
@@ -469,6 +510,13 @@ class CallHandler:
                 appt = appts[0]
                 await cancel_appointment_by_id(str(appt["id"]), self.hospital_id)
                 logger.info("appointment_cancelled", appt_id=str(appt["id"]))
+                asyncio.create_task(self._alerts.alert_cancellation(
+                    patient_name=appt.get("patient_name", ""),
+                    patient_phone=self.caller_number or "",
+                    doctor_name=appt.get("doctor_name", ""),
+                    date=str(appt.get("slot_time", ""))[:10],
+                    call_id=self.call_id,
+                ))
                 if brain_result.sms_type == "appointment_cancel":
                     data = brain_result.appointment_data or {}
                     await self._sms.send_appointment_cancellation(
@@ -504,6 +552,23 @@ class CallHandler:
                 )
         except Exception as exc:
             logger.error("persist_callback_failed", error=str(exc))
+
+    async def _log_missed_question(self, question: str, language: str) -> None:
+        """Log a question Arya couldn't answer so the hospital can improve the KB."""
+        try:
+            await log_missed_question(
+                hospital_id=self.hospital_id,
+                call_id=self.call_id,
+                question=question,
+                language=language,
+            )
+            await self._alerts.alert_missed_question(
+                question=question,
+                language=language,
+                call_id=self.call_id,
+            )
+        except Exception as exc:
+            logger.debug("log_missed_question_failed", error=str(exc))
 
     async def _send_post_call_sms(self, brain_result: GroqBrainResult) -> None:
         """Send a brief post-call summary SMS if enabled."""

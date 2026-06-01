@@ -218,6 +218,91 @@ class OutboundCallService:
             logger.error("outbound_confirmation_failed", error=str(exc))
             return False
 
+    async def schedule_followup_call(
+        self,
+        patient_phone: str,
+        patient_name: str,
+        doctor_name: str,
+        hospital_id: str,
+        tenant_slug: str = "default",
+    ) -> bool:
+        """Call patient 3 days after appointment to check on their well-being."""
+        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        custom_field = json.dumps({
+            "call_type": "followup",
+            "patient_name": patient_name,
+            "doctor_name": doctor_name,
+            "hospital_id": hospital_id,
+        })
+        payload = {
+            "From": patient_phone,
+            "To": settings.EXOTEL_CALLER_ID,
+            "CallerId": settings.EXOTEL_CALLER_ID,
+            "Url": webhook_url,
+            "CustomField": custom_field,
+            "TimeLimit": "120",
+            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    url, data=payload,
+                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
+                )
+            if response.status_code in (200, 201):
+                logger.info("followup_call_scheduled", patient=patient_phone[-4:])
+                return True
+            return False
+        except Exception as exc:
+            logger.error("followup_call_failed", error=str(exc))
+            return False
+
+    async def schedule_campaign_call(
+        self,
+        patient_phone: str,
+        patient_name: str,
+        campaign_type: str,
+        campaign_message: str,
+        hospital_id: str,
+        campaign_id: str,
+        tenant_slug: str = "default",
+    ) -> bool:
+        """Place an outbound health campaign call."""
+        url = _CONNECT_URL.format(sid=settings.EXOTEL_SID)
+        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        custom_field = json.dumps({
+            "call_type": "campaign",
+            "campaign_type": campaign_type,
+            "campaign_message": campaign_message[:200],
+            "campaign_id": campaign_id,
+            "patient_name": patient_name,
+            "hospital_id": hospital_id,
+        })
+        payload = {
+            "From": patient_phone,
+            "To": settings.EXOTEL_CALLER_ID,
+            "CallerId": settings.EXOTEL_CALLER_ID,
+            "Url": webhook_url,
+            "CustomField": custom_field,
+            "TimeLimit": "120",
+            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                response = await client.post(
+                    url, data=payload,
+                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
+                )
+            if response.status_code in (200, 201):
+                logger.info("campaign_call_placed", patient=patient_phone[-4:],
+                            campaign_id=campaign_id[:8])
+                return True
+            return False
+        except Exception as exc:
+            logger.error("campaign_call_failed", error=str(exc))
+            return False
+
     async def get_pending_callbacks(self, db_pool) -> list[dict]:
         """Fetch pending callback requests (up to 10 at a time)."""
         query = """
