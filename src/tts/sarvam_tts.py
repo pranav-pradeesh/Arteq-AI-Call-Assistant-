@@ -24,16 +24,20 @@ logger = get_logger(__name__)
 _SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
 _MAX_TEXT_LEN = 500  # Sarvam API limit
 
-# Best Bulbul v3 speaker per language (verified against current Sarvam speaker list)
+# Bulbul v3 speaker per language. Names MUST come from the v3-compatible
+# list (v2 speakers like meera/anushka are rejected). Warm female voices:
+#   ritu, priya, neha, pooja, simran, kavya, ishita, shreya, roopa, tanya
 _LANG_SPEAKER: dict[str, str] = {
-    "ml-IN": "anushka",
+    "ml-IN": "ritu",
     "ta-IN": "priya",
-    "hi-IN": "manisha",
-    "kn-IN": "anushka",
-    "te-IN": "anushka",
+    "hi-IN": "neha",
+    "kn-IN": "ritu",
+    "te-IN": "ritu",
     "en-IN": "priya",
-    "manglish": "anushka",
+    "manglish": "ritu",
 }
+# Fallback if an unknown language code is requested.
+_DEFAULT_SPEAKER = "ritu"
 
 
 def _wav_to_pcm_8k_mono(wav_bytes: bytes) -> bytes:
@@ -76,7 +80,7 @@ class SarvamTTS:
         """Return the best speaker for the given language code."""
         if self._default_speaker:
             return self._default_speaker
-        return _LANG_SPEAKER.get(language, "meera")
+        return _LANG_SPEAKER.get(language, _DEFAULT_SPEAKER)
 
     async def synthesize(self, text: str, language: str = "ml-IN") -> Optional[bytes]:
         """

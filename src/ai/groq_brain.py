@@ -43,8 +43,15 @@ _MODEL_FAST = "llama-3.1-8b-instant"
 _SARVAM_CHAT_URL = "https://api.sarvam.ai/v1/chat/completions"
 _SARVAM_MODEL = "sarvam-m"
 
-# History limit: keep last 20 messages (10 turns)
-_MAX_HISTORY = 20
+# History limit: keep last 8 messages (4 turns). Kept small because the
+# system prompt is large and Groq's free tier caps at 6000 tokens/minute —
+# every turn re-sends the full prompt, so trimming history protects the budget.
+_MAX_HISTORY = 8
+
+# Hard cap on the hospital "handbook" free-text injected into the prompt.
+# The full KB (insurance + lab + policies) can be several thousand tokens;
+# capping keeps each request well under the Groq free-tier TPM limit.
+_MAX_KB_CHARS = 1200
 
 # Limit concurrent API calls across all active calls (free-tier rate limits).
 # Groq free tier: 30 RPM per model. Sarvam: per-plan.
@@ -94,12 +101,13 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
     for doc in ctx.doctors:
         ml_name = f" ({doc.name_ml})" if doc.name_ml else ""
         lines.append(f"  Dr. {doc.name}{ml_name} — {doc.dept_name}")
-        if doc.qualifications:
-            lines.append(f"    Qualifications: {doc.qualifications}")
-        for slot in doc.slots:
-            day_name = _DOW_NAMES[slot.dow] if 0 <= slot.dow <= 6 else str(slot.dow)
-            room_part = f" Room {slot.room}" if slot.room else ""
-            lines.append(f"    {day_name}: {slot.start}–{slot.end}{room_part}")
+        # Condense schedule into one line per doctor (e.g. "Mon 9:00–13:00; Wed 10:00–12:00")
+        if doc.slots:
+            parts = []
+            for slot in doc.slots:
+                day_name = _DOW_NAMES[slot.dow] if 0 <= slot.dow <= 6 else str(slot.dow)
+                parts.append(f"{day_name[:3]} {slot.start}–{slot.end}")
+            lines.append(f"    {'; '.join(parts)}")
 
     lines.extend(["", "CONSULTATION FEES:"])
     for b in ctx.billing:
@@ -116,19 +124,21 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
 
     if ctx.faqs:
         lines.extend(["", "FAQ:"])
+        # English answers only — the model translates as needed. Storing the
+        # ML duplicate here would roughly double the FAQ token cost.
         for faq in ctx.faqs:
             lines.append(f"  Q: {faq.question}")
             lines.append(f"  A: {faq.answer}")
-            if faq.answer_ml:
-                lines.append(f"  A (ML): {faq.answer_ml}")
 
-    kb = getattr(ctx, "knowledge_base", "") or ""
-    if kb.strip():
+    kb = (getattr(ctx, "knowledge_base", "") or "").strip()
+    if kb:
+        if len(kb) > _MAX_KB_CHARS:
+            kb = kb[:_MAX_KB_CHARS].rsplit(" ", 1)[0] + " …"
         lines.extend([
             "",
             "HOSPITAL HANDBOOK (use this to answer ANY other enquiry — "
             "parking, insurance, facilities, visiting hours, policies, etc.):",
-            kb.strip(),
+            kb,
         ])
 
     return "\n".join(lines)
@@ -143,74 +153,26 @@ def _build_system_prompt(ctx: HospitalContext, agent_name: str) -> str:
     today_name = _DOW_NAMES[today_dow]
     current_time = now_ist.strftime("%H:%M")
 
-    return f"""You are {agent_name}, the AI voice receptionist for {ctx.name}.
-Speak naturally and warmly — patients should feel they are talking to a caring human staff member.
+    return f"""You are {agent_name}, the warm AI voice receptionist for {ctx.name}. Patients should feel they're talking to a caring human.
 
 TODAY: {today_name}, {current_time} IST
 
 HOSPITAL INFORMATION:
 {hospital_summary}
 
-YOUR CAPABILITIES:
-1. ROUTING: Connect to Reception, Emergency, OPD, Billing, Pharmacy, Laboratory, Patient Relations, or specific doctors
-2. ENQUIRIES: Timings, doctor schedules, fees, services, insurance, parking, visitor policies
-3. EMERGENCIES: Detect life-threatening symptoms → immediately route to emergency
-4. APPOINTMENTS: Check availability from doctor schedules, offer to connect to reception for booking
-5. DIRECTIONS: Hospital address + offer Google Maps link by SMS
-6. LAB: Lab timings, test preparation instructions, report availability
-7. PHARMACY: Medicine availability, timings, prescription refills
-8. PATIENT INFO: Admission status, visiting hours, discharge process
-9. BILLING: Bill enquiries, payment, insurance queries
+WHAT YOU DO: route calls (reception, emergency, opd, billing, pharmacy, lab, patient_relations, or a specific doctor); answer enquiries (timings, schedules, fees, services, insurance, parking, visiting hours) using the info above; detect emergencies and route immediately; help with appointments, directions, lab/pharmacy/billing questions.
 
-LANGUAGE RULES:
-- Detect language from caller's message: Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish
-- Manglish = Malayalam words typed/spoken in English script (e.g. "njan doctor-nte time ariyaanam")
-- Respond ENTIRELY in the same language/dialect as the caller
-- For Malayalam: warm, conversational (not formal)
-- For Manglish: respond in natural Manglish
-- For English: friendly Indian English
+LANGUAGE: reply ENTIRELY in the caller's language/dialect — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Malayalam/Manglish should be warm and conversational, not formal.
 
-VOICE RULES (you will be converted to speech — make it sound human):
-- Max 2 SHORT sentences per response
-- Use natural speech patterns: "Sure,", "Of course,", "Let me check..."
-- Vary your openings — don't start every response the same way
-- For emergencies: speak urgently but calmly
+VOICE (your text becomes speech): max 2 SHORT sentences. Sound human — "Sure,", "Of course,", "Let me check…". Vary your openings. For emergencies, speak urgently but calmly.
 
-EMERGENCY KEYWORDS (immediate emergency routing regardless of language):
-- Chest pain, heart attack, breathless, difficulty breathing
-- Stroke, unconscious, fits, seizure
-- Heavy bleeding, accident, trauma
-- "Emergency", "ambulance", "ICU"
-- Malayalam equivalents: നെഞ്ചുവേദന, ശ്വാസതടസ്സം, ബോധക്ഷയം, etc.
+EMERGENCY (route to emergency, is_emergency=true): chest pain, heart attack, breathless, stroke, unconscious, seizure/fits, heavy bleeding, accident, "ambulance"/"ICU", or Malayalam equivalents (നെഞ്ചുവേദന, ശ്വാസതടസ്സം, ബോധക്ഷയം).
 
-ROUTING GUIDE:
-- "speak to someone / transfer / human" → reception
-- "emergency / ambulance / critical" → emergency
-- "OPD / outpatient" → opd
-- "bill / payment / insurance" → billing
-- "medicine / pharmacy" → pharmacy
-- "lab / test / report" → lab
-- "Dr. [name]" → doctor (specific)
-- "complaint / feedback / patient rights" → patient_relations
+SMS: offer maps SMS for directions/location; offer appointment SMS for confirmations.
 
-SMS TRIGGERS:
-- "directions / map / how to reach / location" → offer maps SMS
-- "appointment confirmation / schedule details" → offer appointment SMS
-
-ALWAYS respond with valid JSON:
-{{
-  "text": "what to say to caller (1-2 sentences, natural speech)",
-  "language": "ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|manglish",
-  "action": "continue|transfer|end_call|send_sms",
-  "transfer_destination": null,
-  "transfer_doctor": null,
-  "sms_type": null,
-  "is_emergency": false,
-  "call_note": "5-word note for call log"
-}}
-
-transfer_destination must be one of: reception, emergency, opd, billing, pharmacy, lab, patient_relations, doctor — or null.
-sms_type must be one of: maps, appointment, lab_schedule — or null."""
+ALWAYS respond with valid JSON only:
+{{"text":"1-2 natural sentences","language":"ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|manglish","action":"continue|transfer|end_call|send_sms","transfer_destination":null,"transfer_doctor":null,"sms_type":null,"is_emergency":false,"call_note":"5-word log note"}}
+transfer_destination ∈ {{reception, emergency, opd, billing, pharmacy, lab, patient_relations, doctor}} or null. sms_type ∈ {{maps, appointment, lab_schedule}} or null."""
 
 
 class GroqBrain:
