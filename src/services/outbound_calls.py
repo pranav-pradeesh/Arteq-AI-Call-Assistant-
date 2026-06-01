@@ -1,8 +1,10 @@
 """
-Outbound Calls — proactive appointment reminder calls via Exotel.
+Outbound Calls — proactive reminder, confirmation, callback, followup,
+and campaign calls via Plivo.
 
-Exotel's outbound call API dials the patient, then bridges the call
-to our WebSocket handler where the AI (Arya) handles the reminder conversation.
+Plivo dials the patient; once answered it POSTs to our answer_url webhook,
+which returns PCML directing Plivo to open a bidirectional audio stream to
+our WebSocket handler where Arya handles the conversation.
 """
 from __future__ import annotations
 
@@ -12,12 +14,10 @@ from datetime import datetime
 import httpx
 import structlog
 
+from src.cache.store import session_cache
 from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
-
-def _connect_url(sid: str) -> str:
-    return f"https://{settings.EXOTEL_SUBDOMAIN}/v1/Accounts/{sid}/Calls/connect.json"
 
 try:
     import pytz as _pytz
@@ -26,8 +26,75 @@ except ImportError:
     _INDIA_TZ = None  # type: ignore[assignment]
 
 
+def _plivo_call_url() -> str:
+    return f"https://api.plivo.com/v1/Account/{settings.PLIVO_AUTH_ID}/Call/"
+
+
+def _plivo_auth() -> tuple[str, str]:
+    return (settings.PLIVO_AUTH_ID, settings.PLIVO_AUTH_TOKEN)
+
+
+async def _place_call(
+    to: str,
+    answer_url: str,
+    context: dict,
+    time_limit: int = 180,
+) -> bool:
+    """
+    Place a Plivo outbound call and cache the context by request_uuid so the
+    answer_url webhook can pass it to the WebSocket handler.
+
+    Returns True on success, False on failure.
+    """
+    if not settings.PLIVO_AUTH_ID or not settings.PLIVO_AUTH_TOKEN:
+        logger.warning("plivo_not_configured_skipping_outbound")
+        return False
+
+    hangup_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
+    payload = {
+        "from": settings.PLIVO_PHONE_NUMBER,
+        "to": to,
+        "answer_url": answer_url,
+        "answer_method": "POST",
+        "hangup_url": hangup_url,
+        "hangup_method": "POST",
+        "time_limit": str(time_limit),
+    }
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            resp = await client.post(
+                _plivo_call_url(),
+                json=payload,
+                auth=_plivo_auth(),
+            )
+        if resp.status_code in (200, 201):
+            data = resp.json()
+            request_uuid = data.get("request_uuid", "")
+            if request_uuid:
+                # Store context so the answer_url webhook can look it up by request_uuid,
+                # then transfer it to a call_uuid key for the WebSocket handler.
+                session_cache.set(f"plivo:{request_uuid}", context, ttl=600)
+            logger.info(
+                "outbound_call_placed",
+                patient=to[-4:],
+                call_type=context.get("call_type"),
+                request_uuid=(request_uuid[-8:] if request_uuid else "?"),
+            )
+            return True
+        logger.warning(
+            "outbound_call_failed",
+            status_code=resp.status_code,
+            error=resp.text[:200],
+            patient=to[-4:],
+        )
+        return False
+    except Exception as exc:
+        logger.error("outbound_call_error", error=str(exc), patient=to[-4:])
+        return False
+
+
 class OutboundCallService:
-    """Schedules and manages outbound appointment reminder calls via Exotel."""
+    """Places outbound appointment-related calls for a hospital via Plivo."""
 
     async def schedule_reminder(
         self,
@@ -40,19 +107,6 @@ class OutboundCallService:
         appointment_date: str | None = None,
         appointment_time: str | None = None,
     ) -> bool:
-        """
-        Trigger an outbound reminder call to the patient via Exotel.
-
-        Exotel dials the patient and, once answered, bridges the call to our
-        inbound webhook URL where Arya handles the reminder conversation.
-
-        Prefer passing ``slot_time`` (a timestamp, timezone-aware preferred):
-        the human-readable date/time strings are derived in Asia/Kolkata.
-        For backward compatibility, ``appointment_date``/``appointment_time``
-        strings may be passed directly instead.
-
-        Returns True on success, False on failure.
-        """
         if slot_time is not None and _INDIA_TZ is not None:
             if slot_time.tzinfo is None:
                 slot_local = _INDIA_TZ.localize(slot_time)
@@ -68,59 +122,16 @@ class OutboundCallService:
                 slot_time.strftime("%H:%M") if slot_time else ""
             )
 
-        url = _connect_url(settings.EXOTEL_SID)
-        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
-        custom_field = json.dumps(
-            {
-                "call_type": "reminder",
-                "patient_name": patient_name,
-                "doctor_name": doctor_name,
-                "appointment_date": appointment_date,
-                "appointment_time": appointment_time,
-                "hospital_id": hospital_id,
-            }
-        )
-
-        payload = {
-            "From": patient_phone,
-            "To": settings.EXOTEL_CALLER_ID,
-            "CallerId": settings.EXOTEL_CALLER_ID,
-            "Url": webhook_url,
-            "CustomField": custom_field,
-            "TimeLimit": "120",
-            "StatusCallback": status_callback_url,
+        context = {
+            "call_type": "reminder",
+            "patient_name": patient_name,
+            "doctor_name": doctor_name,
+            "appointment_date": appointment_date,
+            "appointment_time": appointment_time,
+            "hospital_id": hospital_id,
         }
-
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url,
-                    data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201):
-                logger.info(
-                    "outbound_reminder_scheduled",
-                    patient=patient_phone[-4:],
-                    doctor=doctor_name,
-                    date=appointment_date,
-                )
-                return True
-            logger.warning(
-                "outbound_reminder_failed",
-                status_code=response.status_code,
-                error=response.text[:200],
-                patient=patient_phone[-4:],
-            )
-            return False
-        except Exception as exc:
-            logger.error(
-                "outbound_reminder_failed",
-                error=str(exc),
-                patient=patient_phone[-4:],
-            )
-            return False
+        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        return await _place_call(patient_phone, answer_url, context, time_limit=120)
 
     async def schedule_callback_call(
         self,
@@ -130,40 +141,14 @@ class OutboundCallService:
         hospital_id: str,
         tenant_slug: str = "default",
     ) -> bool:
-        """Trigger an outbound callback call via Exotel."""
-        url = _connect_url(settings.EXOTEL_SID)
-        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        status_callback_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
-        custom_field = json.dumps({
+        context = {
             "call_type": "callback",
             "patient_name": patient_name,
             "reason": reason,
             "hospital_id": hospital_id,
-        })
-        payload = {
-            "From": patient_phone,
-            "To": settings.EXOTEL_CALLER_ID,
-            "CallerId": settings.EXOTEL_CALLER_ID,
-            "Url": webhook_url,
-            "CustomField": custom_field,
-            "TimeLimit": "180",
-            "StatusCallback": status_callback_url,
         }
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url, data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201):
-                logger.info("outbound_callback_scheduled", patient=patient_phone[-4:])
-                return True
-            logger.warning("outbound_callback_failed",
-                           status_code=response.status_code, error=response.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("outbound_callback_failed", error=str(exc))
-            return False
+        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        return await _place_call(patient_phone, answer_url, context, time_limit=180)
 
     async def schedule_confirmation_call(
         self,
@@ -174,50 +159,28 @@ class OutboundCallService:
         hospital_id: str,
         tenant_slug: str = "default",
     ) -> bool:
-        """Trigger an outbound advance confirmation call 1–2 weeks before appointment."""
         if slot_time is not None and _INDIA_TZ is not None:
-            slot_local = slot_time.astimezone(_INDIA_TZ) if slot_time.tzinfo else _INDIA_TZ.localize(slot_time)
-            appointment_date = slot_local.strftime("%d %B %Y")   # human-readable for Arya
+            slot_local = (
+                slot_time.astimezone(_INDIA_TZ)
+                if slot_time.tzinfo
+                else _INDIA_TZ.localize(slot_time)
+            )
+            appointment_date = slot_local.strftime("%d %B %Y")
             appointment_time = slot_local.strftime("%I:%M %p")
         else:
             appointment_date = ""
             appointment_time = ""
 
-        url = _connect_url(settings.EXOTEL_SID)
-        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        custom_field = json.dumps({
+        context = {
             "call_type": "confirmation",
             "patient_name": patient_name,
             "doctor_name": doctor_name,
             "appointment_date": appointment_date,
             "appointment_time": appointment_time,
             "hospital_id": hospital_id,
-        })
-        payload = {
-            "From": patient_phone,
-            "To": settings.EXOTEL_CALLER_ID,
-            "CallerId": settings.EXOTEL_CALLER_ID,
-            "Url": webhook_url,
-            "CustomField": custom_field,
-            "TimeLimit": "180",
-            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
         }
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url, data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201):
-                logger.info("outbound_confirmation_scheduled",
-                            patient=patient_phone[-4:], doctor=doctor_name, date=appointment_date)
-                return True
-            logger.warning("outbound_confirmation_failed",
-                           status_code=response.status_code, error=response.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("outbound_confirmation_failed", error=str(exc))
-            return False
+        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        return await _place_call(patient_phone, answer_url, context, time_limit=180)
 
     async def schedule_followup_call(
         self,
@@ -227,37 +190,14 @@ class OutboundCallService:
         hospital_id: str,
         tenant_slug: str = "default",
     ) -> bool:
-        """Call patient 3 days after appointment to check on their well-being."""
-        url = _connect_url(settings.EXOTEL_SID)
-        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        custom_field = json.dumps({
+        context = {
             "call_type": "followup",
             "patient_name": patient_name,
             "doctor_name": doctor_name,
             "hospital_id": hospital_id,
-        })
-        payload = {
-            "From": patient_phone,
-            "To": settings.EXOTEL_CALLER_ID,
-            "CallerId": settings.EXOTEL_CALLER_ID,
-            "Url": webhook_url,
-            "CustomField": custom_field,
-            "TimeLimit": "120",
-            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
         }
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url, data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201):
-                logger.info("followup_call_scheduled", patient=patient_phone[-4:])
-                return True
-            return False
-        except Exception as exc:
-            logger.error("followup_call_failed", error=str(exc))
-            return False
+        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        return await _place_call(patient_phone, answer_url, context, time_limit=120)
 
     async def schedule_campaign_call(
         self,
@@ -269,40 +209,16 @@ class OutboundCallService:
         campaign_id: str,
         tenant_slug: str = "default",
     ) -> bool:
-        """Place an outbound health campaign call."""
-        url = _connect_url(settings.EXOTEL_SID)
-        webhook_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        custom_field = json.dumps({
+        context = {
             "call_type": "campaign",
             "campaign_type": campaign_type,
             "campaign_message": campaign_message[:200],
             "campaign_id": campaign_id,
             "patient_name": patient_name,
             "hospital_id": hospital_id,
-        })
-        payload = {
-            "From": patient_phone,
-            "To": settings.EXOTEL_CALLER_ID,
-            "CallerId": settings.EXOTEL_CALLER_ID,
-            "Url": webhook_url,
-            "CustomField": custom_field,
-            "TimeLimit": "120",
-            "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
         }
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                response = await client.post(
-                    url, data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201):
-                logger.info("campaign_call_placed", patient=patient_phone[-4:],
-                            campaign_id=campaign_id[:8])
-                return True
-            return False
-        except Exception as exc:
-            logger.error("campaign_call_failed", error=str(exc))
-            return False
+        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        return await _place_call(patient_phone, answer_url, context, time_limit=120)
 
     async def get_pending_callbacks(self, db_pool) -> list[dict]:
         """Fetch pending callback requests (up to 10 at a time)."""
@@ -322,12 +238,7 @@ class OutboundCallService:
             return []
 
     async def get_pending_reminders(self, db_pool) -> list[dict]:
-        """
-        Query appointments scheduled in the next 24 hours where reminder_sent = False.
-
-        Returns a list of appointment dicts.
-        If the appointments table does not exist yet, returns [] silently.
-        """
+        """Query appointments in the next 24 hours where reminder_sent = False."""
         query = """
             SELECT
                 a.id,
@@ -349,6 +260,5 @@ class OutboundCallService:
                 rows = await conn.fetch(query)
             return [dict(row) for row in rows]
         except Exception as exc:
-            # Table may not exist in MVP — fail silently
             logger.debug("get_pending_reminders_skipped", reason=str(exc))
             return []

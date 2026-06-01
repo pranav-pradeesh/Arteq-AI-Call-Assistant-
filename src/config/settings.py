@@ -21,12 +21,13 @@ class Settings(BaseSettings):
 
     # Telephony
     TELEPHONY_MODE: str = "stream"
-    EXOTEL_SID: str = ""
-    EXOTEL_API_KEY: str = ""
-    EXOTEL_API_TOKEN: str = ""
-    EXOTEL_CALLER_ID: str = ""
     PUBLIC_BASE_URL: str = "http://localhost:8000"
     PUBLIC_WS_URL: str = "ws://localhost:8000"
+
+    # Plivo — SIP trunk + phone number provisioning
+    PLIVO_AUTH_ID: str = ""
+    PLIVO_AUTH_TOKEN: str = ""
+    PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
     @model_validator(mode="after")
     def _auto_detect_render_url(self) -> "Settings":
@@ -80,7 +81,6 @@ class Settings(BaseSettings):
 
     # Outbound / transfer
     INTERNAL_API_KEY: str = ""
-    EXOTEL_SUBDOMAIN: str = "api.exotel.in"
     REMINDERS_ENABLED: bool = True
     REMINDER_INTERVAL_SECONDS: int = 900
 

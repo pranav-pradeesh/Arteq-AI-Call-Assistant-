@@ -19,7 +19,7 @@ router = APIRouter(
     dependencies=[Depends(require_api_key), Depends(rate_limit(30))],
 )
 
-# Separate router for Exotel callbacks (no auth — Exotel posts from its own IPs)
+# Separate router for Plivo callbacks (no auth — Plivo posts from its own IPs)
 callback_router = APIRouter(tags=["outbound"])
 
 _outbound_service = OutboundCallService()
@@ -61,21 +61,17 @@ async def health_check():
 
 @callback_router.post("/api/v1/call/status")
 async def call_status_callback(
-    CallSid: str = Form(default=""),
+    CallUUID: str = Form(default=""),
+    RequestUUID: str = Form(default=""),
     Status: str = Form(default=""),
     Duration: str = Form(default="0"),
     From: str = Form(default=""),
     To: str = Form(default=""),
-    CustomField: str = Form(default=""),
 ):
-    """
-    Exotel status callback — called when a call ends.
-
-    Exotel posts form data with call outcome. We log it and return HTTP 200.
-    """
+    """Plivo hangup callback — called when a call ends."""
     logger.info(
         "call_status_callback",
-        call_sid=CallSid,
+        call_uuid=CallUUID[-8:] if CallUUID else "?",
         status=Status,
         duration=Duration,
     )

@@ -49,12 +49,23 @@ async def lifespan(app: FastAPI):
         logger.info("public_urls_ok",
                     base=settings.PUBLIC_BASE_URL, ws=settings.PUBLIC_WS_URL)
 
-    # DB probe — best-effort, server starts regardless
+    # DB probe + schema migration — best-effort, server starts regardless
     try:
         pool = await asyncio.wait_for(get_pool(), timeout=15)
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
         logger.info("db_connected")
+        # Apply pending schema migrations idempotently
+        try:
+            import pathlib
+            migration_dir = pathlib.Path("migrations/versions")
+            for sql_file in sorted(migration_dir.glob("*.sql")):
+                sql = sql_file.read_text()
+                async with pool.acquire() as conn:
+                    await conn.execute(sql)
+            logger.info("db_migrations_applied")
+        except Exception as me:
+            logger.warning("db_migration_warning", error=str(me))
     except asyncio.TimeoutError:
         logger.error("db_connection_timeout", hint="Check DATABASE_URL / network")
     except Exception as e:
@@ -161,17 +172,34 @@ async def websocket_call_stream(websocket: WebSocket, tenant_slug: str):
 @app.post("/api/v1/call/inbound/{tenant_slug}")
 async def call_inbound_webhook(tenant_slug: str, request: Request):
     """
-    Exotel calls this URL when a call arrives.
-    Returns XML that tells Exotel to open a WebSocket stream.
+    Plivo calls this URL when an inbound or answered outbound call arrives.
+    For outbound calls, transfers the cached context from request_uuid → call_uuid
+    so the WebSocket handler can look it up.
+    Returns Plivo PCML that opens a bidirectional audio stream to our WebSocket.
     """
     from fastapi.responses import Response
+    from src.cache.store import session_cache
+
+    form = await request.form()
+    call_uuid = form.get("CallUUID", "")
+    request_uuid = form.get("RequestUUID", "")
+
+    # Outbound calls: context was cached under request_uuid at call placement.
+    # Transfer it to call_uuid so the WS handler can find it from the start event.
+    if request_uuid and call_uuid:
+        cached = session_cache.get(f"plivo:{request_uuid}")
+        if cached:
+            session_cache.set(f"plivo:{call_uuid}", cached, ttl=600)
+
     ws_url = f"{settings.PUBLIC_WS_URL}/ws/call/{tenant_slug}"
-    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
-<Response>
-    <Connect>
-        <Stream url="{ws_url}" />
-    </Connect>
-</Response>"""
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        f'  <Stream streamTimeout="86400" keepCallAlive="true"'
+        f' bidirectional="true" contentType="audio/x-l16;rate=8000"'
+        f' audioTrack="inbound">{ws_url}</Stream>\n'
+        "</Response>"
+    )
     return Response(content=xml, media_type="text/xml")
 
 

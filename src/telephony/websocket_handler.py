@@ -49,8 +49,9 @@ async def _resolve_hospital_id(tenant_slug: str) -> str:
 
     Strategy:
       1. If slug looks like a UUID, use it directly.
-      2. Otherwise, look up the hospitals table for a matching id prefix or name slug.
-      3. Fallback to settings.HOSPITAL_ID.
+      2. Check hospitals.slug column (exact match).
+      3. Fall back to name-derived slug match.
+      4. Default to settings.HOSPITAL_ID.
     """
     import re
     UUID_RE = re.compile(
@@ -64,7 +65,7 @@ async def _resolve_hospital_id(tenant_slug: str) -> str:
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id FROM hospitals WHERE "
-                "(LOWER(REPLACE(name,' ','-'))=$1 OR id::text=$1) LIMIT 1",
+                "slug=$1 OR LOWER(REPLACE(name,' ','-'))=$1 OR id::text=$1 LIMIT 1",
                 tenant_slug.lower(),
             )
             if row:
@@ -160,15 +161,21 @@ async def handle_exotel_stream(
             if event == "start":
                 start = msg.get("start", {})
                 stream_sid = start.get("stream_sid") or start.get("streamSid")
-                call_sid = start.get("call_sid") or start.get("callSid") or call_id
+                # Plivo uses callId; Exotel/Twilio used callSid / call_sid
+                call_sid = (
+                    start.get("call_sid")
+                    or start.get("callSid")
+                    or start.get("callId")
+                    or call_id
+                )
                 custom = start.get("custom_parameters", {}) or {}
                 caller = custom.get("from") or start.get("from")
 
-                # Pass outbound context (call_type, patient_name, etc.) so Arya
-                # can open the call with a purpose-specific greeting instead of
-                # the generic inbound welcome.
+                # Pass outbound context so Arya opens with a purpose-specific greeting.
                 outbound_context = None
                 _OUTBOUND_TYPES = ("confirmation", "reminder", "callback", "followup", "campaign")
+
+                # Legacy path: custom_parameters embedded in the WebSocket start event
                 if custom.get("call_type") in _OUTBOUND_TYPES:
                     outbound_context = {
                         "call_type": custom.get("call_type"),
@@ -179,6 +186,12 @@ async def handle_exotel_stream(
                         "campaign_type": custom.get("campaign_type", ""),
                         "campaign_message": custom.get("campaign_message", ""),
                     }
+                # Plivo path: context was stored in session_cache by the answer_url handler
+                elif call_sid:
+                    from src.cache.store import session_cache as _sc
+                    cached = _sc.get(f"plivo:{call_sid}")
+                    if cached and cached.get("call_type") in _OUTBOUND_TYPES:
+                        outbound_context = cached
 
                 handler = CallHandler(
                     call_id=call_sid,

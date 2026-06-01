@@ -10,6 +10,7 @@ Day-of-week convention (matches DB): 0=Sunday … 6=Saturday.
 from __future__ import annotations
 
 import json
+import re
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -107,8 +108,8 @@ async def list_hospitals():
     pool = await _db()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
-            "SELECT id, name, name_ml, address, phone, hours, active "
-            "FROM hospitals ORDER BY name"
+            "SELECT id, name, name_ml, address, phone, hours, active, "
+            "slug, plivo_number FROM hospitals ORDER BY name"
         )
     return [
         {
@@ -119,6 +120,8 @@ async def list_hospitals():
             "phone": r["phone"] or "",
             "hours": _maybe_json(r["hours"]) or {},
             "active": r["active"],
+            "slug": r["slug"] or "",
+            "plivo_number": r["plivo_number"] or "",
         }
         for r in rows
     ]
@@ -129,8 +132,8 @@ async def get_hospital(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            "SELECT id, name, name_ml, address, phone, hours, active "
-            "FROM hospitals WHERE id=$1",
+            "SELECT id, name, name_ml, address, phone, hours, active, "
+            "slug, plivo_number FROM hospitals WHERE id=$1",
             hospital_id,
         )
     if not row:
@@ -143,7 +146,17 @@ async def get_hospital(hospital_id: str):
         "phone": row["phone"] or "",
         "hours": _maybe_json(row["hours"]) or {},
         "active": row["active"],
+        "slug": row["slug"] or "",
+        "plivo_number": row["plivo_number"] or "",
     }
+
+
+def _derive_slug(name: str) -> str:
+    """Convert hospital name to a URL-safe slug."""
+    slug = name.lower().replace(" ", "-")
+    slug = re.sub(r"[^a-z0-9-]", "", slug)
+    slug = re.sub(r"-+", "-", slug).strip("-")
+    return slug
 
 
 class HospitalUpdate(BaseModel):
@@ -153,6 +166,7 @@ class HospitalUpdate(BaseModel):
     phone: Optional[str] = None
     hours: Optional[dict] = None
     active: Optional[bool] = None
+    slug: Optional[str] = None
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_auth)])
@@ -160,11 +174,12 @@ async def create_hospital(body: HospitalUpdate):
     if not body.name:
         raise HTTPException(status_code=400, detail="name is required")
     new_id = str(uuid.uuid4())
+    slug = body.slug or _derive_slug(body.name)
     pool = await _db()
     async with pool.acquire() as conn:
         await conn.execute(
-            """INSERT INTO hospitals (id, name, name_ml, address, phone, hours, active)
-               VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+            """INSERT INTO hospitals (id, name, name_ml, address, phone, hours, active, slug)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
             new_id,
             body.name,
             body.name_ml or "",
@@ -172,8 +187,9 @@ async def create_hospital(body: HospitalUpdate):
             body.phone or "",
             json.dumps(body.hours or {}),
             True,
+            slug,
         )
-    return {"id": new_id, "status": "created"}
+    return {"id": new_id, "slug": slug, "status": "created"}
 
 
 @router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
@@ -728,6 +744,246 @@ async def get_stats(hospital_id: str, days: int = 7):
 async def clear_cache(hospital_id: str):
     _invalidate(hospital_id)
     return {"status": "cache_cleared", "hospital_id": hospital_id}
+
+
+# ── Hospital Wizard ───────────────────────────────────────────────────────────
+# Single API call creates a fully configured hospital: departments, doctors,
+# schedules, FAQs, emergency contacts, and optionally provisions a Plivo number.
+# This is an Arteq-internal tool — only Arteq staff use it to onboard clients.
+
+class _ScheduleIn(BaseModel):
+    day_of_week: int        # 0=Sun … 6=Sat
+    start_time: str         # "HH:MM"
+    end_time: str           # "HH:MM"
+    room: Optional[str] = ""
+
+
+class _DoctorIn(BaseModel):
+    name: str
+    name_ml: Optional[str] = ""
+    specialty: Optional[str] = ""
+    qualifications: Optional[str] = ""
+    schedules: list[_ScheduleIn] = []
+
+
+class _DeptIn(BaseModel):
+    name: str
+    name_ml: Optional[str] = ""
+    floor: Optional[str] = ""
+    location_hint: Optional[str] = ""
+    phone_ext: Optional[str] = ""
+    doctors: list[_DoctorIn] = []
+
+
+class _FaqIn(BaseModel):
+    category: Optional[str] = "general"
+    question: str
+    answer: str
+    answer_ml: Optional[str] = ""
+    tags: Optional[list] = []
+    priority: Optional[int] = 0
+
+
+class _EmergencyIn(BaseModel):
+    label: str
+    label_ml: Optional[str] = ""
+    phone: str
+    priority: Optional[int] = 0
+
+
+class HospitalWizardIn(BaseModel):
+    name: str
+    name_ml: Optional[str] = ""
+    address: Optional[str] = ""
+    phone: Optional[str] = ""
+    slug: Optional[str] = None          # auto-derived from name if omitted
+    hours: Optional[dict] = None
+    departments: list[_DeptIn] = []
+    faqs: list[_FaqIn] = []
+    emergency_contacts: list[_EmergencyIn] = []
+    provision_plivo_number: bool = False
+
+
+@router.post("/hospitals/wizard", dependencies=[Depends(_require_auth)])
+async def hospital_wizard(body: HospitalWizardIn):
+    """
+    One-shot hospital onboarding: creates the hospital and all its data,
+    then optionally provisions a Plivo phone number.
+    """
+    hospital_id = str(uuid.uuid4())
+    slug = body.slug or _derive_slug(body.name)
+    pool = await _db()
+
+    async with pool.acquire() as conn:
+        # Hospital row
+        await conn.execute(
+            """INSERT INTO hospitals
+               (id, name, name_ml, address, phone, hours, active, slug)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+            hospital_id, body.name, body.name_ml or "",
+            body.address or "", body.phone or "",
+            json.dumps(body.hours or {}), True, slug,
+        )
+
+        # Departments + doctors + schedules
+        for dept in body.departments:
+            dept_id = str(uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO departments
+                   (id, hospital_id, name, name_ml, floor, location_hint, phone_ext, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                dept_id, hospital_id, dept.name, dept.name_ml or "",
+                dept.floor or "", dept.location_hint or "", dept.phone_ext or "", True,
+            )
+            for doc in dept.doctors:
+                doc_id = str(uuid.uuid4())
+                await conn.execute(
+                    """INSERT INTO doctors
+                       (id, hospital_id, dept_id, name, name_ml, specialty, qualifications, active)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                    doc_id, hospital_id, dept_id, doc.name, doc.name_ml or "",
+                    doc.specialty or "", doc.qualifications or "", True,
+                )
+                for sched in doc.schedules:
+                    await conn.execute(
+                        """INSERT INTO schedules
+                           (id, doctor_id, hospital_id, day_of_week, start_time, end_time, room, active)
+                           VALUES ($1,$2,$3,$4,$5::time,$6::time,$7,$8)""",
+                        str(uuid.uuid4()), doc_id, hospital_id,
+                        sched.day_of_week, sched.start_time, sched.end_time,
+                        sched.room or "", True,
+                    )
+
+        # FAQs
+        for faq in body.faqs:
+            await conn.execute(
+                """INSERT INTO faqs
+                   (id, hospital_id, category, question, answer, answer_ml, tags, priority, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                str(uuid.uuid4()), hospital_id, faq.category or "general",
+                faq.question, faq.answer, faq.answer_ml or "",
+                json.dumps(faq.tags or []), faq.priority or 0, True,
+            )
+
+        # Emergency contacts
+        for ec in body.emergency_contacts:
+            await conn.execute(
+                """INSERT INTO emergency_contacts
+                   (id, hospital_id, label, label_ml, phone, priority, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                str(uuid.uuid4()), hospital_id, ec.label, ec.label_ml or "",
+                ec.phone, ec.priority or 0, True,
+            )
+
+    _invalidate(hospital_id)
+
+    plivo_number = None
+    if body.provision_plivo_number:
+        try:
+            from src.services.plivo_provisioning import provision_number_for_hospital
+            plivo_number = await provision_number_for_hospital(slug)
+            if plivo_number:
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        "UPDATE hospitals SET plivo_number=$1 WHERE id=$2",
+                        plivo_number, hospital_id,
+                    )
+        except Exception as e:
+            logger.warning("wizard_plivo_provision_failed", error=str(e))
+
+    return {
+        "hospital_id": hospital_id,
+        "slug": slug,
+        "plivo_number": plivo_number or "",
+        "departments": len(body.departments),
+        "faqs": len(body.faqs),
+        "emergency_contacts": len(body.emergency_contacts),
+        "status": "created",
+        "bsnl_forward_code": f"**21*{plivo_number}#" if plivo_number else "",
+    }
+
+
+@router.post("/hospitals/{hospital_id}/provision-number", dependencies=[Depends(_require_auth)])
+async def provision_plivo_number(hospital_id: str):
+    """Buy and configure a Plivo number for an existing hospital."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT slug, plivo_number FROM hospitals WHERE id=$1", hospital_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    if row["plivo_number"]:
+        return {"plivo_number": row["plivo_number"], "status": "already_provisioned"}
+
+    slug = row["slug"]
+    if not slug:
+        raise HTTPException(status_code=400, detail="Hospital has no slug — update it first")
+
+    from src.services.plivo_provisioning import provision_number_for_hospital
+    plivo_number = await provision_number_for_hospital(slug)
+    if not plivo_number:
+        raise HTTPException(status_code=502, detail="Could not provision Plivo number")
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE hospitals SET plivo_number=$1 WHERE id=$2", plivo_number, hospital_id
+        )
+    _invalidate(hospital_id)
+    return {
+        "plivo_number": plivo_number,
+        "bsnl_forward_code": f"**21*{plivo_number}#",
+        "status": "provisioned",
+    }
+
+
+@router.get("/hospitals/{hospital_id}/setup-status", dependencies=[Depends(_require_auth)])
+async def setup_status(hospital_id: str):
+    """Check how complete a hospital's setup is — useful after wizard onboarding."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hosp = await conn.fetchrow(
+            "SELECT name, slug, plivo_number FROM hospitals WHERE id=$1", hospital_id
+        )
+        if not hosp:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        dept_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM departments WHERE hospital_id=$1 AND active=true", hospital_id
+        )
+        doctor_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM doctors WHERE hospital_id=$1 AND active=true", hospital_id
+        )
+        faq_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM faqs WHERE hospital_id=$1 AND active=true", hospital_id
+        )
+        ec_count = await conn.fetchval(
+            "SELECT COUNT(*) FROM emergency_contacts WHERE hospital_id=$1 AND active=true",
+            hospital_id,
+        )
+
+    checks = {
+        "has_slug": bool(hosp["slug"]),
+        "has_plivo_number": bool(hosp["plivo_number"]),
+        "has_departments": dept_count > 0,
+        "has_doctors": doctor_count > 0,
+        "has_faqs": faq_count > 0,
+        "has_emergency_contacts": ec_count > 0,
+    }
+    return {
+        "hospital_id": hospital_id,
+        "name": hosp["name"],
+        "slug": hosp["slug"] or "",
+        "plivo_number": hosp["plivo_number"] or "",
+        "bsnl_forward_code": f"**21*{hosp['plivo_number']}#" if hosp["plivo_number"] else "",
+        "checks": checks,
+        "ready": all(checks.values()),
+        "counts": {
+            "departments": dept_count,
+            "doctors": doctor_count,
+            "faqs": faq_count,
+            "emergency_contacts": ec_count,
+        },
+    }
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
