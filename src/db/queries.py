@@ -72,6 +72,29 @@ _pool_lock = asyncio.Lock()
 _pool_failed = False   # fail-fast after first connection failure
 
 
+def _resolve_ssl(url: str):
+    """Decide the asyncpg ssl parameter from DB_SSL + the connection host.
+
+    Returns "require" for remote hosts and False for local hosts so the same
+    code path works against Supabase (prod) and a local/docker Postgres (dev).
+    """
+    mode = (getattr(settings, "DB_SSL", "auto") or "auto").lower()
+    if mode in ("disable", "off", "false", "none"):
+        return False
+    if mode in ("require", "on", "true"):
+        return "require"
+    # auto
+    import urllib.parse
+    try:
+        host = (urllib.parse.urlparse(url).hostname or "").lower()
+    except Exception:
+        host = ""
+    _local = {"localhost", "127.0.0.1", "::1", "postgres", "db", "arteq_postgres"}
+    if host in _local or host.endswith(".local") or host.endswith(".internal"):
+        return False
+    return "require"
+
+
 async def get_pool() -> asyncpg.Pool:
     global _pool, _pool_failed
     if _pool is not None:
@@ -87,7 +110,7 @@ async def get_pool() -> asyncpg.Pool:
                     min_size=1,
                     max_size=10,
                     command_timeout=30,
-                    ssl="require",
+                    ssl=_resolve_ssl(url),
                     timeout=20,
                 )
             except Exception:
@@ -134,6 +157,7 @@ class DoctorInfo:
     dept_name: str
     dept_name_ml: str
     slots: list[SlotInfo] = field(default_factory=list)
+    dept_id: str = ""   # FK to departments — used so bookings record a department
 
 
 @dataclass
@@ -249,7 +273,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
 
         # Doctors + schedules
         doc_rows = await conn.fetch(
-            """SELECT d.id, d.name, d.name_ml, d.specialty, d.qualifications,
+            """SELECT d.id, d.dept_id, d.name, d.name_ml, d.specialty, d.qualifications,
                       dep.name as dept_name, dep.name_ml as dept_name_ml,
                       json_agg(json_build_object(
                           'dow', s.day_of_week,
@@ -261,7 +285,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
                LEFT JOIN departments dep ON d.dept_id = dep.id
                LEFT JOIN schedules s ON s.doctor_id = d.id AND s.active = true
                WHERE d.hospital_id = $1 AND d.active = true
-               GROUP BY d.id, d.name, d.name_ml, d.specialty, d.qualifications, dep.name, dep.name_ml
+               GROUP BY d.id, d.dept_id, d.name, d.name_ml, d.specialty, d.qualifications, dep.name, dep.name_ml
                ORDER BY dep.name, d.name""",
             hospital_id,
         )
@@ -277,6 +301,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
                 r["specialty"] or "", r["qualifications"] or "",
                 r["dept_name"] or "", r["dept_name_ml"] or "",
                 slots,
+                dept_id=str(r["dept_id"]) if r["dept_id"] else "",
             ))
 
         # Billing

@@ -68,6 +68,10 @@ class Settings(BaseSettings):
 
     # Database
     DATABASE_URL: str = ""
+    # SSL mode for the Postgres pool: "auto" | "require" | "disable".
+    # "auto" requires SSL for remote hosts (Supabase/cloud) and disables it for
+    # local hosts (localhost/127.0.0.1/docker service names) so local dev works.
+    DB_SSL: str = "auto"
     SUPABASE_URL: str = ""
     SUPABASE_ANON_KEY: str = ""
     SUPABASE_SERVICE_KEY: str = ""

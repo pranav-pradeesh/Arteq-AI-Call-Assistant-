@@ -1,4 +1,11 @@
-.PHONY: dev agent test lint install db-migrate token help
+.PHONY: run run-agent dev agent test lint install db-migrate token help
+
+# ── One-command launcher (cross-platform; same as ./start.sh / start.bat) ──────
+run:
+	python run.py --reload
+
+run-agent:
+	python run.py --with-agent --reload
 
 # ── Development ───────────────────────────────────────────────────────────────
 dev:
@@ -43,6 +50,8 @@ token:
 # ── Help ─────────────────────────────────────────────────────────────────────
 help:
 	@echo ""
+	@echo "  make run              one-command launcher (venv + deps + server + browser)"
+	@echo "  make run-agent        launcher + LiveKit agent worker (full end-to-end)"
 	@echo "  make install          install Python dependencies"
 	@echo "  make install-livekit  install LiveKit agent + plugins (pinned versions)"
 	@echo "  make dev              FastAPI server (port 8000, live-reload)"

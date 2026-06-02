@@ -83,7 +83,42 @@ Both share the same PostgreSQL database (Supabase).
 
 Plivo is only needed for production telephony (real phone calls). For browser testing, only the four above are required.
 
-### 1. Clone and install
+### Quick start — one command (Windows / macOS / Linux)
+
+The launcher sets up everything (virtual environment, dependencies, a `.env`
+with auto-generated secrets) and starts the server. A tester only needs to open
+the page and talk.
+
+```bash
+# macOS / Linux
+./start.sh --with-agent
+
+# Windows
+start.bat --with-agent
+
+# or, any platform, directly:
+python run.py --with-agent
+```
+
+What it does, in order: verifies Python → creates `.venv` → installs
+`requirements.txt` → creates `.env` from `.env.example` (generating a strong
+`DASHBOARD_JWT_SECRET` / `INTERNAL_API_KEY`) → starts the FastAPI web server →
+starts the LiveKit agent worker (`--with-agent`) → opens
+**http://localhost:8000/talk** in your browser.
+
+Then add your `SARVAM_API_KEY`, `GROQ_API_KEY` and `LIVEKIT_*` keys to the
+generated `.env` and restart. Without `--with-agent` only the web server runs
+(the page loads but no agent answers).
+
+| Flag | Effect |
+|------|--------|
+| `--with-agent` / `-a` | also run the LiveKit agent worker (full end-to-end) |
+| `--agent-only` | run only the agent worker |
+| `--no-browser` | don't auto-open the browser |
+| `--no-install` | skip dependency install (fast restart) |
+| `--port 8080` | override the web port |
+
+### Manual setup (alternative)
 
 ```bash
 git clone <your-repo-url>
@@ -91,12 +126,8 @@ cd Arteq-AI-Call-Assistant-
 
 python -m venv .venv
 source .venv/bin/activate          # Windows: .venv\Scripts\activate
-make install                        # or: pip install -r requirements.txt
-```
+pip install -r requirements.txt
 
-### 2. Configure environment
-
-```bash
 cp .env.example .env
 # Edit .env — minimum required keys for local dev:
 #   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
@@ -107,58 +138,52 @@ cp .env.example .env
 #   DASHBOARD_JWT_SECRET       (run: python -c "import secrets; print(secrets.token_hex(32))")
 ```
 
-### 3. Set up the database
+### Database
 
-Run migrations against your Supabase project:
+Migrations run **automatically on every server startup** and are fully
+idempotent — for Supabase or a local Postgres you don't need to run anything by
+hand. To apply them manually, paste each file in `migrations/versions/*.sql`
+(in order) into the Supabase SQL Editor.
 
-1. Open Supabase → **SQL Editor**
-2. Paste and run each file in order:
-   - `migrations/versions/001_schema.sql`
-   - `migrations/versions/002_appointments_callbacks.sql`
-   - `migrations/versions/003_plivo_multitenant.sql`
-   - `migrations/versions/004_hospital_tier.sql`
+The schema seeds a demo hospital: **slug `demo`**, ID
+`00000000-0000-0000-0000-000000000001`.
 
-This creates all tables and seeds a demo hospital:
-- **ID:** `00000000-0000-0000-0000-000000000001`
-- **Slug:** `demo`
-- **Name:** Kairali Multi-Speciality Hospital
-
-> **Note:** Migrations also run automatically on every server startup — they are fully idempotent (safe to re-run).
+> **Local Postgres / Docker:** set `DB_SSL=disable` (or rely on `DB_SSL=auto`,
+> which disables SSL for `localhost`/docker hosts and requires it for Supabase).
 
 ---
 
 ## Running the App
 
-You need **two terminals** running concurrently.
+The one-command launcher above is the recommended path. To run the two
+processes manually in separate terminals:
 
 ```bash
-# Terminal 1 — FastAPI web server
-make dev
-# → http://localhost:8000
+# Terminal 1 — FastAPI web server (serves the /talk voice client)
+make dev            # → http://localhost:8000
 
-# Terminal 2 — LiveKit agent worker
-make agent
-# → connects to LiveKit Cloud, auto-joins rooms
+# Terminal 2 — LiveKit agent worker (Arya)
+make agent          # connects to LiveKit Cloud, auto-joins rooms
 ```
 
-Or run both in parallel with GNU make:
+Or with Docker (web + agent + Postgres + Redis, mirroring production):
 
 ```bash
-make -j dev agent
+docker compose up --build
 ```
 
 ### Talk to the agent in your browser
 
-1. Get a room token:
-   ```
-   make token
-   # or: curl "http://localhost:8000/api/v1/livekit/token?slug=demo&participant=me"
-   ```
-   Returns `{"token": "...", "room": "demo", "url": "wss://..."}`
+1. Open **http://localhost:8000/talk** (the launcher opens it automatically;
+   `/` also redirects here).
+2. Press **Start call** and allow microphone access.
+3. Talk. Arya responds in Malayalam by default and auto-detects your language
+   (English, Hindi, Tamil, Kannada, Telugu, Manglish).
 
-2. Open **[LiveKit Playground](https://meet.livekit.io)**, paste the token and URL, click Join.
-
-3. Talk. Arya responds in Malayalam by default and auto-detects your language.
+The built-in client fetches a token from `/api/v1/livekit/token`, joins the
+room over WebRTC, captures your mic and plays Arya's audio — no external tools
+needed. (The agent worker must be running for Arya to answer.) The same
+`/talk` page works on the deployed Render service.
 
 ---
 
@@ -297,6 +322,10 @@ After the first successful deploy, do these **once**:
 ```bash
 # 1. Verify health
 curl https://your-service.onrender.com/api/v1/health
+
+# 1b. Talk to the agent in the browser (no phone needed):
+#     open https://your-service.onrender.com/talk
+#     Requires the arteq-livekit-agent worker to be running (it is, per render.yaml).
 
 # 2. Run SIP trunk setup (creates LiveKit SIP inbound + outbound trunks)
 #    Only required if Plivo telephony is configured.

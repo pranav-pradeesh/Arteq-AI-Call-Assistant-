@@ -770,27 +770,27 @@ async def list_appointments(hospital_id: str, status: str = "", limit: int = 50)
     async with pool.acquire() as conn:
         if status:
             rows = await conn.fetch(
-                """SELECT a.id, a.patient_name, a.patient_phone, a.appointment_date,
-                          a.appointment_time, a.status, a.notes, a.created_at,
+                """SELECT a.id, a.patient_name, a.patient_phone, a.slot_time,
+                          a.status, a.notes, a.created_at,
                           d.name AS doctor_name, dep.name AS dept_name
                    FROM appointments a
                    LEFT JOIN doctors d ON a.doctor_id = d.id
-                   LEFT JOIN departments dep ON d.dept_id = dep.id
+                   LEFT JOIN departments dep ON a.dept_id = dep.id
                    WHERE a.hospital_id=$1 AND a.status=$2
-                   ORDER BY a.appointment_date DESC, a.appointment_time DESC
+                   ORDER BY a.slot_time DESC NULLS LAST
                    LIMIT $3""",
                 hospital_id, status, min(limit, 200),
             )
         else:
             rows = await conn.fetch(
-                """SELECT a.id, a.patient_name, a.patient_phone, a.appointment_date,
-                          a.appointment_time, a.status, a.notes, a.created_at,
+                """SELECT a.id, a.patient_name, a.patient_phone, a.slot_time,
+                          a.status, a.notes, a.created_at,
                           d.name AS doctor_name, dep.name AS dept_name
                    FROM appointments a
                    LEFT JOIN doctors d ON a.doctor_id = d.id
-                   LEFT JOIN departments dep ON d.dept_id = dep.id
+                   LEFT JOIN departments dep ON a.dept_id = dep.id
                    WHERE a.hospital_id=$1
-                   ORDER BY a.appointment_date DESC, a.appointment_time DESC
+                   ORDER BY a.slot_time DESC NULLS LAST
                    LIMIT $2""",
                 hospital_id, min(limit, 200),
             )
@@ -799,8 +799,10 @@ async def list_appointments(hospital_id: str, status: str = "", limit: int = 50)
             "id": str(r["id"]),
             "patient_name": r["patient_name"] or "",
             "patient_phone": r["patient_phone"] or "",
-            "appointment_date": r["appointment_date"].isoformat() if r["appointment_date"] else None,
-            "appointment_time": str(r["appointment_time"]) if r["appointment_time"] else None,
+            # Frontend expects appointment_date (ISO date) + appointment_time (HH:MM[:SS]);
+            # both are derived from the single slot_time column.
+            "appointment_date": r["slot_time"].date().isoformat() if r["slot_time"] else None,
+            "appointment_time": r["slot_time"].strftime("%H:%M:%S") if r["slot_time"] else None,
             "status": r["status"] or "requested",
             "notes": r["notes"] or "",
             "doctor_name": r["doctor_name"] or "",
@@ -839,7 +841,7 @@ async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
             rows = await conn.fetch(
                 """SELECT id, patient_name, patient_phone, reason, status,
                           preferred_time, created_at, attempted_at
-                   FROM callback_requests
+                   FROM callbacks
                    WHERE hospital_id=$1 AND status=$2
                    ORDER BY created_at DESC LIMIT $3""",
                 hospital_id, status, min(limit, 200),
@@ -848,7 +850,7 @@ async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
             rows = await conn.fetch(
                 """SELECT id, patient_name, patient_phone, reason, status,
                           preferred_time, created_at, attempted_at
-                   FROM callback_requests
+                   FROM callbacks
                    WHERE hospital_id=$1
                    ORDER BY created_at DESC LIMIT $2""",
                 hospital_id, min(limit, 200),

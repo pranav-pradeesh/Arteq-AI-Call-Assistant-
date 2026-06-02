@@ -171,6 +171,20 @@ class FHIRAdapter(HISAdapter):
         resp = await self._patch(f"Appointment/{appt_id}", {"status": "cancelled"})
         return resp is not None
 
+    async def reschedule_appointment(
+        self,
+        his_appointment_id: str,
+        appointment_date: str,
+        appointment_time: str,
+    ) -> bool:
+        # FHIR: PATCH Appointment/{id} with a new start time
+        appt_id = his_appointment_id.replace("Appointment/", "")
+        resp = await self._patch(
+            f"Appointment/{appt_id}",
+            {"status": "booked", "start": f"{appointment_date}T{appointment_time}:00"},
+        )
+        return resp is not None
+
     async def ping(self) -> bool:
         # FHIR capability statement check
         data = await self._get("metadata")

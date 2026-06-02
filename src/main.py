@@ -110,6 +110,31 @@ app.add_middleware(
 )
 
 
+# ── Browser voice client ───────────────────────────────────────────────────────
+
+from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.templating import Jinja2Templates
+
+try:
+    _templates = Jinja2Templates(directory="dashboard/templates")
+except Exception:
+    _templates = None
+
+
+@app.get("/", include_in_schema=False)
+async def root():
+    """Landing → the browser voice client so a tester can talk to the agent."""
+    return RedirectResponse(url="/talk")
+
+
+@app.get("/talk", response_class=HTMLResponse, include_in_schema=False)
+async def talk(request: Request):
+    """Serves the browser voice client (mic → LiveKit → agent)."""
+    if _templates:
+        return _templates.TemplateResponse("talk.html", {"request": request})
+    return HTMLResponse("<h1>Voice client template not found</h1>", status_code=500)
+
+
 # ── Health ────────────────────────────────────────────────────────────────────
 
 @app.get("/api/v1/health")

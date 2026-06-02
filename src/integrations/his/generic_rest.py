@@ -179,6 +179,25 @@ class GenericRestAdapter(HISAdapter):
         resp = await self._post(url, {"appointment_id": his_appointment_id})
         return resp is not None
 
+    async def reschedule_appointment(
+        self,
+        his_appointment_id: str,
+        appointment_date: str,
+        appointment_time: str,
+    ) -> bool:
+        # Optional endpoint: "reschedule_appointment":
+        #   "POST /appointments/{appointment_id}/reschedule"
+        _, url = self._parse_endpoint("reschedule_appointment", appointment_id=his_appointment_id)
+        if not url:
+            return False
+        body = {
+            self._fmap("appointment_id"): his_appointment_id,
+            self._fmap("appointment_date"): appointment_date,
+            self._fmap("appointment_time"): appointment_time,
+        }
+        resp = await self._post(url, body)
+        return resp is not None
+
     async def ping(self) -> bool:
         try:
             async with httpx.AsyncClient(timeout=3) as client:

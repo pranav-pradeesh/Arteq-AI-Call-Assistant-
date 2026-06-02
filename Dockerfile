@@ -1,8 +1,10 @@
-FROM python:3.12-slim
+# Match the production runtime (runtime.txt / render.yaml) exactly so the
+# container and Render run the same interpreter and wheels.
+FROM python:3.11.10-slim
 
 WORKDIR /app
 
-# System deps for asyncpg, psycopg2
+# System deps occasionally needed when a wheel is unavailable (asyncpg, etc.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libpq-dev gcc && \
     rm -rf /var/lib/apt/lists/*

@@ -455,9 +455,148 @@ try:
         return f"Transferring you to {department}. Please hold."
 
 
+    @function_tool
+    async def check_availability(
+        context: RunContext,
+        doctor_name: str,
+        date: str,
+    ) -> str:
+        """
+        Check which appointment slots are free for a doctor on a given date,
+        BEFORE booking. Use this when the caller asks "is Dr. X free on …?" or
+        right before book_appointment to offer real open times.
+        date must be YYYY-MM-DD.
+        """
+        hospital_id  = _ud(context, "hospital_id", "")
+        hospital_ctx = _ud(context, "hospital_ctx")
+
+        doctor_id, _dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
+        if not doctor_id:
+            return f"Could not find Dr. {doctor_name}. Please confirm the doctor's name."
+
+        slots: list[str] = []
+        # Prefer the HIS if configured (live availability), else local schedule.
+        try:
+            from src.integrations.his.service import get_his_adapter
+            his = await get_his_adapter(hospital_id)
+            if his:
+                slots = await his.get_available_slots(doctor_id, date)
+        except Exception as exc:
+            logger.warning("his_slots_failed_fallback_to_db", error=str(exc))
+
+        if not slots:
+            try:
+                from src.db.queries import get_available_slots
+                slots = await get_available_slots(doctor_id, date, hospital_id)
+            except Exception as exc:
+                logger.warning("tool_check_availability_failed", error=str(exc))
+                return "Could not check availability right now — please try a specific time."
+
+        if not slots:
+            return (
+                f"Dr. {resolved_name} has no open slots on {date}. "
+                "Would you like another day or another doctor?"
+            )
+        shown = ", ".join(slots[:6])
+        return f"Dr. {resolved_name} is available on {date} at: {shown}. Which time works for you?"
+
+
+    @function_tool
+    async def reschedule_appointment(
+        context: RunContext,
+        patient_name: str,
+        new_date: str,
+        new_time: str,
+        doctor_name: str = "",
+    ) -> str:
+        """
+        Move an existing appointment to a new date/time. Use when the caller
+        wants to change (not cancel) their appointment. Collect the new date
+        (YYYY-MM-DD) and time (HH:MM 24-hour); doctor_name helps pick which
+        appointment if the caller has more than one.
+        """
+        hospital_id  = _ud(context, "hospital_id", "")
+        caller_phone = _ud(context, "caller_phone", "")
+        call_id      = _ud(context, "call_id", "")
+        hospital_name = _ud(context, "hospital_name", "the hospital")
+
+        new_slot = _parse_slot(new_date, new_time)
+        if not new_slot:
+            return "I didn't catch the new date and time. Could you repeat them?"
+
+        try:
+            from src.db.queries import (
+                get_appointments_by_phone,
+                reschedule_appointment_by_id,
+            )
+            appts = await get_appointments_by_phone(caller_phone, hospital_id)
+            if not appts:
+                return "No active appointments found for this number to reschedule."
+
+            target = appts[0]
+            if doctor_name:
+                for a in appts:
+                    if doctor_name.lower() in (a.get("doctor_name") or "").lower():
+                        target = a
+                        break
+
+            # Reschedule in HIS if this appointment was synced there.
+            his_appt_id = target.get("his_appointment_id")
+            if his_appt_id:
+                try:
+                    from src.integrations.his.service import get_his_adapter
+                    his = await get_his_adapter(hospital_id)
+                    if his:
+                        await his.reschedule_appointment(his_appt_id, new_date, new_time)
+                        logger.info("his_appointment_rescheduled", his_appt_id=his_appt_id)
+                except Exception as exc:
+                    logger.warning("his_reschedule_failed", error=str(exc))
+
+            ok = await reschedule_appointment_by_id(str(target["id"]), new_slot, hospital_id)
+            if not ok:
+                return "Could not reschedule that appointment — please contact the front desk."
+
+            doc = target.get("doctor_name") or doctor_name or "the doctor"
+        except Exception as exc:
+            logger.error("tool_reschedule_failed", error=str(exc))
+            return "Unable to reschedule right now — please contact the front desk."
+
+        async def _side_effects():
+            try:
+                from src.services.sms_service import SMSService
+                from src.services.staff_alert import StaffAlertService
+                await SMSService().send_appointment_confirmation(
+                    phone=caller_phone,
+                    hospital_name=hospital_name,
+                    patient_name=patient_name,
+                    doctor_name=doc,
+                    date=new_date,
+                    time=new_time,
+                )
+                await StaffAlertService().alert_new_booking(
+                    patient_name=patient_name,
+                    patient_phone=caller_phone,
+                    doctor_name=doc,
+                    date=new_date,
+                    time=new_time,
+                    call_id=call_id,
+                )
+            except Exception as exc:
+                logger.warning("tool_reschedule_sms_failed", error=str(exc))
+
+        asyncio.create_task(_side_effects())
+        slot_readable = new_slot.strftime("%d %B %Y at %I:%M %p")
+        return (
+            f"Appointment with Dr. {doc} moved to {slot_readable}. "
+            "Confirmation SMS sent."
+        )
+
+
     # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
+        check_availability,
+        reschedule_appointment,
         cancel_appointment,
         request_callback,
         get_doctor_schedule,
@@ -470,6 +609,8 @@ try:
     # Reduced tool set for clinic tier (no transfer, no complex routing)
     CLINIC_TOOLS = [
         book_appointment,
+        check_availability,
+        reschedule_appointment,
         cancel_appointment,
         request_callback,
         get_doctor_schedule,

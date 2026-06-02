@@ -1,0 +1,217 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Talk to Arya — Arteq Hospital Voice Agent</title>
+  <!-- LiveKit browser SDK (UMD build, pinned major for stability) -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0b1020; --card: #141b30; --accent: #4f8cff; --accent-2: #22c55e;
+      --danger: #ef4444; --muted: #8a95b2; --text: #eef2ff; --line: #243049;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; min-height: 100vh; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: radial-gradient(1200px 600px at 50% -10%, #1a2a44 0%, var(--bg) 60%), var(--bg);
+      color: var(--text); display: flex; align-items: center; justify-content: center; padding: 24px;
+    }
+    .card {
+      width: 100%; max-width: 520px; background: var(--card); border: 1px solid var(--line);
+      border-radius: 20px; padding: 32px; box-shadow: 0 20px 60px rgba(0,0,0,.45);
+    }
+    .brand { display: flex; align-items: center; gap: 12px; margin-bottom: 6px; }
+    .logo {
+      width: 44px; height: 44px; border-radius: 12px; flex: none;
+      background: linear-gradient(135deg, var(--accent), #7c5cff);
+      display: flex; align-items: center; justify-content: center; font-size: 24px;
+    }
+    h1 { font-size: 20px; margin: 0; }
+    .sub { color: var(--muted); font-size: 13px; margin: 2px 0 24px; }
+
+    .orb-wrap { display: flex; justify-content: center; margin: 8px 0 24px; }
+    .orb {
+      width: 140px; height: 140px; border-radius: 50%; position: relative;
+      background: radial-gradient(circle at 50% 40%, #2a3a66, #161f3a);
+      border: 2px solid var(--line); transition: transform .12s ease;
+      display: flex; align-items: center; justify-content: center; font-size: 44px;
+    }
+    .orb.live { border-color: var(--accent-2); box-shadow: 0 0 0 0 rgba(34,197,94,.5); animation: pulse 1.6s infinite; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(34,197,94,.45); }
+      70% { box-shadow: 0 0 0 22px rgba(34,197,94,0); }
+      100% { box-shadow: 0 0 0 0 rgba(34,197,94,0); }
+    }
+
+    label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 6px; }
+    input {
+      width: 100%; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line);
+      background: #0e1426; color: var(--text); font-size: 15px; margin-bottom: 16px;
+    }
+    .row { display: flex; gap: 12px; }
+    button {
+      flex: 1; padding: 14px 18px; border: none; border-radius: 12px; cursor: pointer;
+      font-size: 15px; font-weight: 600; transition: filter .15s ease, opacity .15s ease;
+    }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    .btn-connect { background: var(--accent-2); color: #04210f; }
+    .btn-hangup { background: var(--danger); color: #fff; }
+    button:not(:disabled):hover { filter: brightness(1.08); }
+
+    .status { margin-top: 18px; font-size: 13px; color: var(--muted); text-align: center; min-height: 18px; }
+    .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--muted); margin-right: 6px; vertical-align: middle; }
+    .dot.ok { background: var(--accent-2); } .dot.err { background: var(--danger); } .dot.warn { background: #f59e0b; }
+
+    .transcript {
+      margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px;
+      max-height: 220px; overflow-y: auto; display: none;
+    }
+    .transcript.show { display: block; }
+    .msg { font-size: 14px; line-height: 1.5; margin-bottom: 10px; }
+    .msg .who { font-size: 11px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); display: block; }
+    .msg.agent .who { color: var(--accent); }
+    .msg.you .who { color: var(--accent-2); }
+    .hint { font-size: 12px; color: var(--muted); margin-top: 18px; text-align: center; line-height: 1.5; }
+    a { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="brand">
+      <div class="logo">🩺</div>
+      <div>
+        <h1>Talk to Arya</h1>
+        <div class="sub">Arteq Hospital Voice Agent · Malayalam-first AI receptionist</div>
+      </div>
+    </div>
+
+    <div class="orb-wrap"><div class="orb" id="orb">🎙️</div></div>
+
+    <label for="slug">Hospital</label>
+    <input id="slug" value="demo" autocomplete="off" spellcheck="false" />
+
+    <div class="row">
+      <button class="btn-connect" id="connectBtn">Start call</button>
+      <button class="btn-hangup" id="hangupBtn" disabled>Hang up</button>
+    </div>
+
+    <div class="status"><span class="dot" id="dot"></span><span id="statusText">Ready. Press “Start call” and allow microphone access.</span></div>
+
+    <div class="transcript" id="transcript"></div>
+
+    <div class="hint">
+      Speak naturally in Malayalam, English, Hindi, Tamil, Kannada, Telugu or Manglish.<br/>
+      The agent worker must be running for Arya to answer. <a href="/admin/">Admin dashboard →</a>
+    </div>
+  </div>
+
+  <script>
+    const LK = window.LivekitClient;
+    const $ = (id) => document.getElementById(id);
+    const connectBtn = $("connectBtn"), hangupBtn = $("hangupBtn");
+    const dot = $("dot"), statusText = $("statusText"), orb = $("orb");
+    const transcriptEl = $("transcript");
+    let room = null;
+
+    function setStatus(text, kind) {
+      statusText.textContent = text;
+      dot.className = "dot" + (kind ? " " + kind : "");
+    }
+    function addMsg(who, text) {
+      transcriptEl.classList.add("show");
+      const label = who === "agent" ? "Arya" : "You";
+      // Merge consecutive same-speaker interim messages
+      const last = transcriptEl.lastElementChild;
+      if (last && last.dataset.who === who && last.dataset.interim === "true") {
+        last.querySelector(".text").textContent = text;
+      } else {
+        const div = document.createElement("div");
+        div.className = "msg " + who;
+        div.dataset.who = who; div.dataset.interim = "true";
+        div.innerHTML = `<span class="who">${label}</span><span class="text"></span>`;
+        div.querySelector(".text").textContent = text;
+        transcriptEl.appendChild(div);
+      }
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    async function getToken(slug) {
+      const participant = "web-" + Math.random().toString(36).slice(2, 8);
+      const r = await fetch(`/api/v1/livekit/token?slug=${encodeURIComponent(slug)}&participant=${participant}`);
+      if (!r.ok) {
+        const detail = await r.json().catch(() => ({}));
+        throw new Error(detail.detail || `Token request failed (${r.status})`);
+      }
+      return r.json(); // { token, room, url }
+    }
+
+    async function connect() {
+      const slug = ($("slug").value || "demo").trim().toLowerCase();
+      connectBtn.disabled = true;
+      setStatus("Requesting access token…", "warn");
+      try {
+        const { token, url } = await getToken(slug);
+        if (!url) throw new Error("LiveKit URL not configured on the server.");
+
+        room = new LK.Room({ adaptiveStream: true, dynacast: true });
+
+        room.on(LK.RoomEvent.TrackSubscribed, (track) => {
+          if (track.kind === LK.Track.Kind.Audio) {
+            const el = track.attach();
+            el.autoplay = true;
+            document.body.appendChild(el);
+          }
+        });
+        room.on(LK.RoomEvent.TranscriptionReceived, (segments, participant) => {
+          const isAgent = participant && participant.identity !== room.localParticipant.identity;
+          const text = segments.map((s) => s.text).join(" ").trim();
+          if (text) addMsg(isAgent ? "agent" : "you", text);
+          // finalize when segment marked final
+          if (segments.some((s) => s.final)) {
+            const last = transcriptEl.lastElementChild;
+            if (last) last.dataset.interim = "false";
+          }
+        });
+        room.on(LK.RoomEvent.Disconnected, () => teardown("Call ended."));
+        room.on(LK.RoomEvent.ActiveSpeakersChanged, (speakers) => {
+          const agentSpeaking = speakers.some((s) => s.identity !== room.localParticipant.identity);
+          orb.textContent = agentSpeaking ? "🔊" : "🎙️";
+        });
+
+        setStatus("Connecting to LiveKit…", "warn");
+        await room.connect(url, token);
+        await room.localParticipant.setMicrophoneEnabled(true);
+
+        orb.classList.add("live");
+        hangupBtn.disabled = false;
+        setStatus("Connected — Arya is listening. Start speaking.", "ok");
+      } catch (err) {
+        console.error(err);
+        setStatus("Could not connect: " + err.message, "err");
+        connectBtn.disabled = false;
+        if (room) { try { await room.disconnect(); } catch (_) {} room = null; }
+      }
+    }
+
+    function teardown(msg) {
+      orb.classList.remove("live");
+      orb.textContent = "🎙️";
+      hangupBtn.disabled = true;
+      connectBtn.disabled = false;
+      setStatus(msg || "Ready.", null);
+      document.querySelectorAll("audio").forEach((a) => a.remove());
+      room = null;
+    }
+
+    async function hangup() {
+      if (room) { try { await room.disconnect(); } catch (_) {} }
+      teardown("Call ended.");
+    }
+
+    connectBtn.addEventListener("click", connect);
+    hangupBtn.addEventListener("click", hangup);
+    if (!LK) setStatus("Failed to load LiveKit SDK (check network/CDN).", "err");
+  </script>
+</body>
+</html>

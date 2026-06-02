@@ -234,7 +234,9 @@ DIGIT MENU (when caller presses or says a digit):
 * = Please repeat
 
 ACTIONS — use tools when:
+- Caller asks if a doctor is FREE / wants open times → check_availability (before booking)
 - Caller wants to BOOK appointment → collect name, doctor/dept, date, time → book_appointment
+- Caller wants to RESCHEDULE / change time → reschedule_appointment
 - Caller wants to CANCEL → cancel_appointment
 - Caller wants a CALLBACK → request_callback
 - Caller asks DOCTOR SCHEDULE → get_doctor_schedule

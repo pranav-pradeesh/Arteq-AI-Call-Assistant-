@@ -14,7 +14,8 @@ services:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations/init.sql:/docker-entrypoint-initdb.d/01_init.sql
+      # Schema is applied automatically by the app on startup (lifespan), from
+      # migrations/versions/*.sql — same path as production. No init mount needed.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U arteq -d arteq_hospital"]
       interval: 5s
@@ -46,7 +47,8 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql+asyncpg://arteq:arteq@postgres:5432/arteq_hospital
+      DATABASE_URL: postgresql://arteq:arteq@postgres:5432/arteq_hospital
+      DB_SSL: disable
       REDIS_URL: redis://redis:6379/0
     ports:
       - "8000:8000"
@@ -58,7 +60,29 @@ services:
     volumes:
       - ./src:/app/src
       - ./dashboard:/app/dashboard
+      - ./migrations:/app/migrations
     command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --reload
+
+  # ── LiveKit Agent Worker (Arya) ──────────────────────────
+  # Same entrypoint as production (render.yaml worker). Without this service the
+  # browser /talk page connects but no agent answers — so dev mirrors prod.
+  agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: arteq_agent
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://arteq:arteq@postgres:5432/arteq_hospital
+      DB_SSL: disable
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src
+      - ./livekit_agent.py:/app/livekit_agent.py
+    command: python livekit_agent.py start
 
   # ── Prometheus (optional metrics scrape) ─────────────────
   prometheus:

@@ -63,6 +63,21 @@ class HISAdapter(ABC):
         Returns True on success, False on failure.
         """
 
+    async def reschedule_appointment(
+        self,
+        his_appointment_id: str,
+        appointment_date: str,
+        appointment_time: str,
+    ) -> bool:
+        """
+        Move an existing HIS appointment to a new date/time.
+
+        Concrete (non-abstract) with a safe default: adapters that do not
+        support reschedule return False, and the caller keeps the local DB as
+        the source of truth. Override in adapters that support it.
+        """
+        return False
+
     @abstractmethod
     async def ping(self) -> bool:
         """Health check — True if HIS is reachable."""
