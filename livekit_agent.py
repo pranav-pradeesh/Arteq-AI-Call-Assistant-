@@ -124,6 +124,8 @@ class AcousticSensoryLayer:
 # ==============================================================================
 
 async def _resolve_hospital_id(room_name: str) -> str:
+    # SIP rooms are named "{slug}-call-{uuid8}"; strip the call suffix
+    slug = room_name.split("-call-")[0] if "-call-" in room_name else room_name
     try:
         from src.db.queries import get_pool
         from src.config.settings import settings
@@ -132,7 +134,7 @@ async def _resolve_hospital_id(room_name: str) -> str:
             row = await conn.fetchrow(
                 "SELECT id FROM hospitals WHERE "
                 "slug=$1 OR LOWER(REPLACE(name,' ','-'))=$1 LIMIT 1",
-                room_name.lower(),
+                slug.lower(),
             )
         return str(row["id"]) if row else settings.HOSPITAL_ID
     except Exception as exc:
@@ -362,25 +364,27 @@ async def session_handler(ctx: JobContext) -> None:
     hospital_ctx = await _load_hospital_ctx(hospital_id)
     hospital_name = (hospital_ctx.name if hospital_ctx else "Arteq Hospital")
 
-    # ── Outbound call context (passed via room metadata or participant attrs)
+    # ── Outbound call context (stored in room metadata by dial_outbound()) ──
     outbound_context: dict | None = None
     try:
-        from src.cache.store import session_cache
-        # Plivo answer_url stores context keyed by CallUUID → room_name for LiveKit
-        cached = session_cache.get(f"plivo:{room_name}")
-        if cached and cached.get("call_type"):
-            outbound_context = cached
+        if ctx.room.metadata:
+            import json as _json
+            data = _json.loads(ctx.room.metadata)
+            if data.get("call_type"):
+                outbound_context = data
     except Exception:
         pass
 
-    # ── Patient recognition via SIP caller ID ─────────────────────────────
+    # ── Patient recognition via SIP caller identity ────────────────────────
+    # LiveKit SIP sets participant identity to the caller's E.164 phone number.
     caller_phone = ""
     patient_profile: dict | None = None
     try:
-        # LiveKit SIP passes the caller's phone via participant identity or metadata
         for p in ctx.room.remote_participants.values():
-            if p.identity and p.identity.startswith("+"):
-                caller_phone = p.identity
+            ident = p.identity or p.name or ""
+            # E.164 (+91XXXXXXXXXX) or bare digits starting with country code
+            if ident.startswith("+") or (ident.startswith("91") and len(ident) >= 12):
+                caller_phone = ident if ident.startswith("+") else f"+{ident}"
                 break
         if caller_phone:
             patient_profile = await _load_patient_profile(caller_phone, hospital_id)

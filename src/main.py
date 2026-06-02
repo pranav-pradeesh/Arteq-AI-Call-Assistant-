@@ -167,31 +167,17 @@ async def livekit_token(slug: str = "default", participant: str = "patient"):
 @app.post("/api/v1/call/inbound/{tenant_slug}")
 async def call_inbound_webhook(tenant_slug: str, request: Request):
     """
-    Plivo calls this when an inbound call arrives or an outbound call is answered.
-    Transfers cached outbound context from request_uuid → call_uuid, then returns
-    PCML that opens a bidirectional audio stream to the LiveKit SIP bridge.
+    Plivo calls this webhook for every answered inbound call.
+    Returns PCML that SIP-forwards the call to LiveKit, where the dispatch
+    rule creates a room named "{slug}-call-{uuid}" and the agent auto-joins.
     """
     from fastapi.responses import Response
-    from src.cache.store import session_cache
+    from src.services.livekit_sip import get_inbound_pcml
 
     form = await request.form()
-    call_uuid = form.get("CallUUID", "")
-    request_uuid = form.get("RequestUUID", "")
+    to_number = form.get("To", settings.PLIVO_PHONE_NUMBER)
 
-    if request_uuid and call_uuid:
-        cached = session_cache.get(f"plivo:{request_uuid}")
-        if cached:
-            session_cache.set(f"plivo:{call_uuid}", cached, ttl=600)
-
-    ws_url = f"{settings.PUBLIC_WS_URL}/ws/call/{tenant_slug}"
-    xml = (
-        '<?xml version="1.0" encoding="UTF-8"?>\n'
-        "<Response>\n"
-        f'  <Stream streamTimeout="86400" keepCallAlive="true"'
-        f' bidirectional="true" contentType="audio/x-l16;rate=8000"'
-        f' audioTrack="inbound">{ws_url}</Stream>\n'
-        "</Response>"
-    )
+    xml = get_inbound_pcml(to_number=to_number)
     return Response(content=xml, media_type="text/xml")
 
 

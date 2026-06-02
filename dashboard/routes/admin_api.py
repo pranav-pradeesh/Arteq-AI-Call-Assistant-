@@ -986,6 +986,67 @@ async def setup_status(hospital_id: str):
     }
 
 
+# ── SIP provisioning ─────────────────────────────────────────────────────────
+
+@router.post("/sip/setup", dependencies=[Depends(_require_auth)])
+async def sip_setup():
+    """
+    One-time SIP trunk provisioning. Run this once after first deployment.
+
+    Creates:
+    • One Plivo SIP outbound trunk in LiveKit (for reminder/confirmation calls)
+    • One SIP inbound trunk + dispatch rule per hospital that has a Plivo DID
+
+    Returns trunk IDs. Copy the outbound_trunk_id value and set it as
+    LIVEKIT_SIP_OUTBOUND_TRUNK_ID in your Render environment variables,
+    then redeploy both services.
+
+    Requires LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, PLIVO_AUTH_ID,
+    PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER to be set.
+    """
+    try:
+        from src.services.livekit_sip import setup_sip_outbound_trunk, setup_hospital_inbound
+    except ImportError:
+        raise HTTPException(status_code=501, detail="livekit package not installed")
+
+    # Outbound trunk (one global, uses Plivo credentials)
+    outbound_trunk_id = await setup_sip_outbound_trunk()
+
+    # Inbound trunk per hospital with a provisioned DID
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hospitals = await conn.fetch(
+            "SELECT id, slug, plivo_number FROM hospitals "
+            "WHERE plivo_number IS NOT NULL AND plivo_number != '' "
+            "ORDER BY created_at"
+        )
+
+    inbound = []
+    for h in hospitals:
+        slug = h["slug"] or str(h["id"])
+        trunk_id, rule_id = await setup_hospital_inbound(slug, h["plivo_number"])
+        inbound.append({
+            "hospital_id": str(h["id"]),
+            "slug": slug,
+            "plivo_number": h["plivo_number"],
+            "sip_trunk_id": trunk_id,
+            "dispatch_rule_id": rule_id,
+            "ok": bool(trunk_id),
+        })
+
+    return {
+        "outbound_trunk_id": outbound_trunk_id,
+        "inbound_trunks": inbound,
+        "sip_host": settings.LIVEKIT_SIP_HOST or "(set LIVEKIT_SIP_HOST from LiveKit dashboard)",
+        "next_steps": [
+            f"1. Set LIVEKIT_SIP_OUTBOUND_TRUNK_ID={outbound_trunk_id} in Render env vars",
+            "2. Get your LiveKit SIP host from the LiveKit Cloud dashboard → SIP → Inbound Trunks",
+            "3. Set LIVEKIT_SIP_HOST=<your-sip-host> in Render env vars",
+            "4. Redeploy both arteq-voice-agent and arteq-livekit-agent",
+        ],
+    }
+
+
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _maybe_json(value):

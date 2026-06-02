@@ -1,20 +1,19 @@
 """
 Outbound Calls — proactive reminder, confirmation, callback, followup,
-and campaign calls via Plivo.
+and campaign calls via LiveKit SIP (Plivo carrier).
 
-Plivo dials the patient; once answered it POSTs to our answer_url webhook,
-which returns PCML directing Plivo to open a bidirectional audio stream to
-our WebSocket handler where Arya handles the conversation.
+LiveKit dials the patient via the Plivo SIP outbound trunk and creates a room
+with the call context stored in room metadata. The agent worker auto-dispatches
+to the room and reads the context to tailor its opening and script.
+
+Requires LIVEKIT_SIP_OUTBOUND_TRUNK_ID to be set (run POST /admin/sip/setup once).
 """
 from __future__ import annotations
 
-import json
 from datetime import datetime
 
-import httpx
 import structlog
 
-from src.cache.store import session_cache
 from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
@@ -26,75 +25,23 @@ except ImportError:
     _INDIA_TZ = None  # type: ignore[assignment]
 
 
-def _plivo_call_url() -> str:
-    return f"https://api.plivo.com/v1/Account/{settings.PLIVO_AUTH_ID}/Call/"
-
-
-def _plivo_auth() -> tuple[str, str]:
-    return (settings.PLIVO_AUTH_ID, settings.PLIVO_AUTH_TOKEN)
-
-
-async def _place_call(
-    to: str,
-    answer_url: str,
+async def _dial(
+    patient_phone: str,
     context: dict,
-    time_limit: int = 180,
+    tenant_slug: str = "default",
 ) -> bool:
-    """
-    Place a Plivo outbound call and cache the context by request_uuid so the
-    answer_url webhook can pass it to the WebSocket handler.
-
-    Returns True on success, False on failure.
-    """
-    if not settings.PLIVO_AUTH_ID or not settings.PLIVO_AUTH_TOKEN:
-        logger.warning("plivo_not_configured_skipping_outbound")
-        return False
-
-    hangup_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
-    payload = {
-        "from": settings.PLIVO_PHONE_NUMBER,
-        "to": to,
-        "answer_url": answer_url,
-        "answer_method": "POST",
-        "hangup_url": hangup_url,
-        "hangup_method": "POST",
-        "time_limit": str(time_limit),
-    }
+    """Dial patient via LiveKit SIP (Plivo carrier). Returns True on success."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as client:
-            resp = await client.post(
-                _plivo_call_url(),
-                json=payload,
-                auth=_plivo_auth(),
-            )
-        if resp.status_code in (200, 201):
-            data = resp.json()
-            request_uuid = data.get("request_uuid", "")
-            if request_uuid:
-                # Store context so the answer_url webhook can look it up by request_uuid,
-                # then transfer it to a call_uuid key for the WebSocket handler.
-                session_cache.set(f"plivo:{request_uuid}", context, ttl=600)
-            logger.info(
-                "outbound_call_placed",
-                patient=to[-4:],
-                call_type=context.get("call_type"),
-                request_uuid=(request_uuid[-8:] if request_uuid else "?"),
-            )
-            return True
-        logger.warning(
-            "outbound_call_failed",
-            status_code=resp.status_code,
-            error=resp.text[:200],
-            patient=to[-4:],
-        )
-        return False
+        from src.services.livekit_sip import dial_outbound
+        room = await dial_outbound(patient_phone, tenant_slug, context)
+        return bool(room)
     except Exception as exc:
-        logger.error("outbound_call_error", error=str(exc), patient=to[-4:])
+        logger.error("outbound_dial_error", error=str(exc), patient=patient_phone[-4:])
         return False
 
 
 class OutboundCallService:
-    """Places outbound appointment-related calls for a hospital via Plivo."""
+    """Places outbound appointment-related calls for a hospital via LiveKit SIP."""
 
     async def schedule_reminder(
         self,
@@ -108,10 +55,11 @@ class OutboundCallService:
         appointment_time: str | None = None,
     ) -> bool:
         if slot_time is not None and _INDIA_TZ is not None:
-            if slot_time.tzinfo is None:
-                slot_local = _INDIA_TZ.localize(slot_time)
-            else:
-                slot_local = slot_time.astimezone(_INDIA_TZ)
+            slot_local = (
+                slot_time.astimezone(_INDIA_TZ)
+                if slot_time.tzinfo
+                else _INDIA_TZ.localize(slot_time)
+            )
             appointment_date = slot_local.strftime("%Y-%m-%d")
             appointment_time = slot_local.strftime("%H:%M")
         else:
@@ -130,8 +78,7 @@ class OutboundCallService:
             "appointment_time": appointment_time,
             "hospital_id": hospital_id,
         }
-        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        return await _place_call(patient_phone, answer_url, context, time_limit=120)
+        return await _dial(patient_phone, context, tenant_slug)
 
     async def schedule_callback_call(
         self,
@@ -147,8 +94,7 @@ class OutboundCallService:
             "reason": reason,
             "hospital_id": hospital_id,
         }
-        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        return await _place_call(patient_phone, answer_url, context, time_limit=180)
+        return await _dial(patient_phone, context, tenant_slug)
 
     async def schedule_confirmation_call(
         self,
@@ -179,8 +125,7 @@ class OutboundCallService:
             "appointment_time": appointment_time,
             "hospital_id": hospital_id,
         }
-        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        return await _place_call(patient_phone, answer_url, context, time_limit=180)
+        return await _dial(patient_phone, context, tenant_slug)
 
     async def schedule_followup_call(
         self,
@@ -196,8 +141,7 @@ class OutboundCallService:
             "doctor_name": doctor_name,
             "hospital_id": hospital_id,
         }
-        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        return await _place_call(patient_phone, answer_url, context, time_limit=120)
+        return await _dial(patient_phone, context, tenant_slug)
 
     async def schedule_campaign_call(
         self,
@@ -217,11 +161,9 @@ class OutboundCallService:
             "patient_name": patient_name,
             "hospital_id": hospital_id,
         }
-        answer_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        return await _place_call(patient_phone, answer_url, context, time_limit=120)
+        return await _dial(patient_phone, context, tenant_slug)
 
     async def get_pending_callbacks(self, db_pool) -> list[dict]:
-        """Fetch pending callback requests (up to 10 at a time)."""
         query = """
             SELECT id, patient_phone, patient_name, reason, hospital_id, preferred_time
             FROM callbacks
@@ -238,7 +180,6 @@ class OutboundCallService:
             return []
 
     async def get_pending_reminders(self, db_pool) -> list[dict]:
-        """Query appointments in the next 24 hours where reminder_sent = False."""
         query = """
             SELECT
                 a.id,
