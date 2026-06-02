@@ -62,6 +62,7 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
                         doctor_name=appt.get("doctor_name") or "",
                         slot_time=appt["slot_time"],
                         hospital_id=str(appt.get("hospital_id") or ""),
+                        tenant_slug=appt.get("slug") or "default",
                     )
                     if ok:
                         async with pool.acquire() as conn:
@@ -123,6 +124,7 @@ async def confirmation_loop(
                         doctor_name=appt.get("doctor_name") or "",
                         slot_time=appt.get("slot_time"),
                         hospital_id=str(appt.get("hospital_id") or ""),
+                        tenant_slug=appt.get("slug") or "default",
                     )
                     if ok:
                         async with pool.acquire() as conn:
@@ -166,6 +168,7 @@ async def callback_loop(interval_seconds: int = 300) -> None:
                         patient_name=cb.get("patient_name") or "",
                         reason=cb.get("reason") or "",
                         hospital_id=str(cb.get("hospital_id") or ""),
+                        tenant_slug=cb.get("slug") or "default",
                     )
                     if ok:
                         async with pool.acquire() as conn:
@@ -214,6 +217,7 @@ async def followup_loop(interval_seconds: int = 3600, days_after: int = 3) -> No
                         patient_name=appt.get("patient_name") or "",
                         doctor_name=appt.get("doctor_name") or "",
                         hospital_id=str(appt.get("hospital_id") or ""),
+                        tenant_slug=appt.get("slug") or "default",
                     )
                     if ok:
                         async with pool.acquire() as conn:

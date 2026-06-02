@@ -165,10 +165,12 @@ class OutboundCallService:
 
     async def get_pending_callbacks(self, db_pool) -> list[dict]:
         query = """
-            SELECT id, patient_phone, patient_name, reason, hospital_id, preferred_time
-            FROM callbacks
-            WHERE status = 'pending'
-            ORDER BY created_at
+            SELECT c.id, c.patient_phone, c.patient_name, c.reason,
+                   c.hospital_id, c.preferred_time, h.slug AS slug
+            FROM callbacks c
+            LEFT JOIN hospitals h ON h.id = c.hospital_id
+            WHERE c.status = 'pending'
+            ORDER BY c.created_at
             LIMIT 10
         """
         try:
@@ -187,9 +189,11 @@ class OutboundCallService:
                 a.patient_name,
                 a.slot_time,
                 a.hospital_id,
-                d.name AS doctor_name
+                d.name AS doctor_name,
+                h.slug  AS slug
             FROM appointments a
             LEFT JOIN doctors d ON a.doctor_id = d.id
+            LEFT JOIN hospitals h ON h.id = a.hospital_id
             WHERE
                 a.reminder_sent = false
                 AND a.status IN ('booked', 'confirmed')

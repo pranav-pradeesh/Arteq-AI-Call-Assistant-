@@ -9,6 +9,7 @@ Day-of-week convention (matches DB): 0=Sunday … 6=Saturday.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import re
 import time
@@ -726,8 +727,9 @@ async def get_stats(hospital_id: str, days: int = 7):
                  AVG(total_turns)::float                AS avg_turns
                FROM call_logs
                WHERE hospital_id=$1
-                 AND started_at > NOW() - INTERVAL '%s days'""" % int(days),
+                 AND started_at > NOW() - ($2 || ' days')::interval""",
             hospital_id,
+            str(int(days)),
         )
     return {
         "total_calls": row["total_calls"] or 0,
@@ -888,6 +890,11 @@ async def hospital_wizard(body: HospitalWizardIn):
                         "UPDATE hospitals SET plivo_number=$1 WHERE id=$2",
                         plivo_number, hospital_id,
                     )
+                try:
+                    from src.services.livekit_sip import setup_hospital_inbound
+                    await setup_hospital_inbound(slug, plivo_number)
+                except Exception as sip_exc:
+                    logger.warning("wizard_sip_setup_failed", error=str(sip_exc))
         except Exception as e:
             logger.warning("wizard_plivo_provision_failed", error=str(e))
 
@@ -930,6 +937,16 @@ async def provision_plivo_number(hospital_id: str):
             "UPDATE hospitals SET plivo_number=$1 WHERE id=$2", plivo_number, hospital_id
         )
     _invalidate(hospital_id)
+
+    async def _setup_sip(s: str, num: str) -> None:
+        try:
+            from src.services.livekit_sip import setup_hospital_inbound
+            await setup_hospital_inbound(s, num)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("provision_sip_setup_failed", error=str(exc))
+
+    asyncio.create_task(_setup_sip(slug, plivo_number))
+
     return {
         "plivo_number": plivo_number,
         "bsnl_forward_code": f"**21*{plivo_number}#",

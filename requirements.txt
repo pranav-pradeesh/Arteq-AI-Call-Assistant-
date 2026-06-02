@@ -5,10 +5,8 @@ websockets>=13.0,<15.0
 python-multipart==0.0.9
 httpx>=0.28.1,<1.0.0
 
-# Database (asyncpg direct; sqlalchemy kept for legacy dashboard routes)
-sqlalchemy[asyncio]==2.0.30
+# Database (asyncpg direct — no ORM)
 asyncpg==0.29.0
-alembic==1.13.1
 
 # LLM
 groq>=0.9.0
@@ -30,7 +28,6 @@ numpy>=1.26.0
 # Dashboard
 jinja2==3.1.4
 python-jose[cryptography]==3.3.0
-passlib[bcrypt]==1.7.4
 
 # ── LiveKit Voice Agent ────────────────────────────────────────────────────────
 # Pure-AI voice pipeline: VAD → Sarvam STT → Groq LLM → Sarvam TTS

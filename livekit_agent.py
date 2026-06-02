@@ -487,7 +487,7 @@ async def session_handler(ctx: JobContext) -> None:
         try:
             msgs = session.chat_ctx.messages
             if len(msgs) > _MAX_CTX + 1:
-                session.chat_ctx.messages = msgs[:1] + msgs[-((_MAX_CTX))]
+                session.chat_ctx.messages = msgs[:1] + msgs[-_MAX_CTX:]
         except Exception:
             pass
 
@@ -498,9 +498,9 @@ async def session_handler(ctx: JobContext) -> None:
     await session.generate_reply(instructions=f"Say exactly: {greeting!r}")
 
     # ── Post-call side effects (on session end) ───────────────────────────
-    # LiveKit's session.on("session_ended") or similar; check transfer flag
-    @session.on("agent_stopped")
-    async def _on_end():
+    # LiveKit EventEmitter rejects async callbacks; wrap in a sync handler
+    # that schedules the async work. Event name is "close" (not "agent_stopped").
+    async def _on_end_async():
         try:
             transfer_dest = session.userdata.get("transfer_destination", "")
             if transfer_dest:
@@ -527,6 +527,10 @@ async def session_handler(ctx: JobContext) -> None:
             )
         except Exception as exc:
             print(f"[arteq] post-call cleanup error: {exc}", file=sys.stderr)
+
+    @session.on("close")
+    def _on_end(_event=None):
+        asyncio.ensure_future(_on_end_async())
 
 
 if __name__ == "__main__":

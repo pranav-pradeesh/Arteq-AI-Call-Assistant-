@@ -164,6 +164,7 @@ async def dial_outbound(
 
     room_name = f"{hospital_slug}-call-{uuid.uuid4().hex[:8]}"
 
+    lk = None
     try:
         from livekit import api as lk_api
         lk = _lk()
@@ -192,7 +193,6 @@ async def dial_outbound(
                 wait_until_answered=False,  # non-blocking — agent joins while ringing
             )
         )
-        await lk.aclose()
 
         logger.info(
             "outbound_sip_dialed",
@@ -205,6 +205,9 @@ async def dial_outbound(
     except Exception as exc:
         logger.error("outbound_sip_failed", error=str(exc), patient=patient_phone[-4:])
         return ""
+    finally:
+        if lk is not None:
+            await lk.aclose()
 
 
 # ── Runtime: inbound PCML ─────────────────────────────────────────────────────

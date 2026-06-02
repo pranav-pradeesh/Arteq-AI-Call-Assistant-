@@ -56,7 +56,8 @@ def _fuzzy_find_doctor(hospital_ctx, name: str):
     name_l = name.lower()
     for doc in (hospital_ctx.doctors if hospital_ctx else []):
         if name_l in doc.name.lower() or (doc.name_ml and name_l in doc.name_ml.lower()):
-            return str(doc.id), str(doc.dept_id) if doc.dept_id else None, doc.name
+            dept_id = getattr(doc, 'dept_id', None)
+            return str(doc.id), str(dept_id) if dept_id else None, doc.name
     return None, None, name
 
 
@@ -276,15 +277,15 @@ try:
         for doc in hospital_ctx.doctors:
             if name_l not in doc.name.lower():
                 continue
-            if not doc.schedules:
+            if not doc.slots:
                 return f"Dr. {doc.name}'s schedule is not listed. Please contact reception."
 
             _DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
             lines = []
-            for s in doc.schedules:
-                day = _DAYS[s.day_of_week] if 0 <= s.day_of_week <= 6 else str(s.day_of_week)
+            for s in doc.slots:
+                day = _DAYS[s.dow] if 0 <= s.dow <= 6 else str(s.dow)
                 room = f" Room {s.room}" if s.room else ""
-                lines.append(f"{day} {s.start_time}–{s.end_time}{room}")
+                lines.append(f"{day} {s.start}–{s.end}{room}")
             return f"Dr. {doc.name} ({doc.specialty or 'General'}): {', '.join(lines)}."
 
         return f"No schedule found for '{doctor_name}'. Please check with reception."

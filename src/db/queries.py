@@ -411,9 +411,26 @@ async def create_appointment(
     notes: str,
     call_id: str,
 ) -> str:
-    """Insert a new appointment; returns the new UUID as a string."""
+    """Insert a new appointment; returns the new UUID as a string.
+
+    Rejects a duplicate (same doctor + slot + hospital) that is still active,
+    so two concurrent calls cannot double-book the same slot.
+    """
     pool = await get_pool()
     async with pool.acquire() as conn:
+        if slot_time and doctor_id:
+            conflict = await conn.fetchval(
+                """SELECT 1 FROM appointments
+                   WHERE hospital_id=$1 AND doctor_id=$2 AND slot_time=$3
+                     AND status IN ('booked','confirmed','requested')
+                   LIMIT 1""",
+                hospital_id,
+                _uuid_mod.UUID(doctor_id),
+                slot_time,
+            )
+            if conflict:
+                raise ValueError("slot_already_booked")
+
         row = await conn.fetchrow(
             """INSERT INTO appointments
                (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
@@ -445,16 +462,25 @@ async def cancel_appointment_by_id(appointment_id: str, hospital_id: str) -> boo
 
 
 async def reschedule_appointment_by_id(
-    appointment_id: str, new_slot_time: datetime
+    appointment_id: str, new_slot_time: datetime, hospital_id: str = ""
 ) -> bool:
     pool = await get_pool()
     async with pool.acquire() as conn:
-        result = await conn.execute(
-            "UPDATE appointments SET slot_time=$2, status='rescheduled', "
-            "updated_at=NOW() WHERE id=$1",
-            _uuid_mod.UUID(appointment_id),
-            new_slot_time,
-        )
+        if hospital_id:
+            result = await conn.execute(
+                "UPDATE appointments SET slot_time=$2, status='rescheduled', "
+                "updated_at=NOW() WHERE id=$1 AND hospital_id=$3",
+                _uuid_mod.UUID(appointment_id),
+                new_slot_time,
+                hospital_id,
+            )
+        else:
+            result = await conn.execute(
+                "UPDATE appointments SET slot_time=$2, status='rescheduled', "
+                "updated_at=NOW() WHERE id=$1",
+                _uuid_mod.UUID(appointment_id),
+                new_slot_time,
+            )
     return result.split()[-1] != "0"
 
 
@@ -698,9 +724,11 @@ async def get_pending_followups(db_pool, days_after: int = 3) -> list[dict]:
             a.patient_phone,
             a.patient_name,
             a.slot_time,
-            d.name AS doctor_name
+            d.name AS doctor_name,
+            h.slug  AS slug
         FROM appointments a
         LEFT JOIN doctors d ON a.doctor_id = d.id
+        LEFT JOIN hospitals h ON h.id = a.hospital_id
         WHERE
             a.followup_sent = false
             AND a.status IN ('booked','confirmed','requested')
@@ -728,9 +756,11 @@ async def get_pending_confirmations(db_pool, days_min: int = 5, days_max: int = 
             a.patient_name,
             a.slot_time,
             a.hospital_id,
-            d.name AS doctor_name
+            d.name AS doctor_name,
+            h.slug  AS slug
         FROM appointments a
         LEFT JOIN doctors d ON a.doctor_id = d.id
+        LEFT JOIN hospitals h ON h.id = a.hospital_id
         WHERE
             a.confirmation_sent = false
             AND a.status IN ('booked', 'confirmed', 'requested')

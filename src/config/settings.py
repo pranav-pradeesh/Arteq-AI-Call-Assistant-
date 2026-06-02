@@ -129,6 +129,21 @@ class Settings(BaseSettings):
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"
     DASHBOARD_JWT_EXPIRE_MINUTES: int = 720
 
+    @model_validator(mode="after")
+    def _reject_weak_secrets_in_production(self) -> "Settings":
+        if self.ENV == "production":
+            _WEAK = {"admin", "change-me-in-production", "change_me_in_production", ""}
+            if self.DASHBOARD_JWT_SECRET in _WEAK:
+                raise ValueError(
+                    "DASHBOARD_JWT_SECRET must be set to a strong secret in production. "
+                    "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
+                )
+            if self.DASHBOARD_ADMIN_PASSWORD in _WEAK or len(self.DASHBOARD_ADMIN_PASSWORD) < 12:
+                raise ValueError(
+                    "DASHBOARD_ADMIN_PASSWORD must be at least 12 characters in production."
+                )
+        return self
+
     @property
     def is_dev(self) -> bool:
         return self.ENV == "dev"
