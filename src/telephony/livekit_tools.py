@@ -443,6 +443,10 @@ try:
         Transfer the call to a hospital department or staff member.
         Use for: reception, billing, pharmacy, lab, OPD, specific doctors.
         """
+        hospital_ctx = _ud(context, "hospital_ctx")
+        room_name    = _ud(context, "room_name", "")
+
+        # Mark session so post-call cleanup knows a transfer was requested
         try:
             ctx = context.session if hasattr(context, "session") else context
             ud = getattr(ctx, "userdata", {})
@@ -451,7 +455,40 @@ try:
         except Exception:
             pass
 
-        logger.info("tool_transfer_requested", department=department)
+        # Resolve a real phone number for the department
+        dept_phone = ""
+        dept_l = department.lower()
+        if hospital_ctx:
+            dept = hospital_ctx.find_dept(department)
+            if dept and dept.phone_ext:
+                ext = dept.phone_ext.strip().replace(" ", "").replace("-", "")
+                # Only attempt SIP dial for full phone numbers (10+ digits or E.164)
+                if ext.startswith("+") or (ext.isdigit() and len(ext) >= 10):
+                    dept_phone = dept.phone_ext.strip()
+
+            # Fall back to emergency contacts for emergency/casualty transfers
+            if not dept_phone and ("emergency" in dept_l or "casualty" in dept_l):
+                if hospital_ctx.emergency:
+                    dept_phone = hospital_ctx.emergency[0].phone or ""
+
+        # Attempt live SIP bridge if we have a number and a room
+        if dept_phone and room_name:
+            try:
+                from src.services.livekit_sip import transfer_call_in_room
+                ok = await transfer_call_in_room(
+                    room_name=room_name,
+                    to_phone=dept_phone,
+                    participant_name=department.title(),
+                )
+                if ok:
+                    logger.info("tool_transfer_sip_ok", department=department, dest=dept_phone[-4:])
+                    return (
+                        f"Connecting you to {department} now. Please hold while we connect."
+                    )
+            except Exception as exc:
+                logger.warning("tool_transfer_sip_failed", error=str(exc))
+
+        logger.info("tool_transfer_signal_only", department=department)
         return f"Transferring you to {department}. Please hold."
 
 

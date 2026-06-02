@@ -486,6 +486,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "hospital_name":       hospital_name,
         "caller_phone":        caller_phone,
         "call_id":             call_id,
+        "room_name":           room_name,
         "transfer_requested":  False,
         "transfer_destination": "",
     }
@@ -540,6 +541,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 )
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
+
+            # Increment campaign answered counter if this was an outbound campaign call
+            campaign_id = (outbound_context or {}).get("campaign_id", "")
+            if campaign_id and total_turns > 0:
+                try:
+                    from src.db.queries import increment_campaign_calls_answered
+                    await increment_campaign_calls_answered(campaign_id)
+                except Exception as exc:
+                    print(f"[arteq] campaign metric update failed: {exc}", file=sys.stderr)
 
             if getattr(settings, "POST_CALL_SMS_ENABLED", False) and caller_phone:
                 from src.services.sms_service import SMSService

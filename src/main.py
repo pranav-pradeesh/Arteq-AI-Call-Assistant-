@@ -189,6 +189,22 @@ async def livekit_token(slug: str = "default", participant: str = "patient"):
 
 # ── Plivo inbound webhook ─────────────────────────────────────────────────────
 
+def _verify_plivo_signature(auth_token: str, full_url: str, params: dict, signature: str) -> bool:
+    """
+    Verify Plivo webhook signature per Plivo docs:
+    HMAC-SHA1 over (url + sorted key=value pairs), base64-encoded.
+    """
+    import base64
+    import hashlib
+    import hmac as _hmac
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+    to_sign = (full_url + sorted_str).encode()
+    expected = base64.b64encode(
+        _hmac.new(auth_token.encode(), to_sign, hashlib.sha1).digest()
+    ).decode()
+    return _hmac.compare_digest(signature, expected)
+
+
 @app.post("/api/v1/call/inbound/{tenant_slug}")
 async def call_inbound_webhook(tenant_slug: str, request: Request):
     """
@@ -200,8 +216,19 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     from src.services.livekit_sip import get_inbound_pcml
 
     form = await request.form()
-    to_number = form.get("To", settings.PLIVO_PHONE_NUMBER)
+    params = {k: str(v) for k, v in form.items()}
 
+    # Verify Plivo signature when auth token is configured
+    if settings.PLIVO_AUTH_TOKEN:
+        sig = request.headers.get("X-Plivo-Signature", "")
+        full_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+        if sig and not _verify_plivo_signature(settings.PLIVO_AUTH_TOKEN, full_url, params, sig):
+            logger.warning("plivo_signature_mismatch", tenant=tenant_slug)
+            return Response(status_code=403)
+        elif not sig:
+            logger.debug("plivo_signature_absent", tenant=tenant_slug)
+
+    to_number = params.get("To", settings.PLIVO_PHONE_NUMBER)
     xml = get_inbound_pcml(to_number=to_number)
     return Response(content=xml, media_type="text/xml")
 

@@ -210,6 +210,57 @@ async def dial_outbound(
             await lk.aclose()
 
 
+# ── Runtime: call transfer ────────────────────────────────────────────────────
+
+async def transfer_call_in_room(
+    room_name: str,
+    to_phone: str,
+    participant_name: str = "Department",
+) -> bool:
+    """
+    Dial `to_phone` into an existing LiveKit room, completing a warm transfer.
+    The patient and the department are bridged in the same room; the agent
+    should then say goodbye and stop speaking.
+    Returns True on success.
+    """
+    if not settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID:
+        logger.warning(
+            "sip_transfer_skipped",
+            reason="LIVEKIT_SIP_OUTBOUND_TRUNK_ID not set — update env after running SIP setup",
+        )
+        return False
+
+    phone = to_phone.strip()
+    if not phone:
+        return False
+    if not phone.startswith("+"):
+        phone = f"+{phone}"
+
+    lk = None
+    try:
+        from livekit import api as lk_api
+        lk = _lk()
+        await lk.sip.create_sip_participant(
+            lk_api.CreateSIPParticipantRequest(
+                sip_trunk_id=settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID,
+                sip_url=f"sip:{phone}@sip.plivo.com",
+                room_name=room_name,
+                participant_identity=f"transfer-{phone[-4:]}",
+                participant_name=participant_name,
+                play_ringtone=True,
+                wait_until_answered=False,
+            )
+        )
+        logger.info("sip_transfer_dialed", room=room_name, dest=phone[-4:])
+        return True
+    except Exception as exc:
+        logger.error("sip_transfer_failed", room=room_name, error=str(exc))
+        return False
+    finally:
+        if lk is not None:
+            await lk.aclose()
+
+
 # ── Runtime: inbound PCML ─────────────────────────────────────────────────────
 
 def get_inbound_pcml(to_number: str = "") -> str:

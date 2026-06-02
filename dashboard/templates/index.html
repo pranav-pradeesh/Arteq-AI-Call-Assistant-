@@ -788,6 +788,106 @@
       </template>
     </div>
 
+    <!-- ── SETUP ── -->
+    <div x-show="tab==='setup' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Hospital Setup</h1>
+        <button @click="loadSetupStatus()" class="btn-secondary text-xs">Refresh</button>
+      </div>
+
+      <div class="space-y-4">
+
+        <!-- Setup Status checklist -->
+        <div class="card">
+          <h2 class="font-medium text-gray-900 mb-3">Setup Checklist</h2>
+          <div x-show="!setupStatus" class="text-gray-400 text-sm">Loading setup status…</div>
+          <template x-if="setupStatus">
+            <div class="space-y-2">
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_slug?'text-green-700':'text-red-700'">
+                <span x-text="setupStatus.checks.has_slug?'✅':'❌'"></span>
+                <span>Slug configured</span>
+                <code x-show="setupStatus.checks.has_slug" class="ml-auto text-xs font-mono text-gray-500"
+                      x-text="setupStatus.slug"></code>
+              </div>
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_plivo_number?'text-green-700':'text-yellow-700'">
+                <span x-text="setupStatus.checks.has_plivo_number?'✅':'⚠'"></span>
+                <span>Phone number provisioned</span>
+                <code x-show="setupStatus.checks.has_plivo_number" class="ml-auto text-xs font-mono text-gray-500"
+                      x-text="setupStatus.plivo_number"></code>
+              </div>
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_departments?'text-green-700':'text-red-700'">
+                <span x-text="setupStatus.checks.has_departments?'✅':'❌'"></span>
+                <span>Departments added</span>
+                <span class="ml-auto text-xs text-gray-400" x-text="setupStatus.counts.departments + ' dept(s)'"></span>
+              </div>
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_doctors?'text-green-700':'text-red-700'">
+                <span x-text="setupStatus.checks.has_doctors?'✅':'❌'"></span>
+                <span>Doctors added</span>
+                <span class="ml-auto text-xs text-gray-400" x-text="setupStatus.counts.doctors + ' doctor(s)'"></span>
+              </div>
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_faqs?'text-green-700':'text-yellow-700'">
+                <span x-text="setupStatus.checks.has_faqs?'✅':'⚠'"></span>
+                <span>FAQs added</span>
+                <span class="ml-auto text-xs text-gray-400" x-text="setupStatus.counts.faqs + ' FAQ(s)'"></span>
+              </div>
+              <div class="flex items-center gap-3 text-sm"
+                   :class="setupStatus.checks.has_emergency_contacts?'text-green-700':'text-yellow-700'">
+                <span x-text="setupStatus.checks.has_emergency_contacts?'✅':'⚠'"></span>
+                <span>Emergency contacts added</span>
+                <span class="ml-auto text-xs text-gray-400" x-text="setupStatus.counts.emergency_contacts + ' contact(s)'"></span>
+              </div>
+              <div class="border-t pt-2 mt-2 flex items-center gap-3 font-medium"
+                   :class="setupStatus.ready?'text-green-700':'text-yellow-700'">
+                <span x-text="setupStatus.ready?'✅':'⚠'"></span>
+                <span x-text="setupStatus.ready?'Hospital is ready to take calls':'Setup incomplete — complete the items above'"></span>
+              </div>
+            </div>
+          </template>
+        </div>
+
+        <!-- BSNL forward code -->
+        <div x-show="setupStatus && setupStatus.bsnl_forward_code" class="card border-blue-200 bg-blue-50">
+          <h2 class="font-medium text-blue-900 mb-1">BSNL Call Forward Code</h2>
+          <p class="text-sm text-blue-700 mb-2">Dial this code from the hospital landline to forward calls to the AI agent:</p>
+          <code class="text-lg font-mono text-blue-900" x-text="setupStatus && setupStatus.bsnl_forward_code"></code>
+        </div>
+
+        <!-- Provision number -->
+        <div class="card">
+          <h2 class="font-medium text-gray-900 mb-2">Provision Phone Number</h2>
+          <p class="text-sm text-gray-500 mb-4">
+            Buy an Indian DID from Plivo and automatically configure SIP routing for this hospital.
+            Requires Plivo credentials set in environment variables.
+          </p>
+          <button @click="provisionNumber()" class="btn-primary" :disabled="provisionLoading">
+            <span x-show="!provisionLoading">Provision Number</span>
+            <span x-show="provisionLoading">Provisioning…</span>
+          </button>
+          <div x-show="provisionResult" class="mt-3 p-3 rounded-lg bg-green-50 text-green-800 text-sm">
+            <p>Phone number: <code class="font-mono" x-text="provisionResult && provisionResult.plivo_number"></code></p>
+            <p x-show="provisionResult && provisionResult.bsnl_forward_code">
+              BSNL forward code: <code class="font-mono" x-text="provisionResult && provisionResult.bsnl_forward_code"></code>
+            </p>
+          </div>
+        </div>
+
+        <!-- Cache management -->
+        <div class="card">
+          <h2 class="font-medium text-gray-900 mb-2">Cache Management</h2>
+          <p class="text-sm text-gray-500 mb-4">
+            The agent caches hospital context for 5 minutes. Clear it to make changes take effect immediately on the next call.
+          </p>
+          <button @click="clearCache()" class="btn-secondary">Clear Hospital Cache</button>
+        </div>
+
+      </div>
+    </div>
+
   </main>
 </div>
 
@@ -981,6 +1081,8 @@ function app() {
     appointments: [], apptFilter: '',
     callbacks: [], callbackFilter: '',
     telStatus: null,
+    setupStatus: null,
+    provisionLoading: false, provisionResult: null,
     hisForm: { enabled:false, type:'generic_rest', base_url:'', auth:{ type:'bearer', value:'' }, endpoints:{}, field_map:{}, practitioner_map:{}, timeout_seconds:8 },
     hisStatus: null,
     hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'' },
@@ -1005,6 +1107,7 @@ function app() {
       { id:'knowledge', icon:'📚', label:'Knowledge' },
       { id:'telephony', icon:'🔧', label:'Telephony' },
       { id:'his', icon:'🔗', label:'HIS Connect' },
+      { id:'setup', icon:'🚀', label:'Setup' },
     ],
     get wsUrl() {
       if (!this.currentHospital) return '';
@@ -1066,7 +1169,7 @@ function app() {
         this.loadDepts(), this.loadDoctors(), this.loadBilling(),
         this.loadEmergency(), this.loadFaqs(), this.loadCalls(), this.loadStats(),
         this.loadAppointments(), this.loadCallbacks(), this.loadTelStatus(),
-        this.loadHisConfig(),
+        this.loadHisConfig(), this.loadSetupStatus(),
       ]);
     },
 
@@ -1091,6 +1194,25 @@ function app() {
     },
     async loadTelStatus() {
       try { this.telStatus = await this.api(`/telephony/status?hospital_id=${this.currentHospital.id}`) || null; } catch {}
+    },
+    async loadSetupStatus() {
+      try { this.setupStatus = await this.api(`/hospitals/${this.currentHospital.id}/setup-status`) || null; } catch {}
+    },
+    async provisionNumber() {
+      if (!confirm('This will purchase a Plivo phone number. Continue?')) return;
+      this.provisionLoading = true; this.provisionResult = null;
+      try {
+        this.provisionResult = await this.api(`/hospitals/${this.currentHospital.id}/provision-number`, { method: 'POST' });
+        this.notify('Phone number provisioned successfully');
+        await this.loadSetupStatus();
+      } catch(e) { this.notify('Provision failed: '+e.message, 'error'); }
+      finally { this.provisionLoading = false; }
+    },
+    async clearCache() {
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/cache/clear`, { method: 'POST' });
+        this.notify('Cache cleared — changes take effect on next call');
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
     },
     async updateApptStatus(appt, newStatus) {
       try {

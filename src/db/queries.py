@@ -825,6 +825,17 @@ async def mark_confirmation_sent(appointment_id: str) -> None:
         )
 
 
+async def increment_campaign_calls_answered(campaign_id: str) -> None:
+    """Increment calls_answered counter for a campaign when a call engages."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE campaigns SET calls_answered = calls_answered + 1, "
+            "updated_at = NOW() WHERE id = $1",
+            _uuid_mod.UUID(campaign_id),
+        )
+
+
 async def write_call_feedback(
     call_id: str,
     hospital_id: str,
