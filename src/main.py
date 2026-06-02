@@ -2,20 +2,21 @@
 Arteq Hospital Voice Agent — FastAPI entry point.
 
 Routes:
-  /ws/call/{tenant_slug}              WebSocket — Exotel audio stream
-  /api/v1/call/inbound/{slug}         POST — Exotel call webhook (returns XML)
+  /api/v1/call/inbound/{slug}         POST — Plivo inbound/answered-outbound webhook (PCML)
   /api/v1/outbound/reminder           POST — schedule outbound reminder call
   /api/v1/outbound/health             GET  — outbound service health
-  /api/v1/call/status                 POST — Exotel call status callback
+  /api/v1/call/status                 POST — Plivo call status callback
+  /api/v1/livekit/token               GET  — LiveKit JWT for browser/mobile
   /api/v1/health                      GET  — health check
   /metrics                            GET  — Prometheus metrics
+  /admin/*                            Admin dashboard API
 """
 from __future__ import annotations
 
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
@@ -23,7 +24,6 @@ from src.config.settings import settings
 from src.db.queries import close_pool, get_pool
 from src.observability.logger import configure_logging, get_logger
 from src.observability.metrics import get_metrics_response
-from src.telephony.websocket_handler import handle_exotel_stream
 
 logger = get_logger(__name__)
 
@@ -36,12 +36,10 @@ async def lifespan(app: FastAPI):
     configure_logging()
     logger.info("arteq_starting", env=settings.ENV)
 
-    # Validate critical URL config — misconfigured URLs cause silent call failures
     if "localhost" in settings.PUBLIC_BASE_URL or "localhost" in settings.PUBLIC_WS_URL:
-        logger.error(
+        logger.warning(
             "misconfigured_public_urls",
-            hint="Set PUBLIC_BASE_URL and PUBLIC_WS_URL to your Render service URL. "
-                 "Exotel cannot reach localhost — all calls will fail.",
+            hint="Set PUBLIC_BASE_URL and PUBLIC_WS_URL to your Render service URL.",
             PUBLIC_BASE_URL=settings.PUBLIC_BASE_URL,
             PUBLIC_WS_URL=settings.PUBLIC_WS_URL,
         )
@@ -49,13 +47,12 @@ async def lifespan(app: FastAPI):
         logger.info("public_urls_ok",
                     base=settings.PUBLIC_BASE_URL, ws=settings.PUBLIC_WS_URL)
 
-    # DB probe + schema migration — best-effort, server starts regardless
+    # DB probe + idempotent schema migrations
     try:
         pool = await asyncio.wait_for(get_pool(), timeout=15)
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
         logger.info("db_connected")
-        # Apply pending schema migrations idempotently
         try:
             import pathlib
             migration_dir = pathlib.Path("migrations/versions")
@@ -71,28 +68,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.error("db_connection_failed", error=str(e))
 
-    # Pre-warm the TTS cache (greeting + common phrases) for instant playback
-    try:
-        from src.ai.groq_brain import build_greeting_text
-        from src.db.queries import get_or_load_hospital_context
-        from src.telephony.call_handler import common_warm_phrases
-        from src.tts.engine import warm_tts_cache
-
-        ctx = await get_or_load_hospital_context(settings.HOSPITAL_ID)
-        hosp = ctx.name_ml or ctx.name
-        lang = settings.DEFAULT_LANGUAGE
-        # All three time-of-day greeting variants, so any call hour is instant.
-        phrases = [
-            (build_greeting_text(hosp, settings.AGENT_NAME, h), lang)
-            for h in (8, 14, 20)
-        ]
-        phrases += common_warm_phrases()
-        warmed = await warm_tts_cache(phrases)
-        logger.info("tts_cache_warmed", count=warmed, total=len(phrases))
-    except Exception as e:
-        logger.warning("tts_warm_failed", error=str(e))
-
-    # Reminder scheduler
+    # Reminder / confirmation / callback / follow-up scheduler
     _scheduler_task = None
     try:
         from src.services.scheduler import start_scheduler
@@ -103,7 +79,6 @@ async def lifespan(app: FastAPI):
     logger.info("arteq_ready", port=settings.PORT)
     yield
 
-    # Shutdown scheduler before closing DB pool
     if _scheduler_task is not None:
         try:
             from src.services.scheduler import stop_scheduler
@@ -119,8 +94,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Arteq Hospital Voice Agent",
-    description="Malayalam hospital enquiry voice system",
-    version="1.0.0",
+    description="Malayalam hospital voice AI — LiveKit + Sarvam + Groq",
+    version="2.0.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url=None,
@@ -139,17 +114,13 @@ app.add_middleware(
 
 @app.get("/api/v1/health")
 async def health_check():
-    from src.telephony.call_registry import get_registry
-    reg = get_registry()
     return {
         "status": "healthy",
-        "version": "1.0.0",
+        "version": "2.0.0",
         "env": settings.ENV,
-        "stt": settings.STT_PROVIDER,
-        "tts": settings.TTS_PROVIDER,
         "hospital_id": settings.HOSPITAL_ID,
-        "active_calls": reg.active_count,
-        "max_calls": reg.max_calls,
+        "livekit_configured": bool(settings.LIVEKIT_URL and settings.LIVEKIT_API_KEY),
+        "plivo_configured": bool(settings.PLIVO_AUTH_ID and settings.PLIVO_PHONE_NUMBER),
     }
 
 
@@ -160,24 +131,11 @@ async def metrics():
     return Response(content=content, media_type=content_type)
 
 
-# ── WebSocket (Plivo bidirectional stream) ────────────────────────────────────
-
-@app.websocket("/ws/call/{tenant_slug}")
-async def websocket_call_stream(websocket: WebSocket, tenant_slug: str):
-    await handle_exotel_stream(websocket, tenant_slug)
-
-
 # ── LiveKit token endpoint ────────────────────────────────────────────────────
-# A browser (or mobile app) calls this to get a short-lived JWT that lets it
-# join a LiveKit room. The room name = hospital slug, so the agent loads the
-# right hospital context automatically.
 
 @app.get("/api/v1/livekit/token")
 async def livekit_token(slug: str = "default", participant: str = "patient"):
-    """
-    Returns a LiveKit access token for the given hospital room.
-    The browser uses this token to connect to LiveKit and talk to Arya.
-    """
+    """Returns a LiveKit JWT so the browser can join a hospital room."""
     if not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
         from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="LiveKit not configured")
@@ -204,15 +162,14 @@ async def livekit_token(slug: str = "default", participant: str = "patient"):
         raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")
 
 
-# ── Exotel call webhook ───────────────────────────────────────────────────────
+# ── Plivo inbound webhook ─────────────────────────────────────────────────────
 
 @app.post("/api/v1/call/inbound/{tenant_slug}")
 async def call_inbound_webhook(tenant_slug: str, request: Request):
     """
-    Plivo calls this URL when an inbound or answered outbound call arrives.
-    For outbound calls, transfers the cached context from request_uuid → call_uuid
-    so the WebSocket handler can look it up.
-    Returns Plivo PCML that opens a bidirectional audio stream to our WebSocket.
+    Plivo calls this when an inbound call arrives or an outbound call is answered.
+    Transfers cached outbound context from request_uuid → call_uuid, then returns
+    PCML that opens a bidirectional audio stream to the LiveKit SIP bridge.
     """
     from fastapi.responses import Response
     from src.cache.store import session_cache
@@ -221,8 +178,6 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     call_uuid = form.get("CallUUID", "")
     request_uuid = form.get("RequestUUID", "")
 
-    # Outbound calls: context was cached under request_uuid at call placement.
-    # Transfer it to call_uuid so the WS handler can find it from the start event.
     if request_uuid and call_uuid:
         cached = session_cache.get(f"plivo:{request_uuid}")
         if cached:
@@ -270,10 +225,8 @@ try:
 except Exception as e:
     logger.error("dashboard_mount_failed", error=str(e))
 
-# ── Legacy dashboard routes (optional, graceful skip if models missing) ───────
-
 try:
     from dashboard.routes.auth import router as auth_router
-    app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth-legacy"])
+    app.include_router(auth_router, prefix="/api/v1/auth", tags=["auth"])
 except Exception:
     pass
