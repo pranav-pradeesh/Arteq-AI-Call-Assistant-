@@ -23,7 +23,7 @@ python-jose[cryptography]==3.3.0
 
 # ── Observability ──────────────────────────────────────────────────────────────
 structlog==24.2.0
-prometheus-client==0.20.0
+prometheus-client>=0.22.0
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
