@@ -1,44 +1,22 @@
 """
-Arteq Hospital Voice Agent — LiveKit edition.
+Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
   • Silero VAD → Sarvam STT (Saaras v3, 23 languages, codemix)
-  • Groq LLaMA 70B (via OpenAI-compatible adapter)
+  • Groq LLaMA 70B (via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
   • Function tools — book/cancel appointments, callbacks, SMS, emergency
-  • Multi-lane — one worker pool serves every hospital concurrently
-  • Multi-tenant — room name = hospital slug, context loaded from DB
-
-IVR features included:
-  ✓ DTMF digit → synthetic utterance (1=OPD, 2=Emergency, …)
-  ✓ Emergency detection → immediate staff alert + transfer flag
-  ✓ Appointment booking (multi-turn), cancellation, rescheduling
-  ✓ Callback request registration
-  ✓ Doctor schedule lookup
-  ✓ Department info (floor, hours, extension)
-  ✓ Location SMS
-  ✓ Patient recognition (returning caller personalisation)
-  ✓ After-hours handling (system prompt + context-aware)
-  ✓ Post-call summary SMS (opt-in)
-  ✓ Staff alerts on booking / cancellation / emergency
-  ✓ Acoustic emotional cues (trembling voice → extra gentle response)
-  ✓ Outbound call context (confirmation / reminder / callback / followup)
-  ✓ Barge-in via LiveKit's built-in turn detection
-
-Outbound confirmation calls: the existing scheduler (src/services/scheduler.py)
-places Plivo calls 6–8 days before each appointment. When the patient answers,
-Plivo will eventually route through LiveKit SIP (telephony integration pending).
-Until then the Plivo → WebSocket path still works as fallback.
+  • Multi-tenant — room name = "{slug}-call-{uuid}", context from DB
 
 Run:
-  python livekit_agent.py dev      # development (single room, auto-join)
+  python livekit_agent.py dev      # development (auto-join)
   python livekit_agent.py start    # production worker pool
 
 Required env vars:
   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
   SARVAM_API_KEY, GROQ_API_KEY
-  DATABASE_URL  (for hospital context + appointment DB writes)
+  DATABASE_URL
 """
 from __future__ import annotations
 
@@ -47,27 +25,22 @@ import os
 import sys
 import uuid
 from datetime import datetime, timezone
+from typing import Optional
 
 import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentServer, AgentSession, JobContext, cli
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import openai, sarvam, silero
 
 load_dotenv()
 
-# ── constants ─────────────────────────────────────────────────────────────────
+# ── Constants ─────────────────────────────────────────────────────────────────
 
-# Sarvam SDK quirk: internal reasoning eats the token budget without producing
-# visible output. Keep max_tokens ≥ 500 or content will be None and crash.
 _LLM_MAX_TOKENS = 600
+_MAX_CTX = 20   # keep system prompt + last 20 messages (10 turns)
 
-# Context window: keep system prompt (msg[0]) + last 20 messages (10 turns).
-# Groq free tier is 6 000 TPM — each request re-sends the full system prompt,
-# so aggressive trimming is necessary.
-_MAX_CTX = 20
-
-# DTMF digit → natural language utterance (bypasses STT)
 _DTMF = {
     "1": "OPD timing please",
     "2": "emergency help needed",
@@ -82,9 +55,6 @@ _DTMF = {
 
 # ==============================================================================
 # Acoustic Sensory Layer
-# Analyses raw PCM16 frames (via rtc.AudioFrame) for volume, pitch proxy
-# (zero-crossing rate), and trembling. Prepends a metadata tag to every
-# transcript so the LLM can modulate its tone without extra API calls.
 # ==============================================================================
 
 class AcousticSensoryLayer:
@@ -109,12 +79,9 @@ class AcousticSensoryLayer:
         avg_zcr = float(np.mean(self._zcr))
         vol_var = float(np.var(self._rms))
         zcr_var = float(np.var(self._zcr))
-
         vol = "HIGH" if avg_vol > 1500 else ("LOW" if avg_vol < 300 else "NORMAL")
         pit = "HIGH" if avg_zcr > 80 else ("LOW" if avg_zcr < 30 else "NORMAL")
         stb = "TREMBLING" if (zcr_var > 400 or vol_var > 50_000) else "STEADY"
-
-        # Only inject the tag when something noteworthy is detected
         if vol == "NORMAL" and pit == "NORMAL" and stb == "STEADY":
             return ""
         return f"[SENSORY: VOL={vol}, PITCH={pit}, TENSION={stb}]"
@@ -125,7 +92,6 @@ class AcousticSensoryLayer:
 # ==============================================================================
 
 async def _resolve_hospital_id(room_name: str) -> str:
-    # SIP rooms are named "{slug}-call-{uuid8}"; strip the call suffix
     slug = room_name.split("-call-")[0] if "-call-" in room_name else room_name
     try:
         from src.db.queries import get_pool
@@ -153,8 +119,7 @@ async def _load_hospital_ctx(hospital_id: str):
         return None
 
 
-async def _load_patient_profile(caller_phone: str, hospital_id: str) -> dict | None:
-    """Return last 3 appointments for returning patients, or None."""
+async def _load_patient_profile(caller_phone: str, hospital_id: str) -> Optional[dict]:
     try:
         from src.db.queries import get_appointments_by_phone
         appts = await get_appointments_by_phone(caller_phone, hospital_id)
@@ -165,7 +130,6 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> dict | N
             "history": [
                 {
                     "doctor": a.get("doctor_name", ""),
-                    "dept": a.get("dept_name", ""),
                     "slot": str(a["slot_time"])[:16] if a.get("slot_time") else "",
                     "status": a.get("status", ""),
                 }
@@ -180,17 +144,14 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> dict | N
 # System prompt builder
 # ==============================================================================
 
-def _build_prompt(hospital_ctx, agent_name: str, outbound_context: dict | None) -> str:
+def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict]) -> str:
     import pytz
-    from datetime import datetime
-
     _IST = pytz.timezone("Asia/Kolkata")
     now = datetime.now(_IST)
     _DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
-    day_name = _DAYS[(now.weekday() + 1) % 7]   # 0=Sun in DB convention
+    day_name = _DAYS[(now.weekday() + 1) % 7]
     time_str = now.strftime("%H:%M")
 
-    # Hospital-specific section
     if hospital_ctx:
         try:
             from src.ai.groq_brain import _build_hospital_summary
@@ -198,8 +159,6 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: dict | None) 
         except Exception:
             hosp_block = f"Hospital: {hospital_ctx.name}"
         hosp_name = hospital_ctx.name_ml or hospital_ctx.name
-
-        # Operating status
         dow = (now.weekday() + 1) % 7
         hours = hospital_ctx.hours_for_day(dow)
         if hours:
@@ -216,7 +175,6 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: dict | None) 
         hosp_name = "the hospital"
         open_status = "Unknown"
 
-    # Outbound call block
     outbound_block = ""
     if outbound_context:
         call_type = outbound_context.get("call_type", "")
@@ -224,7 +182,6 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: dict | None) 
         dname = outbound_context.get("doctor_name", "")
         date  = outbound_context.get("appointment_date", "")
         ttime = outbound_context.get("appointment_time", "")
-
         if call_type == "confirmation":
             outbound_block = (
                 f"\nOUTBOUND CONFIRMATION CALL:\n"
@@ -296,11 +253,7 @@ HOSPITAL INFORMATION:
 TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
-# ==============================================================================
-# Opening greeting builder
-# ==============================================================================
-
-def _build_greeting(hospital_ctx, agent_name: str, outbound_context: dict | None) -> str:
+def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict]) -> str:
     hosp_name = (hospital_ctx.name_ml or hospital_ctx.name) if hospital_ctx else "the hospital"
 
     if outbound_context:
@@ -309,7 +262,6 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: dict | None
         dname = outbound_context.get("doctor_name", "")
         date  = outbound_context.get("appointment_date", "")
         ttime = outbound_context.get("appointment_time", "")
-
         if call_type == "confirmation":
             return (
                 f"Namaste {pname}, ഞാൻ {agent_name} — {hosp_name}-ൽ നിന്നും. "
@@ -330,45 +282,145 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: dict | None
                 f"Dr. {dname}-ൽ നിന്നുള്ള visit കഴിഞ്ഞ് എങ്ങനെ feel ചെയ്യുന്നു?"
             )
 
-    # Inbound — time-of-day greeting
     try:
         import pytz
-        from datetime import datetime
         hour = datetime.now(pytz.timezone("Asia/Kolkata")).hour
         from src.ai.groq_brain import build_greeting_text
         from src.config.settings import settings
-        return build_greeting_text(hosp_name, agent_name, hour)
+        return build_greeting_text(hosp_name, settings.AGENT_NAME, hour)
     except Exception:
         return f"Namaste! {hosp_name}-ലേക്ക് സ്വാഗതം. ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
 
 
 # ==============================================================================
-# LiveKit Agent worker
+# Agent class — one per call session
 # ==============================================================================
 
-server = AgentServer()
+class HospitalVoiceAgent(Agent):
+    """Arteq hospital voice agent — wraps the full pipeline per call."""
+
+    def __init__(
+        self,
+        system_prompt: str,
+        greeting: str,
+        tools: list,
+        sensory: AcousticSensoryLayer,
+        hospital_id: str,
+        caller_phone: str,
+        call_id: str,
+        hospital_name: str,
+        call_started_at: datetime,
+    ) -> None:
+        super().__init__(
+            instructions=system_prompt,
+            tools=tools,
+            stt=sarvam.STT(
+                api_key=os.getenv("SARVAM_API_KEY", ""),
+                model="saaras:v3",
+                language="unknown",
+                mode="codemix",
+            ),
+            vad=silero.VAD.load(),
+            llm=openai.LLM(
+                base_url="https://api.groq.com/openai/v1",
+                api_key=os.getenv("GROQ_API_KEY", ""),
+                model="llama-3.3-70b-versatile",
+                max_tokens=_LLM_MAX_TOKENS,
+            ),
+            tts=sarvam.TTS(
+                api_key=os.getenv("SARVAM_API_KEY", ""),
+                model="bulbul:v3",
+                target_language_code="ml-IN",
+                speaker="shubh",
+            ),
+        )
+        self._greeting = greeting
+        self._sensory = sensory
+        self._hospital_id = hospital_id
+        self._caller_phone = caller_phone
+        self._call_id = call_id
+        self._hospital_name = hospital_name
+        self._call_started_at = call_started_at
+
+    async def on_enter(self) -> None:
+        """Speak the opening greeting when the call connects."""
+        await self.session.generate_reply(
+            instructions=f"Say exactly: {self._greeting!r}"
+        )
+
+    async def on_user_turn_completed(
+        self,
+        turn_ctx: agents_llm.ChatContext,
+        new_message: agents_llm.ChatMessage,
+    ) -> None:
+        """
+        Intercept each user turn for:
+          1. DTMF digit → synthetic phrase
+          2. Acoustic metadata injection
+          3. Context window pruning
+        """
+        # Extract plain text from content (ChatContent = str | ImageContent | AudioContent)
+        text = ""
+        try:
+            content = new_message.content
+            if isinstance(content, list):
+                for chunk in content:
+                    if isinstance(chunk, str):
+                        text += chunk
+            elif isinstance(content, str):
+                text = content
+        except Exception:
+            text = ""
+
+        stripped = text.strip()
+
+        # DTMF: single digit → remap to natural language phrase
+        if stripped in _DTMF:
+            try:
+                new_message.content = [_DTMF[stripped]]
+            except Exception:
+                pass
+            self._sensory.reset()
+            return
+
+        # Inject acoustic metadata when noteworthy
+        meta = self._sensory.metadata()
+        self._sensory.reset()
+        if meta and text:
+            try:
+                new_message.content = [f"{meta}\n{text}"]
+            except Exception:
+                pass
+
+        # Context pruning: keep system prompt + last _MAX_CTX messages
+        try:
+            msgs = turn_ctx.messages
+            if len(msgs) > _MAX_CTX + 1:
+                turn_ctx._messages = msgs[:1] + msgs[-_MAX_CTX:]
+        except Exception:
+            pass
 
 
-@server.rtc_session()
-async def session_handler(ctx: JobContext) -> None:
-    """
-    One LiveKit room = one call session.
-    Room name = hospital slug for automatic multi-tenant context loading.
-    """
+# ==============================================================================
+# Agent entrypoint
+# ==============================================================================
+
+async def entrypoint(ctx: JobContext) -> None:
+    """One LiveKit room = one call. Called by the WorkerOptions dispatcher."""
     await ctx.connect()
     room_name = ctx.room.name
     call_id = str(uuid.uuid4())
     call_started_at = datetime.now(timezone.utc)
     print(f"[arteq] room={room_name} call_id={call_id[:8]}")
 
-    # ── Load hospital context ──────────────────────────────────────────────
-    hospital_id  = await _resolve_hospital_id(room_name)
-    hospital_ctx = await _load_hospital_ctx(hospital_id)
-    hospital_name = (hospital_ctx.name if hospital_ctx else "Arteq Hospital")
+    # ── Hospital context ──────────────────────────────────────────────────────
+    hospital_id   = await _resolve_hospital_id(room_name)
+    hospital_ctx  = await _load_hospital_ctx(hospital_id)
+    hospital_name = hospital_ctx.name if hospital_ctx else "Arteq Hospital"
     hospital_tier = getattr(hospital_ctx, "tier", "hospital") if hospital_ctx else "hospital"
 
-    # ── Outbound call context (stored in room metadata by dial_outbound()) ──
-    outbound_context: dict | None = None
+    # ── Outbound context from room metadata ───────────────────────────────────
+    outbound_context: Optional[dict] = None
     try:
         if ctx.room.metadata:
             import json as _json
@@ -378,14 +430,12 @@ async def session_handler(ctx: JobContext) -> None:
     except Exception:
         pass
 
-    # ── Patient recognition via SIP caller identity ────────────────────────
-    # LiveKit SIP sets participant identity to the caller's E.164 phone number.
+    # ── Caller phone from participant identity ────────────────────────────────
     caller_phone = ""
-    patient_profile: dict | None = None
+    patient_profile: Optional[dict] = None
     try:
         for p in ctx.room.remote_participants.values():
             ident = p.identity or p.name or ""
-            # E.164 (+91XXXXXXXXXX) or bare digits starting with country code
             if ident.startswith("+") or (ident.startswith("91") and len(ident) >= 12):
                 caller_phone = ident if ident.startswith("+") else f"+{ident}"
                 break
@@ -394,12 +444,11 @@ async def session_handler(ctx: JobContext) -> None:
     except Exception:
         pass
 
-    # ── Build system prompt ────────────────────────────────────────────────
+    # ── Build system prompt ───────────────────────────────────────────────────
     from src.config.settings import settings
-    agent_name   = settings.AGENT_NAME
+    agent_name    = settings.AGENT_NAME
     system_prompt = _build_prompt(hospital_ctx, agent_name, outbound_context)
     if patient_profile:
-        # Personalise: returning patient name and recent visit
         last = patient_profile["history"][0] if patient_profile["history"] else {}
         system_prompt += (
             f"\n\nRETURNING PATIENT: {patient_profile['name']} — "
@@ -407,9 +456,15 @@ async def session_handler(ctx: JobContext) -> None:
             "Greet them by name."
         )
 
+    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context)
+
+    # ── Tool set (clinic tier gets a leaner set) ───────────────────────────────
+    from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
+    tools = CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS
+
+    # ── Acoustic sensory layer ────────────────────────────────────────────────
     sensory = AcousticSensoryLayer()
 
-    # ── Capture raw audio frames for acoustic analysis ─────────────────────
     @ctx.room.on("track_subscribed")
     def _on_track(track, publication, participant):
         if track.kind != rtc.TrackKind.KIND_AUDIO:
@@ -422,109 +477,49 @@ async def session_handler(ctx: JobContext) -> None:
 
         asyncio.create_task(_drain())
 
-    # ── Pipeline ───────────────────────────────────────────────────────────
-    from src.telephony.livekit_tools import ALL_TOOLS
+    # ── Session userdata (accessible inside tools via context.userdata) ───────
+    session_data = {
+        "hospital_id":         hospital_id,
+        "hospital_ctx":        hospital_ctx,
+        "hospital_name":       hospital_name,
+        "caller_phone":        caller_phone,
+        "call_id":             call_id,
+        "transfer_requested":  False,
+        "transfer_destination": "",
+    }
 
-    vad = silero.VAD.load()
-
-    stt = sarvam.STT(
-        api_key=os.getenv("SARVAM_API_KEY", ""),
-        model="saaras:v3",
-        language="unknown",   # auto-detect Malayalam/Hindi/Tamil/Manglish/English
-        mode="codemix",
-        flush_signal=True,
+    # ── Start session ─────────────────────────────────────────────────────────
+    agent = HospitalVoiceAgent(
+        system_prompt=system_prompt,
+        greeting=greeting,
+        tools=tools,
+        sensory=sensory,
+        hospital_id=hospital_id,
+        caller_phone=caller_phone,
+        call_id=call_id,
+        hospital_name=hospital_name,
+        call_started_at=call_started_at,
     )
 
-    llm = openai.LLM(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=os.getenv("GROQ_API_KEY", ""),
-        model="llama-3.3-70b-versatile",
-        max_tokens=_LLM_MAX_TOKENS,
-    )
+    session = AgentSession(userdata=session_data)
 
-    tts = sarvam.TTS(
-        api_key=os.getenv("SARVAM_API_KEY", ""),
-        model="bulbul:v3",
-        target_language_code="ml-IN",
-        speaker="shubh",
-    )
-
-    session = AgentSession(vad=vad, stt=stt, llm=llm, tts=tts)
-
-    # Store session state so tools can access it via context.userdata
-    try:
-        session.userdata["hospital_id"]   = hospital_id
-        session.userdata["hospital_ctx"]  = hospital_ctx
-        session.userdata["hospital_name"] = hospital_name
-        session.userdata["caller_phone"]  = caller_phone
-        session.userdata["call_id"]       = call_id
-        session.userdata["transfer_requested"] = False
-        session.userdata["transfer_destination"] = ""
-    except AttributeError:
-        pass   # userdata API might differ slightly between LiveKit versions
-
-    # Clinics: skip outbound-heavy tools (follow-ups, confirmations not needed)
-    from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
-    tools = CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS
-
-    agent = Agent(instructions=system_prompt, tools=tools)
-
-    # ── Intercept transcript for acoustic metadata + DTMF + context trim ───
-
-    @session.on("user_speech_finished")
-    def _on_speech(event):
-        text = event.text or ""
-
-        # DTMF simulation: single-digit utterance → synthetic phrase
-        stripped = text.strip()
-        if stripped in _DTMF:
-            event.text = _DTMF[stripped]
-            print(f"[arteq] DTMF '{stripped}' → '{event.text}'")
-            sensory.reset()
-            return
-
-        # Prepend acoustic metadata (only when noteworthy)
-        meta = sensory.metadata()
-        sensory.reset()
-        if meta:
-            event.text = f"{meta}\n{text}"
-            print(f"[arteq] acoustic: {meta}")
-
-        # Context pruning: keep system prompt (msg[0]) + last N messages
-        try:
-            msgs = session.chat_ctx.messages
-            if len(msgs) > _MAX_CTX + 1:
-                session.chat_ctx.messages = msgs[:1] + msgs[-_MAX_CTX:]
-        except Exception:
-            pass
-
-    await session.start(agent=agent, room=ctx.room)
-
-    # ── Opening greeting ───────────────────────────────────────────────────
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context)
-    await session.generate_reply(instructions=f"Say exactly: {greeting!r}")
-
-    # ── Post-call side effects (on session end) ───────────────────────────
-    # LiveKit EventEmitter rejects async callbacks; wrap in a sync handler
-    # that schedules the async work. Event name is "close" (not "agent_stopped").
-    async def _on_end_async():
+    # ── Post-call cleanup ─────────────────────────────────────────────────────
+    async def _on_end_async(_event=None):
         try:
             ended_at = datetime.now(timezone.utc)
-
-            # Count conversation turns (user+assistant pairs, excluding system prompt)
             total_turns = 0
             try:
-                msgs = session.chat_ctx.messages
+                msgs = session.history.messages
                 non_sys = [m for m in msgs if getattr(m, "role", "") != "system"]
                 total_turns = len(non_sys) // 2
             except Exception:
                 pass
 
-            transfer_dest = session.userdata.get("transfer_destination", "")
+            ud = session_data
+            transfer_dest = ud.get("transfer_destination", "")
             if transfer_dest:
-                print(f"[arteq] call ended — transfer requested to {transfer_dest}")
+                print(f"[arteq] call ended — transfer to {transfer_dest}")
 
-            # Write call log to DB
             try:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
@@ -544,9 +539,7 @@ async def session_handler(ctx: JobContext) -> None:
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
 
-            # Post-call summary SMS (if opt-in enabled)
-            from src.config.settings import settings as s
-            if getattr(s, "POST_CALL_SMS_ENABLED", False) and caller_phone:
+            if getattr(settings, "POST_CALL_SMS_ENABLED", False) and caller_phone:
                 from src.services.sms_service import SMSService
                 await SMSService().send_call_summary(
                     phone=caller_phone,
@@ -554,22 +547,22 @@ async def session_handler(ctx: JobContext) -> None:
                     summary="Thank you for calling. Arya was happy to help.",
                 )
 
-            # Staff call summary alert
             from src.services.staff_alert import StaffAlertService
+            outcome_str = transfer_dest or "completed"
             await StaffAlertService().alert_call_summary(
                 patient_phone=caller_phone or "unknown",
-                turns=0,
-                outcome=transfer_dest or "completed",
+                turns=total_turns,
+                outcome=outcome_str,
                 summary="",
                 call_id=call_id,
             )
         except Exception as exc:
             print(f"[arteq] post-call cleanup error: {exc}", file=sys.stderr)
 
-    @session.on("close")
-    def _on_end(_event=None):
-        asyncio.ensure_future(_on_end_async())
+    session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
+
+    await session.start(agent=agent, room=ctx.room)
 
 
 if __name__ == "__main__":
-    cli.run_app(server)
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))

@@ -1285,6 +1285,112 @@ async def sip_setup():
     }
 
 
+# ── HIS Integration ──────────────────────────────────────────────────────────
+
+class HisConfigBody(BaseModel):
+    enabled: bool = False
+    type: str = "generic_rest"       # "generic_rest" | "fhir"
+    base_url: str = ""
+    auth: Optional[dict] = None      # {"type": "bearer"|"api_key"|"basic", "value": "..."}
+    endpoints: Optional[dict] = None  # for generic_rest
+    field_map: Optional[dict] = None  # for generic_rest
+    practitioner_map: Optional[dict] = None  # for fhir
+    timeout_seconds: Optional[int] = 8
+
+
+@router.get("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
+async def get_his_config(hospital_id: str):
+    """Return HIS config for the hospital. Auth value is masked for security."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            "SELECT his_config FROM hospitals WHERE id=$1", hospital_id
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    cfg = _maybe_json(row["his_config"]) or {}
+    # Mask the auth value so it never leaves the server in plaintext
+    if cfg.get("auth", {}).get("value"):
+        cfg = {**cfg, "auth": {**cfg["auth"], "value": "••••••••"}}
+    return cfg or {"enabled": False}
+
+
+@router.put("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
+async def update_his_config(hospital_id: str, body: HisConfigBody):
+    """Save HIS config. Auth value of '••••••••' preserves the existing stored secret."""
+    pool = await _db()
+
+    # If the masked sentinel is sent back, keep the existing auth value
+    existing_auth_value = None
+    if body.auth and body.auth.get("value") == "••••••••":
+        async with pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT his_config FROM hospitals WHERE id=$1", hospital_id
+            )
+        existing_cfg = _maybe_json(row["his_config"] if row else None) or {}
+        existing_auth_value = existing_cfg.get("auth", {}).get("value", "")
+
+    cfg: dict = {
+        "enabled": body.enabled,
+        "type": body.type,
+        "base_url": body.base_url,
+        "timeout_seconds": body.timeout_seconds or 8,
+    }
+    auth = body.auth or {}
+    if existing_auth_value is not None:
+        auth = {**auth, "value": existing_auth_value}
+    cfg["auth"] = auth
+
+    if body.endpoints is not None:
+        cfg["endpoints"] = body.endpoints
+    if body.field_map is not None:
+        cfg["field_map"] = body.field_map
+    if body.practitioner_map is not None:
+        cfg["practitioner_map"] = body.practitioner_map
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE hospitals SET his_config=$1 WHERE id=$2",
+            json.dumps(cfg), hospital_id,
+        )
+
+    # Bust in-process adapter cache
+    try:
+        from src.integrations.his.service import invalidate_his_cache
+        invalidate_his_cache(hospital_id)
+    except Exception:
+        pass
+
+    _invalidate(hospital_id)
+    return {"status": "updated"}
+
+
+@router.get("/hospitals/{hospital_id}/his-status", dependencies=[Depends(_require_auth)])
+async def get_his_status(hospital_id: str):
+    """Return HIS connectivity status (reachable / not configured / etc.)."""
+    try:
+        from src.integrations.his.service import his_status
+        return await his_status(hospital_id)
+    except Exception as exc:
+        return {"configured": False, "enabled": False, "reachable": False, "error": str(exc)}
+
+
+@router.post("/hospitals/{hospital_id}/his-config/test", dependencies=[Depends(_require_auth)])
+async def test_his_connection(hospital_id: str):
+    """Ping the HIS endpoint to verify connectivity."""
+    try:
+        from src.integrations.his.service import get_his_adapter, invalidate_his_cache
+        # Force reload so we test with the latest saved config
+        invalidate_his_cache(hospital_id)
+        his = await get_his_adapter(hospital_id)
+        if not his:
+            return {"reachable": False, "reason": "HIS not configured or not enabled"}
+        reachable = await his.ping()
+        return {"reachable": reachable}
+    except Exception as exc:
+        return {"reachable": False, "reason": str(exc)}
+
+
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _maybe_json(value):

@@ -68,32 +68,40 @@ def named_dow_to_db(name: str) -> Optional[int]:
 # ── Connection pool ──────────────────────────────────────────────────────────
 
 _pool: Optional[asyncpg.Pool] = None
-_pool_lock = asyncio.Lock()   # prevents duplicate pool creation under concurrent start
+_pool_lock = asyncio.Lock()
+_pool_failed = False   # fail-fast after first connection failure
 
 
 async def get_pool() -> asyncpg.Pool:
-    global _pool
+    global _pool, _pool_failed
     if _pool is not None:
         return _pool
+    if _pool_failed:
+        raise RuntimeError("Database unavailable (connection failed at startup)")
     async with _pool_lock:
-        if _pool is None:   # re-check after acquiring — another coroutine may have created it
-            url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
-            _pool = await asyncpg.create_pool(
-                url,
-                min_size=1,
-                max_size=10,            # Render free tier holds ~10 conn comfortably
-                command_timeout=30,     # cold-start Supabase queries can be slow
-                ssl="require",
-                timeout=20,             # per-connection connect timeout
-            )
+        if _pool is None and not _pool_failed:
+            try:
+                url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
+                _pool = await asyncpg.create_pool(
+                    url,
+                    min_size=1,
+                    max_size=10,
+                    command_timeout=30,
+                    ssl="require",
+                    timeout=20,
+                )
+            except Exception:
+                _pool_failed = True
+                raise
     return _pool
 
 
 async def close_pool() -> None:
-    global _pool
+    global _pool, _pool_failed
     if _pool:
         await _pool.close()
         _pool = None
+    _pool_failed = False
 
 
 # ── Typed result objects ─────────────────────────────────────────────────────
@@ -413,6 +421,7 @@ async def create_appointment(
     slot_time: Optional[datetime],
     notes: str,
     call_id: str,
+    his_appointment_id: Optional[str] = None,
 ) -> str:
     """Insert a new appointment; returns the new UUID as a string.
 
@@ -437,8 +446,8 @@ async def create_appointment(
         row = await conn.fetchrow(
             """INSERT INTO appointments
                (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
-                slot_time, notes, call_id, status, reminder_sent)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false)
+                slot_time, notes, call_id, status, reminder_sent, his_appointment_id)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9)
                RETURNING id""",
             hospital_id,
             patient_name,
@@ -448,6 +457,7 @@ async def create_appointment(
             slot_time,
             notes or "",
             call_id,
+            his_appointment_id,
         )
     return str(row["id"])
 
@@ -495,6 +505,7 @@ async def get_appointments_by_phone(
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT a.id, a.patient_name, a.slot_time, a.status,
+                      a.his_appointment_id,
                       d.name AS doctor_name, dep.name AS dept_name
                FROM appointments a
                LEFT JOIN doctors d ON a.doctor_id = d.id

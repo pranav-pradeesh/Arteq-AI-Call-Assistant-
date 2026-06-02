@@ -89,6 +89,27 @@ try:
         doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
         slot = _parse_slot(appointment_date, appointment_time)
 
+        # Try HIS first (if configured). Failure falls through to local DB only.
+        his_appt_id: Optional[str] = None
+        try:
+            from src.integrations.his.service import get_his_adapter
+            his = await get_his_adapter(hospital_id)
+            if his:
+                patient = await his.search_patient(caller_phone)
+                his_patient_id = patient["his_patient_id"] if patient else None
+                his_appt_id = await his.create_appointment(
+                    his_patient_id=his_patient_id,
+                    patient_name=patient_name,
+                    patient_phone=caller_phone,
+                    his_doctor_id=doctor_id or doctor_name,
+                    appointment_date=appointment_date,
+                    appointment_time=appointment_time,
+                    notes=notes,
+                )
+                logger.info("his_appointment_created", his_appt_id=his_appt_id)
+        except Exception as exc:
+            logger.warning("his_book_failed_fallback_to_db", error=str(exc))
+
         try:
             from src.db.queries import create_appointment
             appt_id = await create_appointment(
@@ -100,8 +121,10 @@ try:
                 slot_time=slot,
                 notes=notes,
                 call_id=call_id,
+                his_appointment_id=his_appt_id,
             )
-            logger.info("tool_book_appointment", appt_id=appt_id, doctor=resolved_name)
+            logger.info("tool_book_appointment", appt_id=appt_id, doctor=resolved_name,
+                        his_synced=bool(his_appt_id))
         except Exception as exc:
             logger.error("tool_book_appointment_failed", error=str(exc))
             return "Booking system temporarily unavailable — please call the front desk."
@@ -171,6 +194,18 @@ try:
                     if doctor_name.lower() in (a.get("doctor_name") or "").lower():
                         target = a
                         break
+
+            # Cancel in HIS if appointment was synced there
+            his_appt_id = target.get("his_appointment_id")
+            if his_appt_id:
+                try:
+                    from src.integrations.his.service import get_his_adapter
+                    his = await get_his_adapter(hospital_id)
+                    if his:
+                        await his.cancel_appointment(his_appt_id)
+                        logger.info("his_appointment_cancelled", his_appt_id=his_appt_id)
+                except Exception as exc:
+                    logger.warning("his_cancel_failed", error=str(exc))
 
             ok = await cancel_appointment_by_id(str(target["id"]), hospital_id)
             if not ok:

@@ -546,6 +546,146 @@
       </div>
     </div>
 
+    <!-- ── HIS CONNECT ── -->
+    <div x-show="tab==='his' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <div>
+          <h1 class="text-xl font-semibold text-gray-900">HIS Integration</h1>
+          <p class="text-sm text-gray-500 mt-1">Connect to any Hospital Information System (Meditech, Epic, Cerner, ABDM, or custom REST API)</p>
+        </div>
+        <div class="flex gap-2">
+          <button @click="testHisConnection()" class="btn-secondary text-xs">Test Connection</button>
+          <button @click="saveHisConfig()" class="btn-primary">Save Config</button>
+        </div>
+      </div>
+
+      <!-- HIS status banner -->
+      <template x-if="hisStatus">
+        <div class="mb-4 px-4 py-3 rounded-lg border text-sm font-medium"
+          :class="hisStatus.reachable===true ? 'bg-green-50 border-green-200 text-green-800' : hisStatus.reachable===false && hisStatus.configured ? 'bg-red-50 border-red-200 text-red-800' : 'bg-gray-50 border-gray-200 text-gray-600'">
+          <span x-text="hisStatus.reachable===true ? '✅ HIS reachable — ' + (hisStatus.type||'') : hisStatus.reachable===false && hisStatus.configured ? '❌ HIS unreachable (check URL / credentials)' : 'ℹ HIS not configured'"></span>
+        </div>
+      </template>
+
+      <div class="grid grid-cols-1 gap-5 max-w-4xl">
+
+        <!-- Basic settings -->
+        <div class="card">
+          <h2 class="font-medium text-gray-900 mb-4">Basic Settings</h2>
+          <div class="space-y-4">
+            <div class="flex items-center gap-3">
+              <input type="checkbox" x-model="hisForm.enabled" class="rounded">
+              <div>
+                <label class="text-sm font-medium text-gray-700">Enable HIS Integration</label>
+                <p class="text-xs text-gray-400">When enabled, bookings and cancellations sync to the HIS in real time. Falls back to local DB if HIS is unreachable.</p>
+              </div>
+            </div>
+            <div>
+              <label class="label">Integration Type</label>
+              <select x-model="hisForm.type" class="input">
+                <option value="generic_rest">Generic REST API (any HIS with a REST API)</option>
+                <option value="fhir">HL7 FHIR R4 (Meditech, Epic, Cerner, ABDM/ABHA)</option>
+              </select>
+            </div>
+            <div>
+              <label class="label">Base URL</label>
+              <input x-model="hisForm.base_url" class="input font-mono" placeholder="https://api.their-his.com/v1">
+              <p class="text-xs text-gray-400 mt-1">No trailing slash. For FHIR: use the FHIR R4 root, e.g. https://fhir.their-his.com/fhir/R4</p>
+            </div>
+            <div>
+              <label class="label">Timeout (seconds)</label>
+              <input type="number" x-model.number="hisForm.timeout_seconds" class="input w-24" min="1" max="30">
+            </div>
+          </div>
+        </div>
+
+        <!-- Auth -->
+        <div class="card">
+          <h2 class="font-medium text-gray-900 mb-4">Authentication</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="label">Auth Type</label>
+              <select x-model="hisForm.auth.type" class="input">
+                <option value="bearer">Bearer Token</option>
+                <option value="api_key">API Key Header</option>
+                <option value="basic">HTTP Basic (user:pass as base64)</option>
+              </select>
+            </div>
+            <div>
+              <label class="label" x-text="hisForm.auth.type==='api_key' ? 'API Key Value' : hisForm.auth.type==='basic' ? 'user:password (plain — will be base64-encoded)' : 'Bearer Token'"></label>
+              <input x-model="hisForm.auth.value" class="input font-mono" type="password" placeholder="Paste token / key here (leave ••• to keep existing)">
+            </div>
+            <div x-show="hisForm.auth.type==='api_key'">
+              <label class="label">Header Name</label>
+              <input x-model="hisForm.auth.header" class="input font-mono" placeholder="X-Api-Key">
+            </div>
+          </div>
+        </div>
+
+        <!-- Generic REST endpoints (shown only for generic_rest) -->
+        <div class="card" x-show="hisForm.type==='generic_rest'">
+          <h2 class="font-medium text-gray-900 mb-1">Endpoint Templates</h2>
+          <p class="text-xs text-gray-400 mb-4">Use <code>{phone}</code>, <code>{doctor_id}</code>, <code>{date}</code>, <code>{appointment_id}</code> as placeholders.</p>
+          <div class="space-y-3">
+            <div>
+              <label class="label text-xs">Search Patient</label>
+              <input x-model="hisForm.endpoints.search_patient" class="input font-mono text-sm" placeholder="GET /patients?phone={phone}">
+            </div>
+            <div>
+              <label class="label text-xs">Get Available Slots</label>
+              <input x-model="hisForm.endpoints.get_slots" class="input font-mono text-sm" placeholder="GET /doctors/{doctor_id}/slots?date={date}">
+            </div>
+            <div>
+              <label class="label text-xs">Create Appointment</label>
+              <input x-model="hisForm.endpoints.create_appointment" class="input font-mono text-sm" placeholder="POST /appointments">
+            </div>
+            <div>
+              <label class="label text-xs">Cancel Appointment</label>
+              <input x-model="hisForm.endpoints.cancel_appointment" class="input font-mono text-sm" placeholder="POST /appointments/{appointment_id}/cancel">
+            </div>
+          </div>
+        </div>
+
+        <!-- Field mapping (generic_rest) -->
+        <div class="card" x-show="hisForm.type==='generic_rest'">
+          <h2 class="font-medium text-gray-900 mb-1">Field Name Mapping</h2>
+          <p class="text-xs text-gray-400 mb-4">Map our internal field names to the field names your HIS API uses. Leave blank to use the same name.</p>
+          <div class="grid grid-cols-2 gap-3 text-sm">
+            <template x-for="key in ['his_patient_id','patient_name','patient_phone','his_doctor_id','appointment_date','appointment_time','appointment_id','slots_list_key']" :key="key">
+              <div class="flex items-center gap-2">
+                <span class="text-gray-500 font-mono text-xs w-40 shrink-0" x-text="key"></span>
+                <input class="input text-xs font-mono" :placeholder="key"
+                  :value="hisForm.field_map[key]||''"
+                  @input="hisForm.field_map[key]=$event.target.value||undefined">
+              </div>
+            </template>
+          </div>
+        </div>
+
+        <!-- FHIR practitioner map -->
+        <div class="card" x-show="hisForm.type==='fhir'">
+          <h2 class="font-medium text-gray-900 mb-1">Practitioner Map</h2>
+          <p class="text-xs text-gray-400 mb-4">
+            Map doctor names to FHIR Practitioner IDs. The agent uses fuzzy matching, so partial names work.
+          </p>
+          <div class="space-y-2">
+            <template x-for="(val,key) in hisForm.practitioner_map" :key="key">
+              <div class="flex items-center gap-2">
+                <input class="input text-sm font-mono" :value="key"
+                  @change="hisPractitionerRename(key,$event.target.value,val)">
+                <span class="text-gray-400">→</span>
+                <input class="input text-sm font-mono" :value="val"
+                  @input="hisForm.practitioner_map[key]=$event.target.value">
+                <button @click="delete hisForm.practitioner_map[key]; hisForm.practitioner_map={...hisForm.practitioner_map}" class="text-red-400 hover:text-red-600">✕</button>
+              </div>
+            </template>
+            <button @click="hisForm.practitioner_map={...hisForm.practitioner_map,'Dr. ':''}" class="btn-secondary text-xs mt-1">+ Add Mapping</button>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
     <!-- ── TELEPHONY ── -->
     <div x-show="tab==='telephony' && currentHospital">
       <div class="flex items-center justify-between mb-6">
@@ -841,6 +981,8 @@ function app() {
     appointments: [], apptFilter: '',
     callbacks: [], callbackFilter: '',
     telStatus: null,
+    hisForm: { enabled:false, type:'generic_rest', base_url:'', auth:{ type:'bearer', value:'' }, endpoints:{}, field_map:{}, practitioner_map:{}, timeout_seconds:8 },
+    hisStatus: null,
     hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'' },
     modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
     forms: {
@@ -862,6 +1004,7 @@ function app() {
       { id:'callbacks', icon:'📞', label:'Callbacks' },
       { id:'knowledge', icon:'📚', label:'Knowledge' },
       { id:'telephony', icon:'🔧', label:'Telephony' },
+      { id:'his', icon:'🔗', label:'HIS Connect' },
     ],
     get wsUrl() {
       if (!this.currentHospital) return '';
@@ -923,6 +1066,7 @@ function app() {
         this.loadDepts(), this.loadDoctors(), this.loadBilling(),
         this.loadEmergency(), this.loadFaqs(), this.loadCalls(), this.loadStats(),
         this.loadAppointments(), this.loadCallbacks(), this.loadTelStatus(),
+        this.loadHisConfig(),
       ]);
     },
 
@@ -1203,6 +1347,56 @@ function app() {
 
     copyWsUrl() {
       navigator.clipboard.writeText(this.wsUrl).then(()=>this.notify('WebSocket URL copied'));
+    },
+
+    // ── HIS Integration ───────────────────────────────────────────────────────
+    async loadHisConfig() {
+      try {
+        const cfg = await this.api(`/hospitals/${this.currentHospital.id}/his-config`);
+        if (cfg) {
+          this.hisForm = {
+            enabled: cfg.enabled || false,
+            type: cfg.type || 'generic_rest',
+            base_url: cfg.base_url || '',
+            auth: cfg.auth || { type: 'bearer', value: '' },
+            endpoints: cfg.endpoints || {},
+            field_map: cfg.field_map || {},
+            practitioner_map: cfg.practitioner_map || {},
+            timeout_seconds: cfg.timeout_seconds || 8,
+          };
+        }
+        const status = await this.api(`/hospitals/${this.currentHospital.id}/his-status`);
+        this.hisStatus = status;
+      } catch {}
+    },
+    async saveHisConfig() {
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/his-config`, {
+          method: 'PUT',
+          body: JSON.stringify(this.hisForm),
+        });
+        this.notify('HIS config saved');
+        const status = await this.api(`/hospitals/${this.currentHospital.id}/his-status`);
+        this.hisStatus = status;
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
+    },
+    async testHisConnection() {
+      try {
+        const res = await this.api(`/hospitals/${this.currentHospital.id}/his-config/test`, { method: 'POST' });
+        if (res?.reachable) {
+          this.notify('HIS is reachable');
+        } else {
+          this.notify('HIS not reachable: ' + (res?.reason||'unknown'), 'error');
+        }
+        this.hisStatus = await this.api(`/hospitals/${this.currentHospital.id}/his-status`);
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
+    },
+    hisPractitionerRename(oldKey, newKey, val) {
+      if (oldKey === newKey) return;
+      const m = { ...this.hisForm.practitioner_map };
+      delete m[oldKey];
+      m[newKey] = val;
+      this.hisForm.practitioner_map = m;
     },
   };
 }

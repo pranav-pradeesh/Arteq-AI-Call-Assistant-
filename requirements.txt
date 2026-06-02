@@ -1,42 +1,45 @@
-# Core framework
+# ── Web framework ──────────────────────────────────────────────────────────────
 fastapi==0.111.0
 uvicorn[standard]==0.30.1
 websockets>=13.0,<15.0
 python-multipart==0.0.9
-httpx>=0.28.1,<1.0.0
+jinja2==3.1.4
 
-# Database (asyncpg direct — no ORM)
+# ── Database ───────────────────────────────────────────────────────────────────
 asyncpg==0.29.0
 
-# LLM
-groq>=0.9.0
+# ── HTTP client (HIS adapters + SMS + Plivo) ───────────────────────────────────
+httpx>=0.27.0,<1.0.0
 
-# Validation
+# ── AI / LLM ──────────────────────────────────────────────────────────────────
+groq>=0.9.0,<2.0.0
+
+# ── Data validation ────────────────────────────────────────────────────────────
 pydantic==2.7.1
 pydantic-settings==2.3.0
 
-# Observability
+# ── Auth (dashboard JWT) ───────────────────────────────────────────────────────
+python-jose[cryptography]==3.3.0
+
+# ── Observability ──────────────────────────────────────────────────────────────
 structlog==24.2.0
 prometheus-client==0.20.0
 
-# Utilities
+# ── Utilities ─────────────────────────────────────────────────────────────────
 python-dotenv==1.0.1
 tenacity==8.3.0
 pytz==2024.1
-numpy>=1.26.0
-
-# Dashboard
-jinja2==3.1.4
-python-jose[cryptography]==3.3.0
+numpy>=1.26.0,<3.0.0
 
 # ── LiveKit Voice Agent ────────────────────────────────────────────────────────
-# Pure-AI voice pipeline: VAD → Sarvam STT → Groq LLM → Sarvam TTS
-# Run: python livekit_agent.py dev
-livekit-agents>=1.0.0
-livekit-plugins-openai>=0.1.0    # used for Groq via OpenAI-compatible base_url
-livekit-plugins-sarvam>=0.1.0
-livekit-plugins-silero>=0.1.0
+# Pin agents + all plugins to the SAME minor version to avoid API mismatches.
+# Run: pip install "livekit-agents[sarvam,openai,silero]"
+livekit-agents==1.5.16
+livekit-plugins-openai==1.1.7
+livekit-plugins-sarvam==1.1.7
+livekit-plugins-silero==1.1.7
 
-# Dev / test
+# ── Dev / test ─────────────────────────────────────────────────────────────────
 pytest==8.2.0
 pytest-asyncio==0.23.6
+ruff>=0.4.0
