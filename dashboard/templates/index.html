@@ -246,6 +246,16 @@
           </div>
           <p class="text-xs text-gray-400 mt-3">Leave blank to mark as closed that day.</p>
         </div>
+        <div class="card col-span-2">
+          <h2 class="font-medium text-gray-900 mb-2">Slug &amp; Identity</h2>
+          <div class="space-y-3">
+            <div>
+              <label class="label">URL Slug</label>
+              <input x-model="hospitalForm.slug" class="input font-mono" placeholder="kairali-hospital">
+              <p class="text-xs text-gray-400 mt-1">Used in call routing — lowercase, hyphens only.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -405,6 +415,226 @@
           </tbody>
         </table>
       </div>
+    </div>
+
+    <!-- ── APPOINTMENTS ── -->
+    <div x-show="tab==='appointments' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Appointments</h1>
+        <div class="flex gap-2 items-center">
+          <select x-model="apptFilter" @change="loadAppointments()" class="input text-sm w-40">
+            <option value="">All statuses</option>
+            <option value="requested">Requested</option>
+            <option value="confirmed">Confirmed</option>
+            <option value="cancelled">Cancelled</option>
+            <option value="completed">Completed</option>
+            <option value="no_show">No Show</option>
+          </select>
+          <button @click="loadAppointments()" class="btn-secondary text-xs">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr>
+            <th>Patient</th><th>Phone</th><th>Doctor</th><th>Date</th><th>Time</th><th>Status</th><th>Actions</th>
+          </tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr x-show="appointments.length===0"><td colspan="7" class="text-center py-8 text-gray-400">No appointments found.</td></tr>
+            <template x-for="a in appointments" :key="a.id">
+              <tr class="hover:bg-gray-50">
+                <td class="font-medium text-gray-900" x-text="a.patient_name||'Unknown'"></td>
+                <td class="font-mono text-sm" x-text="a.patient_phone||'—'"></td>
+                <td>
+                  <div x-text="a.doctor_name||'—'"></div>
+                  <div class="text-xs text-gray-400" x-text="a.dept_name||''"></div>
+                </td>
+                <td x-text="a.appointment_date ? new Date(a.appointment_date).toLocaleDateString('en-IN',{day:'2-digit',month:'short',year:'numeric'}) : '—'"></td>
+                <td x-text="a.appointment_time ? a.appointment_time.slice(0,5) : '—'"></td>
+                <td>
+                  <span :class="{
+                    'badge-yellow': a.status==='requested',
+                    'badge-blue': a.status==='confirmed',
+                    'badge-green': a.status==='completed',
+                    'badge-red': a.status==='cancelled'||a.status==='no_show'
+                  }" x-text="a.status||'requested'"></span>
+                </td>
+                <td>
+                  <div class="flex gap-1">
+                    <button x-show="a.status==='requested'" @click="updateApptStatus(a,'confirmed')" class="btn-secondary text-xs py-0.5 px-2">Confirm</button>
+                    <button x-show="a.status!=='cancelled'&&a.status!=='completed'" @click="updateApptStatus(a,'cancelled')" class="btn-danger text-xs py-0.5 px-2">Cancel</button>
+                  </div>
+                </td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── CALLBACKS ── -->
+    <div x-show="tab==='callbacks' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Callback Requests</h1>
+        <div class="flex gap-2 items-center">
+          <select x-model="callbackFilter" @change="loadCallbacks()" class="input text-sm w-40">
+            <option value="">All statuses</option>
+            <option value="pending">Pending</option>
+            <option value="attempted">Attempted</option>
+            <option value="completed">Completed</option>
+            <option value="failed">Failed</option>
+          </select>
+          <button @click="loadCallbacks()" class="btn-secondary text-xs">Refresh</button>
+        </div>
+      </div>
+      <div class="card">
+        <table class="w-full">
+          <thead><tr>
+            <th>Patient</th><th>Phone</th><th>Reason</th><th>Preferred Time</th><th>Status</th><th>Requested At</th><th>Last Attempt</th>
+          </tr></thead>
+          <tbody class="divide-y divide-gray-100">
+            <tr x-show="callbacks.length===0"><td colspan="7" class="text-center py-8 text-gray-400">No callback requests found.</td></tr>
+            <template x-for="cb in callbacks" :key="cb.id">
+              <tr class="hover:bg-gray-50">
+                <td class="font-medium text-gray-900" x-text="cb.patient_name||'Unknown'"></td>
+                <td class="font-mono text-sm" x-text="cb.patient_phone||'—'"></td>
+                <td class="text-gray-500 max-w-xs truncate" x-text="cb.reason||'—'"></td>
+                <td x-text="cb.preferred_time||'—'"></td>
+                <td>
+                  <span :class="{
+                    'badge-yellow': cb.status==='pending',
+                    'badge-blue': cb.status==='attempted',
+                    'badge-green': cb.status==='completed',
+                    'badge-red': cb.status==='failed'
+                  }" x-text="cb.status||'pending'"></span>
+                </td>
+                <td class="text-gray-400 text-xs" x-text="cb.created_at ? new Date(cb.created_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—'"></td>
+                <td class="text-gray-400 text-xs" x-text="cb.attempted_at ? new Date(cb.attempted_at).toLocaleString('en-IN',{day:'2-digit',month:'short',hour:'2-digit',minute:'2-digit'}) : '—'"></td>
+              </tr>
+            </template>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- ── KNOWLEDGE BASE ── -->
+    <div x-show="tab==='knowledge' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Knowledge Base</h1>
+        <button @click="saveKnowledgeBase()" class="btn-primary">Save</button>
+      </div>
+      <div class="card max-w-3xl">
+        <p class="text-sm text-gray-500 mb-4">
+          Add any extra facts, policies, or instructions here. The AI agent will use this
+          context when answering callers. Write in English or Malayalam (or both).
+        </p>
+        <textarea x-model="hospitalForm.knowledge_base" rows="20" class="input font-mono text-sm"
+          placeholder="Examples:&#10;- Parking is available at the rear of the building (₹20/hour).&#10;- COVID booster camp every Saturday 9AM–12PM, Block C.&#10;- For blood test reports call the lab at ext 207.&#10;- ICU visiting hours: 10–11 AM and 6–7 PM only."></textarea>
+        <p class="text-xs text-gray-400 mt-2">
+          The agent reloads this on the next call. Changes take effect within ~5 minutes (cache TTL).
+        </p>
+      </div>
+    </div>
+
+    <!-- ── TELEPHONY ── -->
+    <div x-show="tab==='telephony' && currentHospital">
+      <div class="flex items-center justify-between mb-6">
+        <h1 class="text-xl font-semibold text-gray-900">Telephony Setup</h1>
+        <button @click="loadTelStatus()" class="btn-secondary text-xs">Refresh Status</button>
+      </div>
+
+      <!-- Status banner -->
+      <div x-show="!telStatus" class="card text-center py-8 text-gray-400">Loading telephony status…</div>
+
+      <template x-if="telStatus">
+        <div class="space-y-4">
+
+          <!-- Overall readiness -->
+          <div class="card">
+            <h2 class="font-medium text-gray-900 mb-3">Overall Readiness</h2>
+            <div class="grid grid-cols-2 gap-3 md:grid-cols-4">
+              <div class="flex flex-col items-center p-3 rounded-lg border" :class="telStatus.overall.voice_pipeline_ready?'border-green-200 bg-green-50':'border-red-200 bg-red-50'">
+                <span class="text-lg" x-text="telStatus.overall.voice_pipeline_ready?'✅':'❌'"></span>
+                <span class="text-xs mt-1 font-medium text-gray-700">Voice AI</span>
+              </div>
+              <div class="flex flex-col items-center p-3 rounded-lg border" :class="telStatus.overall.sip_calls_ready?'border-green-200 bg-green-50':'border-red-200 bg-red-50'">
+                <span class="text-lg" x-text="telStatus.overall.sip_calls_ready?'✅':'❌'"></span>
+                <span class="text-xs mt-1 font-medium text-gray-700">SIP / LiveKit</span>
+              </div>
+              <div class="flex flex-col items-center p-3 rounded-lg border" :class="telStatus.overall.inbound_ready?'border-green-200 bg-green-50':'border-red-200 bg-red-50'">
+                <span class="text-lg" x-text="telStatus.overall.inbound_ready?'✅':'❌'"></span>
+                <span class="text-xs mt-1 font-medium text-gray-700">Inbound Calls</span>
+              </div>
+              <div class="flex flex-col items-center p-3 rounded-lg border" :class="telStatus.overall.outbound_ready?'border-green-200 bg-green-50':'border-red-200 bg-red-50'">
+                <span class="text-lg" x-text="telStatus.overall.outbound_ready?'✅':'❌'"></span>
+                <span class="text-xs mt-1 font-medium text-gray-700">Outbound Calls</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Missing env vars -->
+          <div x-show="telStatus.missing.length > 0" class="card border-yellow-200 bg-yellow-50">
+            <h2 class="font-medium text-yellow-800 mb-2">⚠ Missing Environment Variables</h2>
+            <p class="text-sm text-yellow-700 mb-3">Set these in your Render dashboard (Environment → Secret Files) to enable full telephony:</p>
+            <div class="flex flex-wrap gap-2">
+              <template x-for="v in telStatus.missing" :key="v">
+                <code class="px-2 py-1 bg-yellow-100 text-yellow-800 rounded text-xs font-mono" x-text="v"></code>
+              </template>
+            </div>
+          </div>
+
+          <!-- LiveKit -->
+          <div class="card">
+            <h2 class="font-medium text-gray-900 mb-3">LiveKit</h2>
+            <div class="grid grid-cols-2 gap-2 text-sm md:grid-cols-3">
+              <div class="flex items-center gap-2"><span x-text="telStatus.livekit.url?'✅':'❌'"></span> LIVEKIT_URL</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.livekit.api_key?'✅':'❌'"></span> API Key</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.livekit.api_secret?'✅':'❌'"></span> API Secret</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.livekit.sip_outbound_trunk?'✅':'❌'"></span> SIP Outbound Trunk</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.livekit.sip_host?'✅':'❌'"></span> SIP Host</div>
+            </div>
+          </div>
+
+          <!-- Plivo -->
+          <div class="card">
+            <h2 class="font-medium text-gray-900 mb-3">Plivo (Phone Numbers)</h2>
+            <div class="grid grid-cols-2 gap-2 text-sm md:grid-cols-3">
+              <div class="flex items-center gap-2"><span x-text="telStatus.plivo.auth_id?'✅':'❌'"></span> Auth ID</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.plivo.auth_token?'✅':'❌'"></span> Auth Token</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.plivo.phone_number?'✅':'❌'"></span> Account DID</div>
+              <div class="flex items-center gap-2 col-span-2">
+                <span x-text="telStatus.plivo.hospital_did?'✅':'⚠'"></span>
+                <span>Hospital DID: <code class="text-xs font-mono" x-text="telStatus.plivo.hospital_did||'not provisioned'"></code></span>
+              </div>
+            </div>
+          </div>
+
+          <!-- Voice AI -->
+          <div class="card">
+            <h2 class="font-medium text-gray-900 mb-3">Voice AI Pipeline</h2>
+            <div class="grid grid-cols-2 gap-2 text-sm">
+              <div class="flex items-center gap-2"><span x-text="telStatus.voice_ai.sarvam_stt_tts?'✅':'❌'"></span> Sarvam (STT + TTS)</div>
+              <div class="flex items-center gap-2"><span x-text="telStatus.voice_ai.groq_llm?'✅':'❌'"></span> Groq LLM</div>
+            </div>
+          </div>
+
+          <!-- SIP Setup action -->
+          <div class="card">
+            <h2 class="font-medium text-gray-900 mb-2">SIP Trunk Provisioning</h2>
+            <p class="text-sm text-gray-500 mb-4">
+              Run this once after first deploy to create LiveKit SIP trunks and dispatch rules.
+              Requires all LiveKit + Plivo env vars to be set first.
+            </p>
+            <button @click="runSipSetup()" class="btn-primary"
+              :disabled="!telStatus.overall.sip_calls_ready">
+              Run SIP Setup
+            </button>
+            <p x-show="!telStatus.overall.sip_calls_ready" class="text-xs text-gray-400 mt-2">
+              Configure LiveKit and Plivo env vars first, then click Run SIP Setup.
+            </p>
+          </div>
+
+        </div>
+      </template>
     </div>
 
   </main>
@@ -597,7 +827,10 @@ function app() {
     currentHospital: null,
     departments: [], doctors: [], billing: [], emergency: [], faqs: [],
     calls: [], stats: {},
-    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{} },
+    appointments: [], apptFilter: '',
+    callbacks: [], callbackFilter: '',
+    telStatus: null,
+    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'' },
     modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
     forms: {
       hospital: {}, dept: {}, doctor: {}, billing: {}, emergency: {}, faq: {}
@@ -614,6 +847,10 @@ function app() {
       { id:'billing', icon:'💳', label:'Billing' },
       { id:'emergency', icon:'🚨', label:'Emergency' },
       { id:'faqs', icon:'❓', label:'FAQs' },
+      { id:'appointments', icon:'📅', label:'Appointments' },
+      { id:'callbacks', icon:'📞', label:'Callbacks' },
+      { id:'knowledge', icon:'📚', label:'Knowledge' },
+      { id:'telephony', icon:'🔧', label:'Telephony' },
     ],
     get wsUrl() {
       if (!this.currentHospital) return '';
@@ -662,10 +899,19 @@ function app() {
     async selectHospital(h) {
       this.currentHospital = h;
       this.tab = 'overview';
-      this.hospitalForm = { ...h, hours: { ...(h.hours||{}) } };
+      // Fetch full detail (includes knowledge_base) before setting the form
+      try {
+        const full = await this.api(`/hospitals/${h.id}`);
+        if (full) {
+          this.currentHospital = full;
+          h = full;
+        }
+      } catch {}
+      this.hospitalForm = { ...h, hours: { ...(h.hours||{}) }, knowledge_base: h.knowledge_base||'' };
       await Promise.all([
         this.loadDepts(), this.loadDoctors(), this.loadBilling(),
         this.loadEmergency(), this.loadFaqs(), this.loadCalls(), this.loadStats(),
+        this.loadAppointments(), this.loadCallbacks(), this.loadTelStatus(),
       ]);
     },
 
@@ -676,6 +922,47 @@ function app() {
     async loadFaqs() { try { this.faqs = await this.api(`/hospitals/${this.currentHospital.id}/faqs`) || []; } catch {} },
     async loadCalls() { try { this.calls = await this.api(`/hospitals/${this.currentHospital.id}/calls?limit=50`) || []; } catch {} },
     async loadStats() { try { this.stats = await this.api(`/hospitals/${this.currentHospital.id}/stats?days=7`) || {}; } catch {} },
+    async loadAppointments() {
+      try {
+        const qs = this.apptFilter ? `?status=${this.apptFilter}&limit=100` : '?limit=100';
+        this.appointments = await this.api(`/hospitals/${this.currentHospital.id}/appointments${qs}`) || [];
+      } catch {}
+    },
+    async loadCallbacks() {
+      try {
+        const qs = this.callbackFilter ? `?status=${this.callbackFilter}&limit=100` : '?limit=100';
+        this.callbacks = await this.api(`/hospitals/${this.currentHospital.id}/callbacks${qs}`) || [];
+      } catch {}
+    },
+    async loadTelStatus() {
+      try { this.telStatus = await this.api(`/telephony/status?hospital_id=${this.currentHospital.id}`) || null; } catch {}
+    },
+    async updateApptStatus(appt, newStatus) {
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}/appointments/${appt.id}/status`, {
+          method: 'PUT', body: JSON.stringify({ status: newStatus })
+        });
+        this.notify('Appointment status updated');
+        await this.loadAppointments();
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
+    },
+    async saveKnowledgeBase() {
+      try {
+        await this.api(`/hospitals/${this.currentHospital.id}`, {
+          method: 'PUT',
+          body: JSON.stringify({ knowledge_base: this.hospitalForm.knowledge_base })
+        });
+        this.notify('Knowledge base saved');
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
+    },
+    async runSipSetup() {
+      try {
+        const res = await this.api('/sip/setup', { method: 'POST' });
+        this.notify('SIP setup completed');
+        this.telStatus = await this.api(`/telephony/status?hospital_id=${this.currentHospital.id}`) || this.telStatus;
+        return res;
+      } catch(e) { this.notify('Error: '+e.message, 'error'); return null; }
+    },
 
     // ── Hospital ────────────────────────────────────────────────────────────
     openHospitalModal(h=null) {
@@ -715,7 +1002,7 @@ function app() {
         await this.api(`/hospitals/${this.currentHospital.id}`, { method:'PUT', body: JSON.stringify(f) });
         this.currentHospital = { ...this.currentHospital, ...f };
         this.notify('Settings saved');
-      } catch(e) { this.notify('Error: '+e.message,'error'); }
+      } catch(e) { this.notify('Error: '+e.message, 'error'); }
     },
 
     // ── Departments ──────────────────────────────────────────────────────────

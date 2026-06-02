@@ -123,6 +123,7 @@ async def list_hospitals():
             "active": r["active"],
             "slug": r["slug"] or "",
             "plivo_number": r["plivo_number"] or "",
+            "knowledge_base": "",
         }
         for r in rows
     ]
@@ -134,7 +135,7 @@ async def get_hospital(hospital_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number FROM hospitals WHERE id=$1",
+            "slug, plivo_number, knowledge_base FROM hospitals WHERE id=$1",
             hospital_id,
         )
     if not row:
@@ -149,6 +150,7 @@ async def get_hospital(hospital_id: str):
         "active": row["active"],
         "slug": row["slug"] or "",
         "plivo_number": row["plivo_number"] or "",
+        "knowledge_base": row["knowledge_base"] or "",
     }
 
 
@@ -168,6 +170,7 @@ class HospitalUpdate(BaseModel):
     hours: Optional[dict] = None
     active: Optional[bool] = None
     slug: Optional[str] = None
+    knowledge_base: Optional[str] = None
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_auth)])
@@ -212,6 +215,14 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate):
         if body.hours is not None:
             fields.append(f"hours=${i}")
             values.append(json.dumps(body.hours))
+            i += 1
+        if body.slug is not None:
+            fields.append(f"slug=${i}")
+            values.append(body.slug)
+            i += 1
+        if body.knowledge_base is not None:
+            fields.append(f"knowledge_base=${i}")
+            values.append(body.knowledge_base)
             i += 1
         if not fields:
             return {"status": "no_changes"}
@@ -740,6 +751,190 @@ async def get_stats(hospital_id: str, days: int = 7):
     }
 
 
+# ── Appointments ─────────────────────────────────────────────────────────────
+
+@router.get("/hospitals/{hospital_id}/appointments", dependencies=[Depends(_require_auth)])
+async def list_appointments(hospital_id: str, status: str = "", limit: int = 50):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                """SELECT a.id, a.patient_name, a.patient_phone, a.appointment_date,
+                          a.appointment_time, a.status, a.notes, a.created_at,
+                          d.name AS doctor_name, dep.name AS dept_name
+                   FROM appointments a
+                   LEFT JOIN doctors d ON a.doctor_id = d.id
+                   LEFT JOIN departments dep ON d.dept_id = dep.id
+                   WHERE a.hospital_id=$1 AND a.status=$2
+                   ORDER BY a.appointment_date DESC, a.appointment_time DESC
+                   LIMIT $3""",
+                hospital_id, status, min(limit, 200),
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT a.id, a.patient_name, a.patient_phone, a.appointment_date,
+                          a.appointment_time, a.status, a.notes, a.created_at,
+                          d.name AS doctor_name, dep.name AS dept_name
+                   FROM appointments a
+                   LEFT JOIN doctors d ON a.doctor_id = d.id
+                   LEFT JOIN departments dep ON d.dept_id = dep.id
+                   WHERE a.hospital_id=$1
+                   ORDER BY a.appointment_date DESC, a.appointment_time DESC
+                   LIMIT $2""",
+                hospital_id, min(limit, 200),
+            )
+    return [
+        {
+            "id": str(r["id"]),
+            "patient_name": r["patient_name"] or "",
+            "patient_phone": r["patient_phone"] or "",
+            "appointment_date": r["appointment_date"].isoformat() if r["appointment_date"] else None,
+            "appointment_time": str(r["appointment_time"]) if r["appointment_time"] else None,
+            "status": r["status"] or "requested",
+            "notes": r["notes"] or "",
+            "doctor_name": r["doctor_name"] or "",
+            "dept_name": r["dept_name"] or "",
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+class ApptStatusBody(BaseModel):
+    status: str
+
+
+@router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_auth)])
+async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptStatusBody):
+    allowed = {"requested", "confirmed", "cancelled", "completed", "no_show"}
+    if body.status not in allowed:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(allowed))}")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "UPDATE appointments SET status=$1 WHERE id=$2 AND hospital_id=$3",
+            body.status, appt_id, hospital_id,
+        )
+    return {"status": "updated", "appointment_status": body.status}
+
+
+# ── Callbacks ─────────────────────────────────────────────────────────────────
+
+@router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_auth)])
+async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        if status:
+            rows = await conn.fetch(
+                """SELECT id, patient_name, patient_phone, reason, status,
+                          preferred_time, created_at, attempted_at
+                   FROM callback_requests
+                   WHERE hospital_id=$1 AND status=$2
+                   ORDER BY created_at DESC LIMIT $3""",
+                hospital_id, status, min(limit, 200),
+            )
+        else:
+            rows = await conn.fetch(
+                """SELECT id, patient_name, patient_phone, reason, status,
+                          preferred_time, created_at, attempted_at
+                   FROM callback_requests
+                   WHERE hospital_id=$1
+                   ORDER BY created_at DESC LIMIT $2""",
+                hospital_id, min(limit, 200),
+            )
+    return [
+        {
+            "id": str(r["id"]),
+            "patient_name": r["patient_name"] or "",
+            "patient_phone": r["patient_phone"] or "",
+            "reason": r["reason"] or "",
+            "status": r["status"] or "pending",
+            "preferred_time": r["preferred_time"] or "",
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "attempted_at": r["attempted_at"].isoformat() if r["attempted_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+# ── Telephony Status ──────────────────────────────────────────────────────────
+
+@router.get("/telephony/status", dependencies=[Depends(_require_auth)])
+async def telephony_status(hospital_id: str = ""):
+    """
+    Returns the configuration status of each telephony component.
+    Missing env vars show as unconfigured — no errors are raised.
+    """
+    lk_url = bool(getattr(settings, "LIVEKIT_URL", ""))
+    lk_key = bool(getattr(settings, "LIVEKIT_API_KEY", ""))
+    lk_secret = bool(getattr(settings, "LIVEKIT_API_SECRET", ""))
+    sip_outbound = bool(getattr(settings, "LIVEKIT_SIP_OUTBOUND_TRUNK_ID", ""))
+    sip_host = bool(getattr(settings, "LIVEKIT_SIP_HOST", ""))
+    plivo_id = bool(getattr(settings, "PLIVO_AUTH_ID", ""))
+    plivo_token = bool(getattr(settings, "PLIVO_AUTH_TOKEN", ""))
+    plivo_number = bool(getattr(settings, "PLIVO_PHONE_NUMBER", ""))
+    sarvam = bool(getattr(settings, "SARVAM_API_KEY", ""))
+    groq = bool(getattr(settings, "GROQ_API_KEY", ""))
+
+    hospital_plivo_number = ""
+    if hospital_id:
+        try:
+            pool = await _db()
+            async with pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    "SELECT plivo_number FROM hospitals WHERE id=$1", hospital_id
+                )
+            if row:
+                hospital_plivo_number = row["plivo_number"] or ""
+        except Exception:
+            pass
+
+    livekit_ok = lk_url and lk_key and lk_secret
+    plivo_ok = plivo_id and plivo_token and plivo_number
+    sip_ready = livekit_ok and sip_outbound and sip_host
+    voice_ready = sarvam and groq
+
+    return {
+        "livekit": {
+            "configured": livekit_ok,
+            "url": lk_url,
+            "api_key": lk_key,
+            "api_secret": lk_secret,
+            "sip_outbound_trunk": sip_outbound,
+            "sip_host": sip_host,
+        },
+        "plivo": {
+            "configured": plivo_ok,
+            "auth_id": plivo_id,
+            "auth_token": plivo_token,
+            "phone_number": plivo_number,
+            "hospital_did": hospital_plivo_number or None,
+        },
+        "voice_ai": {
+            "configured": voice_ready,
+            "sarvam_stt_tts": sarvam,
+            "groq_llm": groq,
+        },
+        "overall": {
+            "sip_calls_ready": sip_ready and plivo_ok,
+            "voice_pipeline_ready": voice_ready,
+            "inbound_ready": sip_ready and plivo_ok and bool(hospital_plivo_number),
+            "outbound_ready": sip_ready and plivo_ok,
+        },
+        "missing": [
+            k for k, v in {
+                "LIVEKIT_URL": lk_url, "LIVEKIT_API_KEY": lk_key,
+                "LIVEKIT_API_SECRET": lk_secret,
+                "LIVEKIT_SIP_OUTBOUND_TRUNK_ID": sip_outbound,
+                "LIVEKIT_SIP_HOST": sip_host,
+                "PLIVO_AUTH_ID": plivo_id, "PLIVO_AUTH_TOKEN": plivo_token,
+                "PLIVO_PHONE_NUMBER": plivo_number,
+                "SARVAM_API_KEY": sarvam, "GROQ_API_KEY": groq,
+            }.items() if not v
+        ],
+    }
+
+
 # ── Cache Clear ───────────────────────────────────────────────────────────────
 
 @router.post("/hospitals/{hospital_id}/cache/clear", dependencies=[Depends(_require_auth)])
@@ -1021,6 +1216,19 @@ async def sip_setup():
     Requires LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET, PLIVO_AUTH_ID,
     PLIVO_AUTH_TOKEN, PLIVO_PHONE_NUMBER to be set.
     """
+    # Pre-flight: verify required env vars are set
+    missing = [
+        k for k in ("LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+                    "PLIVO_AUTH_ID", "PLIVO_AUTH_TOKEN", "PLIVO_PHONE_NUMBER")
+        if not getattr(settings, k, "")
+    ]
+    if missing:
+        return {
+            "status": "not_configured",
+            "missing_env_vars": missing,
+            "message": "Set the listed environment variables in your hosting platform, then call this endpoint again.",
+        }
+
     try:
         from src.services.livekit_sip import setup_sip_outbound_trunk, setup_hospital_inbound
     except ImportError:

@@ -46,6 +46,7 @@ import asyncio
 import os
 import sys
 import uuid
+from datetime import datetime, timezone
 
 import numpy as np
 from dotenv import load_dotenv
@@ -357,6 +358,7 @@ async def session_handler(ctx: JobContext) -> None:
     await ctx.connect()
     room_name = ctx.room.name
     call_id = str(uuid.uuid4())
+    call_started_at = datetime.now(timezone.utc)
     print(f"[arteq] room={room_name} call_id={call_id[:8]}")
 
     # ── Load hospital context ──────────────────────────────────────────────
@@ -502,9 +504,40 @@ async def session_handler(ctx: JobContext) -> None:
     # that schedules the async work. Event name is "close" (not "agent_stopped").
     async def _on_end_async():
         try:
+            ended_at = datetime.now(timezone.utc)
+
+            # Count conversation turns (user+assistant pairs, excluding system prompt)
+            total_turns = 0
+            try:
+                msgs = session.chat_ctx.messages
+                non_sys = [m for m in msgs if getattr(m, "role", "") != "system"]
+                total_turns = len(non_sys) // 2
+            except Exception:
+                pass
+
             transfer_dest = session.userdata.get("transfer_destination", "")
             if transfer_dest:
                 print(f"[arteq] call ended — transfer requested to {transfer_dest}")
+
+            # Write call log to DB
+            try:
+                from src.db.queries import write_call_log
+                outcome = transfer_dest if transfer_dest else "completed"
+                await write_call_log(
+                    hospital_id=hospital_id,
+                    call_id=call_id,
+                    caller=caller_phone or "unknown",
+                    started_at=call_started_at,
+                    ended_at=ended_at,
+                    total_turns=total_turns,
+                    latency_avg_ms=0,
+                    cost_paise=0,
+                    transcript=[],
+                    intents=[],
+                    outcome=outcome,
+                )
+            except Exception as log_exc:
+                print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
 
             # Post-call summary SMS (if opt-in enabled)
             from src.config.settings import settings as s

@@ -66,6 +66,10 @@ services:
         sync: false
       - key: INTERNAL_API_KEY
         sync: false
+      - key: DASHBOARD_ADMIN_PASSWORD
+        sync: false
+      - key: DASHBOARD_JWT_SECRET
+        sync: false
       - key: LIVEKIT_URL
         sync: false
       - key: LIVEKIT_API_KEY
@@ -73,11 +77,39 @@ services:
       - key: LIVEKIT_API_SECRET
         sync: false
 
-      # Non-secret outbound config
+      # Non-secret outbound / scheduler config
       - key: REMINDERS_ENABLED
         value: "true"
       - key: REMINDER_INTERVAL_SECONDS
         value: "900"
+      - key: CONFIRMATIONS_ENABLED
+        value: "true"
+      - key: CONFIRMATION_LOOP_INTERVAL_SECONDS
+        value: "900"
+      - key: CONFIRMATION_DAYS_MIN
+        value: "1"
+      - key: CONFIRMATION_DAYS_MAX
+        value: "7"
+      - key: CALLBACKS_ENABLED
+        value: "true"
+      - key: CALLBACK_LOOP_INTERVAL_SECONDS
+        value: "300"
+      - key: FOLLOWUPS_ENABLED
+        value: "false"
+      - key: FOLLOWUP_LOOP_INTERVAL_SECONDS
+        value: "3600"
+      - key: FOLLOWUP_DAYS_AFTER
+        value: "3"
+
+      # Staff alerts
+      - key: STAFF_ALERT_ON_BOOKING
+        value: "true"
+      - key: STAFF_ALERT_ON_CANCEL
+        value: "true"
+      - key: STAFF_ALERT_ON_EMERGENCY
+        value: "true"
+      - key: STAFF_ALERT_PHONE
+        sync: false
 
       # Public URL — set AFTER first deploy completes
       - key: PUBLIC_BASE_URL
