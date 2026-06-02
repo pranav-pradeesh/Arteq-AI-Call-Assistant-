@@ -25,11 +25,20 @@ prometheus-client==0.20.0
 python-dotenv==1.0.1
 tenacity==8.3.0
 pytz==2024.1
+numpy>=1.26.0
 
 # Dashboard
 jinja2==3.1.4
 python-jose[cryptography]==3.3.0
 passlib[bcrypt]==1.7.4
+
+# ── LiveKit Voice Agent ────────────────────────────────────────────────────────
+# Pure-AI voice pipeline: VAD → Sarvam STT → Groq LLM → Sarvam TTS
+# Run: python livekit_agent.py dev
+livekit-agents>=1.0.0
+livekit-plugins-openai>=0.1.0    # used for Groq via OpenAI-compatible base_url
+livekit-plugins-sarvam>=0.1.0
+livekit-plugins-silero>=0.1.0
 
 # Dev / test
 pytest==8.2.0

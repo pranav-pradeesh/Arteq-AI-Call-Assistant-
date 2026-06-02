@@ -160,11 +160,48 @@ async def metrics():
     return Response(content=content, media_type=content_type)
 
 
-# ── WebSocket ─────────────────────────────────────────────────────────────────
+# ── WebSocket (Plivo bidirectional stream) ────────────────────────────────────
 
 @app.websocket("/ws/call/{tenant_slug}")
 async def websocket_call_stream(websocket: WebSocket, tenant_slug: str):
     await handle_exotel_stream(websocket, tenant_slug)
+
+
+# ── LiveKit token endpoint ────────────────────────────────────────────────────
+# A browser (or mobile app) calls this to get a short-lived JWT that lets it
+# join a LiveKit room. The room name = hospital slug, so the agent loads the
+# right hospital context automatically.
+
+@app.get("/api/v1/livekit/token")
+async def livekit_token(slug: str = "default", participant: str = "patient"):
+    """
+    Returns a LiveKit access token for the given hospital room.
+    The browser uses this token to connect to LiveKit and talk to Arya.
+    """
+    if not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=503, detail="LiveKit not configured")
+
+    try:
+        from livekit.api import AccessToken, VideoGrants
+        token = (
+            AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
+            .with_identity(participant)
+            .with_name(participant)
+            .with_grants(
+                VideoGrants(
+                    room_join=True,
+                    room=slug,
+                    can_publish=True,
+                    can_subscribe=True,
+                )
+            )
+            .to_jwt()
+        )
+        return {"token": token, "room": slug, "url": settings.LIVEKIT_URL}
+    except Exception as e:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")
 
 
 # ── Exotel call webhook ───────────────────────────────────────────────────────

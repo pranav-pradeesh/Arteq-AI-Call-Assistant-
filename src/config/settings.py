@@ -29,6 +29,11 @@ class Settings(BaseSettings):
     PLIVO_AUTH_TOKEN: str = ""
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
+    # LiveKit — pure-AI voice agent (no telephony required)
+    LIVEKIT_URL: str = ""          # wss://your-project.livekit.cloud
+    LIVEKIT_API_KEY: str = ""
+    LIVEKIT_API_SECRET: str = ""
+
     @model_validator(mode="after")
     def _auto_detect_render_url(self) -> "Settings":
         """On Render, RENDER_EXTERNAL_URL is injected automatically.
