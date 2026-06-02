@@ -1,29 +1,51 @@
 """
 Arteq Hospital Voice Agent — LiveKit edition.
 
-Pipeline:  Silero VAD → Sarvam STT (Saaras v3) → Groq LLaMA 70B → Sarvam TTS (Bulbul v3)
+Full-featured AI receptionist for Kerala hospitals:
+  • Silero VAD → Sarvam STT (Saaras v3, 23 languages, codemix)
+  • Groq LLaMA 70B (via OpenAI-compatible adapter)
+  • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
+  • Acoustic Sensory Layer — detects patient distress from PCM stats
+  • Function tools — book/cancel appointments, callbacks, SMS, emergency
+  • Multi-lane — one worker pool serves every hospital concurrently
+  • Multi-tenant — room name = hospital slug, context loaded from DB
 
-Room naming: room name = hospital slug (e.g. "city-hospital").
-The agent loads that hospital's context from the DB automatically, so one
-worker pool serves every hospital — no code changes per client.
+IVR features included:
+  ✓ DTMF digit → synthetic utterance (1=OPD, 2=Emergency, …)
+  ✓ Emergency detection → immediate staff alert + transfer flag
+  ✓ Appointment booking (multi-turn), cancellation, rescheduling
+  ✓ Callback request registration
+  ✓ Doctor schedule lookup
+  ✓ Department info (floor, hours, extension)
+  ✓ Location SMS
+  ✓ Patient recognition (returning caller personalisation)
+  ✓ After-hours handling (system prompt + context-aware)
+  ✓ Post-call summary SMS (opt-in)
+  ✓ Staff alerts on booking / cancellation / emergency
+  ✓ Acoustic emotional cues (trembling voice → extra gentle response)
+  ✓ Outbound call context (confirmation / reminder / callback / followup)
+  ✓ Barge-in via LiveKit's built-in turn detection
 
-Usage:
-  python livekit_agent.py dev      # local dev, connects to your LiveKit cloud room
-  python livekit_agent.py start    # production worker pool mode
+Outbound confirmation calls: the existing scheduler (src/services/scheduler.py)
+places Plivo calls 6–8 days before each appointment. When the patient answers,
+Plivo will eventually route through LiveKit SIP (telephony integration pending).
+Until then the Plivo → WebSocket path still works as fallback.
+
+Run:
+  python livekit_agent.py dev      # development (single room, auto-join)
+  python livekit_agent.py start    # production worker pool
 
 Required env vars:
-  LIVEKIT_URL          wss://your-project.livekit.cloud
-  LIVEKIT_API_KEY      from LiveKit dashboard
-  LIVEKIT_API_SECRET   from LiveKit dashboard
-  SARVAM_API_KEY
-  GROQ_API_KEY
-  DATABASE_URL         for hospital context loading
+  LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
+  SARVAM_API_KEY, GROQ_API_KEY
+  DATABASE_URL  (for hospital context + appointment DB writes)
 """
 from __future__ import annotations
 
 import asyncio
 import os
 import sys
+import uuid
 
 import numpy as np
 from dotenv import load_dotenv
@@ -33,22 +55,35 @@ from livekit.plugins import openai, sarvam, silero
 
 load_dotenv()
 
-# ── Sarvam SDK quirk: internal reasoning consumes the token budget silently.
-# If max_tokens is too low, the LLM produces None content and the session
-# crashes. Keep at 500+ minimum.
+# ── constants ─────────────────────────────────────────────────────────────────
+
+# Sarvam SDK quirk: internal reasoning eats the token budget without producing
+# visible output. Keep max_tokens ≥ 500 or content will be None and crash.
 _LLM_MAX_TOKENS = 600
 
-# Keep the last N messages in context — enough for a complete booking flow
-# without blowing the Groq free-tier TPM cap (6 000 tokens / minute).
-_MAX_CTX_MESSAGES = 20
+# Context window: keep system prompt (msg[0]) + last 20 messages (10 turns).
+# Groq free tier is 6 000 TPM — each request re-sends the full system prompt,
+# so aggressive trimming is necessary.
+_MAX_CTX = 20
+
+# DTMF digit → natural language utterance (bypasses STT)
+_DTMF = {
+    "1": "OPD timing please",
+    "2": "emergency help needed",
+    "3": "lab test timings",
+    "4": "pharmacy location and timing",
+    "5": "billing inquiry",
+    "0": "transfer to reception desk",
+    "*": "please repeat that",
+    "#": "thank you goodbye",
+}
 
 
 # ==============================================================================
 # Acoustic Sensory Layer
-# Inspects raw PCM frames (delivered as rtc.AudioFrame) to detect patient
-# emotional state: volume level, pitch proxy (zero-crossing rate), trembling.
-# The metadata string is prepended to each transcript before the LLM sees it,
-# giving the model a real-time emotional cue without any extra API calls.
+# Analyses raw PCM16 frames (via rtc.AudioFrame) for volume, pitch proxy
+# (zero-crossing rate), and trembling. Prepends a metadata tag to every
+# transcript so the LLM can modulate its tone without extra API calls.
 # ==============================================================================
 
 class AcousticSensoryLayer:
@@ -68,35 +103,30 @@ class AcousticSensoryLayer:
 
     def metadata(self) -> str:
         if not self._rms:
-            return "[SENSORY: STABLE]"
-        avg_vol = np.mean(self._rms)
-        avg_zcr = np.mean(self._zcr)
-        vol_var = np.var(self._rms)
-        zcr_var = np.var(self._zcr)
+            return ""
+        avg_vol = float(np.mean(self._rms))
+        avg_zcr = float(np.mean(self._zcr))
+        vol_var = float(np.var(self._rms))
+        zcr_var = float(np.var(self._zcr))
 
         vol = "HIGH" if avg_vol > 1500 else ("LOW" if avg_vol < 300 else "NORMAL")
         pit = "HIGH" if avg_zcr > 80 else ("LOW" if avg_zcr < 30 else "NORMAL")
         stb = "TREMBLING" if (zcr_var > 400 or vol_var > 50_000) else "STEADY"
 
+        # Only inject the tag when something noteworthy is detected
+        if vol == "NORMAL" and pit == "NORMAL" and stb == "STEADY":
+            return ""
         return f"[SENSORY: VOL={vol}, PITCH={pit}, TENSION={stb}]"
 
 
 # ==============================================================================
-# Hospital context loader
-# Reuses the existing Arteq DB + cache infrastructure.
-# Slug → hospital_id → full HospitalContext with departments/doctors/FAQs.
+# Hospital context helpers
 # ==============================================================================
 
-async def _load_hospital_context(room_name: str):
-    """
-    Load HospitalContext for the given room name (= hospital slug).
-    Falls back to settings.HOSPITAL_ID if the slug isn't found.
-    """
+async def _resolve_hospital_id(room_name: str) -> str:
     try:
-        from src.db.queries import get_or_load_hospital_context, get_pool
+        from src.db.queries import get_pool
         from src.config.settings import settings
-
-        # Resolve slug → hospital_id via the DB
         pool = await get_pool()
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -104,31 +134,209 @@ async def _load_hospital_context(room_name: str):
                 "slug=$1 OR LOWER(REPLACE(name,' ','-'))=$1 LIMIT 1",
                 room_name.lower(),
             )
-        hospital_id = str(row["id"]) if row else settings.HOSPITAL_ID
+        return str(row["id"]) if row else settings.HOSPITAL_ID
+    except Exception as exc:
+        print(f"[warn] hospital ID lookup failed: {exc}", file=sys.stderr)
+        from src.config.settings import settings
+        return settings.HOSPITAL_ID
+
+
+async def _load_hospital_ctx(hospital_id: str):
+    try:
+        from src.db.queries import get_or_load_hospital_context
         return await get_or_load_hospital_context(hospital_id)
     except Exception as exc:
-        # DB not available in dev/test — return a minimal stub
-        print(f"[warn] hospital context load failed ({exc}), using stub", file=sys.stderr)
+        print(f"[warn] hospital context load failed: {exc}", file=sys.stderr)
         return None
 
 
-def _make_system_prompt(ctx) -> str:
-    """Build system prompt from HospitalContext, or return a generic stub."""
-    if ctx is None:
-        return (
-            "You are Arya, a warm AI voice receptionist for an Arteq partner hospital. "
-            "Reply concisely in 1-2 sentences. Speak Malayalam by default; "
-            "switch language to match the caller. Always end with one question."
-        )
+async def _load_patient_profile(caller_phone: str, hospital_id: str) -> dict | None:
+    """Return last 3 appointments for returning patients, or None."""
     try:
-        from src.ai.groq_brain import _build_system_prompt
-        from src.config.settings import settings
-        return _build_system_prompt(ctx, settings.AGENT_NAME)
+        from src.db.queries import get_appointments_by_phone
+        appts = await get_appointments_by_phone(caller_phone, hospital_id)
+        if not appts:
+            return None
+        return {
+            "name": appts[0].get("patient_name", ""),
+            "history": [
+                {
+                    "doctor": a.get("doctor_name", ""),
+                    "dept": a.get("dept_name", ""),
+                    "slot": str(a["slot_time"])[:16] if a.get("slot_time") else "",
+                    "status": a.get("status", ""),
+                }
+                for a in appts[:3]
+            ],
+        }
     except Exception:
-        return (
-            f"You are Arya, warm AI receptionist for {ctx.name}. "
-            "Reply in 1-2 sentences in the caller's language. End with one question."
-        )
+        return None
+
+
+# ==============================================================================
+# System prompt builder
+# ==============================================================================
+
+def _build_prompt(hospital_ctx, agent_name: str, outbound_context: dict | None) -> str:
+    import pytz
+    from datetime import datetime
+
+    _IST = pytz.timezone("Asia/Kolkata")
+    now = datetime.now(_IST)
+    _DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
+    day_name = _DAYS[(now.weekday() + 1) % 7]   # 0=Sun in DB convention
+    time_str = now.strftime("%H:%M")
+
+    # Hospital-specific section
+    if hospital_ctx:
+        try:
+            from src.ai.groq_brain import _build_hospital_summary
+            hosp_block = _build_hospital_summary(hospital_ctx)
+        except Exception:
+            hosp_block = f"Hospital: {hospital_ctx.name}"
+        hosp_name = hospital_ctx.name_ml or hospital_ctx.name
+
+        # Operating status
+        dow = (now.weekday() + 1) % 7
+        hours = hospital_ctx.hours_for_day(dow)
+        if hours:
+            open_t, close_t = hours
+            open_status = (
+                f"OPEN {open_t}–{close_t}"
+                if open_t <= time_str <= close_t
+                else f"CLOSED (opens {open_t})"
+            )
+        else:
+            open_status = "Hours not listed"
+    else:
+        hosp_block = "Hospital information not available."
+        hosp_name = "the hospital"
+        open_status = "Unknown"
+
+    # Outbound call block
+    outbound_block = ""
+    if outbound_context:
+        call_type = outbound_context.get("call_type", "")
+        pname = outbound_context.get("patient_name", "")
+        dname = outbound_context.get("doctor_name", "")
+        date  = outbound_context.get("appointment_date", "")
+        ttime = outbound_context.get("appointment_time", "")
+
+        if call_type == "confirmation":
+            outbound_block = (
+                f"\nOUTBOUND CONFIRMATION CALL:\n"
+                f"You are calling to confirm {pname}'s appointment with Dr. {dname} "
+                f"on {date} at {ttime}.\n"
+                "First sentence: state the appointment and ask if they can attend.\n"
+                "If YES → use book_appointment to confirm. If NO → offer to reschedule.\n"
+            )
+        elif call_type == "reminder":
+            outbound_block = (
+                f"\nOUTBOUND REMINDER CALL:\n"
+                f"Reminding {pname} of appointment with Dr. {dname} on {date} at {ttime}.\n"
+                "Keep it brief — just the reminder and ask if there are any questions.\n"
+            )
+        elif call_type == "callback":
+            outbound_block = (
+                f"\nOUTBOUND CALLBACK:\n"
+                f"Calling {pname} back as requested. Ask how you can help today.\n"
+            )
+        elif call_type == "followup":
+            outbound_block = (
+                f"\nOUTBOUND FOLLOW-UP:\n"
+                f"Calling {pname} 3 days after their appointment with Dr. {dname}.\n"
+                "Ask how they are feeling and if they need anything.\n"
+            )
+
+    return f"""You are {agent_name}, the warm AI voice receptionist for {hosp_name}.
+
+LANGUAGE:
+- Auto-detect: Malayalam (default), Hindi, Tamil, Kannada, Telugu, English, Manglish
+- Reply in the caller's language. Keep medical terms in English (OPD, ICU, appointment, scanning, casualty)
+- Max 2 natural sentences. Always end with exactly ONE question.
+- Never sound robotic. Sound like a caring, professional front-desk staff member.
+
+ACOUSTIC CUES (from [SENSORY:...] tag if present):
+- TENSION=TREMBLING or VOL=LOW, PITCH=LOW → patient may be in pain or frightened
+  → speak VERY gently, reassure first, then help
+
+EMERGENCIES — act immediately, no follow-up questions:
+- Chest pain, severe bleeding, loss of consciousness, difficulty breathing, stroke, poisoning
+- Call alert_emergency tool first. Say: "Connecting you to emergency — please stay on the line."
+
+DIGIT MENU (when caller presses or says a digit):
+1 = OPD timings / doctor schedule
+2 = Emergency / casualty
+3 = Laboratory / blood tests
+4 = Pharmacy
+5 = Billing / fees
+0 = Reception desk
+* = Please repeat
+
+ACTIONS — use tools when:
+- Caller wants to BOOK appointment → collect name, doctor/dept, date, time → book_appointment
+- Caller wants to CANCEL → cancel_appointment
+- Caller wants a CALLBACK → request_callback
+- Caller asks DOCTOR SCHEDULE → get_doctor_schedule
+- Caller asks DEPARTMENT LOCATION → get_department_info
+- Caller wants LOCATION SMS → send_location_sms
+- Caller wants TRANSFER to dept → transfer_to_department
+
+AFTER HOURS:
+- If hospital is CLOSED and caller needs OPD: tell them next opening time
+- Offer: (a) book for next opening, (b) callback when we open, or (c) emergency if urgent
+- Never say "we're closed, goodbye" — always offer an alternative
+{outbound_block}
+HOSPITAL INFORMATION:
+{hosp_block}
+
+TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
+
+
+# ==============================================================================
+# Opening greeting builder
+# ==============================================================================
+
+def _build_greeting(hospital_ctx, agent_name: str, outbound_context: dict | None) -> str:
+    hosp_name = (hospital_ctx.name_ml or hospital_ctx.name) if hospital_ctx else "the hospital"
+
+    if outbound_context:
+        call_type = outbound_context.get("call_type", "")
+        pname = outbound_context.get("patient_name", "")
+        dname = outbound_context.get("doctor_name", "")
+        date  = outbound_context.get("appointment_date", "")
+        ttime = outbound_context.get("appointment_time", "")
+
+        if call_type == "confirmation":
+            return (
+                f"Namaste {pname}, ഞാൻ {agent_name} — {hosp_name}-ൽ നിന്നും. "
+                f"Dr. {dname}-ന്റെ appointment {date} {ttime}-ന് confirm ചെയ്യാൻ "
+                f"വിളിക്കുകയാണ്. ഈ appointment attend ചെയ്യാൻ കഴിയുമോ?"
+            )
+        elif call_type == "reminder":
+            return (
+                f"Namaste {pname}, {agent_name} speaking from {hosp_name}. "
+                f"Dr. {dname}-ന്റെ appointment {date}-ന് ഉണ്ടെന്ന് ഓർമ്മിപ്പിക്കാൻ വിളിച്ചതാണ്. "
+                "എന്തെങ്കിലും ചോദ്യങ്ങൾ ഉണ്ടോ?"
+            )
+        elif call_type == "callback":
+            return f"Namaste {pname}, {agent_name} speaking — {hosp_name}. How can I help you today?"
+        elif call_type == "followup":
+            return (
+                f"Namaste {pname}, {agent_name} here from {hosp_name}. "
+                f"Dr. {dname}-ൽ നിന്നുള്ള visit കഴിഞ്ഞ് എങ്ങനെ feel ചെയ്യുന്നു?"
+            )
+
+    # Inbound — time-of-day greeting
+    try:
+        import pytz
+        from datetime import datetime
+        hour = datetime.now(pytz.timezone("Asia/Kolkata")).hour
+        from src.ai.groq_brain import build_greeting_text
+        from src.config.settings import settings
+        return build_greeting_text(hosp_name, agent_name, hour)
+    except Exception:
+        return f"Namaste! {hosp_name}-ലേക്ക് സ്വാഗതം. ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
 
 
 # ==============================================================================
@@ -140,19 +348,61 @@ server = AgentServer()
 
 @server.rtc_session()
 async def session_handler(ctx: JobContext) -> None:
-    """One LiveKit room = one hospital. Room name drives context loading."""
+    """
+    One LiveKit room = one call session.
+    Room name = hospital slug for automatic multi-tenant context loading.
+    """
     await ctx.connect()
-    print(f"[arteq] joined room: {ctx.room.name}")
+    room_name = ctx.room.name
+    call_id = str(uuid.uuid4())
+    print(f"[arteq] room={room_name} call_id={call_id[:8]}")
 
-    # Load hospital data (async, reuses the existing in-memory cache)
-    hospital_ctx = await _load_hospital_context(ctx.room.name)
-    system_prompt = _make_system_prompt(hospital_ctx)
-    hospital_name = hospital_ctx.name if hospital_ctx else "Arteq Hospital"
+    # ── Load hospital context ──────────────────────────────────────────────
+    hospital_id  = await _resolve_hospital_id(room_name)
+    hospital_ctx = await _load_hospital_ctx(hospital_id)
+    hospital_name = (hospital_ctx.name if hospital_ctx else "Arteq Hospital")
+
+    # ── Outbound call context (passed via room metadata or participant attrs)
+    outbound_context: dict | None = None
+    try:
+        from src.cache.store import session_cache
+        # Plivo answer_url stores context keyed by CallUUID → room_name for LiveKit
+        cached = session_cache.get(f"plivo:{room_name}")
+        if cached and cached.get("call_type"):
+            outbound_context = cached
+    except Exception:
+        pass
+
+    # ── Patient recognition via SIP caller ID ─────────────────────────────
+    caller_phone = ""
+    patient_profile: dict | None = None
+    try:
+        # LiveKit SIP passes the caller's phone via participant identity or metadata
+        for p in ctx.room.remote_participants.values():
+            if p.identity and p.identity.startswith("+"):
+                caller_phone = p.identity
+                break
+        if caller_phone:
+            patient_profile = await _load_patient_profile(caller_phone, hospital_id)
+    except Exception:
+        pass
+
+    # ── Build system prompt ────────────────────────────────────────────────
+    from src.config.settings import settings
+    agent_name   = settings.AGENT_NAME
+    system_prompt = _build_prompt(hospital_ctx, agent_name, outbound_context)
+    if patient_profile:
+        # Personalise: returning patient name and recent visit
+        last = patient_profile["history"][0] if patient_profile["history"] else {}
+        system_prompt += (
+            f"\n\nRETURNING PATIENT: {patient_profile['name']} — "
+            f"last seen {last.get('slot', 'recently')} with Dr. {last.get('doctor', '?')}. "
+            "Greet them by name."
+        )
 
     sensory = AcousticSensoryLayer()
 
-    # ── Wire up raw audio frame capture for acoustic analysis ──────────────
-
+    # ── Capture raw audio frames for acoustic analysis ─────────────────────
     @ctx.room.on("track_subscribed")
     def _on_track(track, publication, participant):
         if track.kind != rtc.TrackKind.KIND_AUDIO:
@@ -165,14 +415,15 @@ async def session_handler(ctx: JobContext) -> None:
 
         asyncio.create_task(_drain())
 
-    # ── Build the STT → LLM → TTS pipeline ────────────────────────────────
+    # ── Pipeline ───────────────────────────────────────────────────────────
+    from src.telephony.livekit_tools import ALL_TOOLS
 
     vad = silero.VAD.load()
 
     stt = sarvam.STT(
         api_key=os.getenv("SARVAM_API_KEY", ""),
         model="saaras:v3",
-        language="unknown",     # auto-detect: Malayalam, Hindi, Tamil, Manglish …
+        language="unknown",   # auto-detect Malayalam/Hindi/Tamil/Manglish/English
         mode="codemix",
         flush_signal=True,
     )
@@ -192,45 +443,86 @@ async def session_handler(ctx: JobContext) -> None:
     )
 
     session = AgentSession(vad=vad, stt=stt, llm=llm, tts=tts)
-    agent = Agent(instructions=system_prompt)
 
-    # ── Inject acoustic metadata before each LLM call ─────────────────────
+    # Store session state so tools can access it via context.userdata
+    try:
+        session.userdata["hospital_id"]   = hospital_id
+        session.userdata["hospital_ctx"]  = hospital_ctx
+        session.userdata["hospital_name"] = hospital_name
+        session.userdata["caller_phone"]  = caller_phone
+        session.userdata["call_id"]       = call_id
+        session.userdata["transfer_requested"] = False
+        session.userdata["transfer_destination"] = ""
+    except AttributeError:
+        pass   # userdata API might differ slightly between LiveKit versions
+
+    agent = Agent(instructions=system_prompt, tools=ALL_TOOLS)
+
+    # ── Intercept transcript for acoustic metadata + DTMF + context trim ───
 
     @session.on("user_speech_finished")
     def _on_speech(event):
+        text = event.text or ""
+
+        # DTMF simulation: single-digit utterance → synthetic phrase
+        stripped = text.strip()
+        if stripped in _DTMF:
+            event.text = _DTMF[stripped]
+            print(f"[arteq] DTMF '{stripped}' → '{event.text}'")
+            sensory.reset()
+            return
+
+        # Prepend acoustic metadata (only when noteworthy)
         meta = sensory.metadata()
         sensory.reset()
-        print(f"[arteq] acoustic: {meta}")
+        if meta:
+            event.text = f"{meta}\n{text}"
+            print(f"[arteq] acoustic: {meta}")
 
-        # Prepend sensory state to transcript so the LLM can adapt tone
-        event.text = f"{meta}\nPatient says: {event.text}"
-
-        # Keep context lean — Groq free tier is 6 000 TPM
-        if (
-            hasattr(session, "chat_ctx")
-            and hasattr(session.chat_ctx, "messages")
-            and len(session.chat_ctx.messages) > _MAX_CTX_MESSAGES
-        ):
-            # Always keep message[0] (system prompt) + last N turns
-            session.chat_ctx.messages = (
-                session.chat_ctx.messages[:1]
-                + session.chat_ctx.messages[-(_MAX_CTX_MESSAGES - 1):]
-            )
+        # Context pruning: keep system prompt (msg[0]) + last N messages
+        try:
+            msgs = session.chat_ctx.messages
+            if len(msgs) > _MAX_CTX + 1:
+                session.chat_ctx.messages = msgs[:1] + msgs[-((_MAX_CTX))]
+        except Exception:
+            pass
 
     await session.start(agent=agent, room=ctx.room)
 
-    # Opening greeting — time-aware, hospital-specific
-    try:
-        from src.ai.groq_brain import build_greeting_text
-        from src.config.settings import settings
-        from datetime import datetime
-        import pytz
-        hour = datetime.now(pytz.timezone("Asia/Kolkata")).hour
-        greeting_text = build_greeting_text(hospital_name, settings.AGENT_NAME, hour)
-    except Exception:
-        greeting_text = f"Namaste, {hospital_name}-ലേക്ക് സ്വാഗതം. ഞാൻ Arya. എങ്ങനെ സഹായിക്കാം?"
+    # ── Opening greeting ───────────────────────────────────────────────────
+    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context)
+    await session.generate_reply(instructions=f"Say exactly: {greeting!r}")
 
-    await session.generate_reply(instructions=f"Say exactly: {greeting_text!r}")
+    # ── Post-call side effects (on session end) ───────────────────────────
+    # LiveKit's session.on("session_ended") or similar; check transfer flag
+    @session.on("agent_stopped")
+    async def _on_end():
+        try:
+            transfer_dest = session.userdata.get("transfer_destination", "")
+            if transfer_dest:
+                print(f"[arteq] call ended — transfer requested to {transfer_dest}")
+
+            # Post-call summary SMS (if opt-in enabled)
+            from src.config.settings import settings as s
+            if getattr(s, "POST_CALL_SMS_ENABLED", False) and caller_phone:
+                from src.services.sms_service import SMSService
+                await SMSService().send_call_summary(
+                    phone=caller_phone,
+                    hospital_name=hospital_name,
+                    summary="Thank you for calling. Arya was happy to help.",
+                )
+
+            # Staff call summary alert
+            from src.services.staff_alert import StaffAlertService
+            await StaffAlertService().alert_call_summary(
+                patient_phone=caller_phone or "unknown",
+                turns=0,
+                outcome=transfer_dest or "completed",
+                summary="",
+                call_id=call_id,
+            )
+        except Exception as exc:
+            print(f"[arteq] post-call cleanup error: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":

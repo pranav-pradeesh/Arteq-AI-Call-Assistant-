@@ -1,5 +1,5 @@
 """
-SMS Service — sends SMS to patients via Exotel.
+SMS Service — sends SMS to patients via Plivo.
 
 Used for:
 - Hospital location / Google Maps link
@@ -20,9 +20,9 @@ logger = structlog.get_logger(__name__)
 
 
 class SMSService:
-    """Sends SMS messages to patients via Exotel SMS API."""
+    """Sends SMS messages to patients via Plivo SMS API."""
 
-    _SMS_URL = "https://api.exotel.in/v1/Accounts/{sid}/Sms/send.json"
+    _SMS_URL = "https://api.plivo.com/v1/Account/{auth_id}/Message/"
 
     async def send_maps_link(
         self,
@@ -129,26 +129,25 @@ class SMSService:
         return await self._send(phone, message)
 
     async def _send(self, phone: str, message: str) -> bool:
-        """Core send logic — POST to Exotel SMS API."""
-        url = self._SMS_URL.format(sid=settings.EXOTEL_SID)
+        """Core send logic — POST to Plivo SMS API."""
+        if not settings.PLIVO_AUTH_ID or not settings.PLIVO_PHONE_NUMBER:
+            logger.warning("sms_skipped_plivo_not_configured")
+            return False
+        url = self._SMS_URL.format(auth_id=settings.PLIVO_AUTH_ID)
         payload = {
-            "From": settings.EXOTEL_CALLER_ID,
-            "To": phone,
-            "Body": message,
+            "src": settings.PLIVO_PHONE_NUMBER,
+            "dst": phone,
+            "text": message,
         }
         try:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 response = await client.post(
                     url,
-                    data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
+                    json=payload,
+                    auth=(settings.PLIVO_AUTH_ID, settings.PLIVO_AUTH_TOKEN),
                 )
-            if response.status_code == 200:
-                logger.info(
-                    "sms_sent",
-                    phone=phone[:6] + "****",
-                    msg_len=len(message),
-                )
+            if response.status_code in (200, 201, 202):
+                logger.info("sms_sent", phone=phone[:6] + "****", msg_len=len(message))
                 return True
             logger.warning(
                 "sms_failed",
