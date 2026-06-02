@@ -680,9 +680,8 @@ async def get_available_slots(
             """SELECT to_char(start_time,'HH24:MI') AS start,
                       to_char(end_time,'HH24:MI') AS end
                FROM schedules
-               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true
-                 AND hospital_id = $3""",
-            _uuid_mod.UUID(doctor_id), db_dow, hospital_id,
+               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true""",
+            _uuid_mod.UUID(doctor_id), db_dow,
         )
         if not schedule:
             return []
