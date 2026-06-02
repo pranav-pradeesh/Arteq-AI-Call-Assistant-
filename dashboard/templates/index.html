@@ -134,7 +134,10 @@
                 <div class="font-semibold text-gray-900" x-text="h.name"></div>
                 <div class="text-sm text-gray-500" x-text="h.name_ml"></div>
               </div>
-              <span :class="h.active?'badge-green':'badge-red'" x-text="h.active?'Active':'Inactive'"></span>
+              <div class="flex gap-1">
+                <span :class="h.active?'badge-green':'badge-red'" x-text="h.active?'Active':'Inactive'"></span>
+                <span class="badge-blue" x-text="h.tier==='clinic'?'Clinic':'Hospital'"></span>
+              </div>
             </div>
             <div class="text-xs text-gray-400 mb-2" x-text="h.phone || 'No phone'"></div>
             <div class="text-xs text-gray-400" x-text="h.address ? h.address.slice(0,60) : 'No address'"></div>
@@ -247,12 +250,20 @@
           <p class="text-xs text-gray-400 mt-3">Leave blank to mark as closed that day.</p>
         </div>
         <div class="card col-span-2">
-          <h2 class="font-medium text-gray-900 mb-2">Slug &amp; Identity</h2>
-          <div class="space-y-3">
+          <h2 class="font-medium text-gray-900 mb-2">Identity &amp; Tier</h2>
+          <div class="grid grid-cols-2 gap-4">
             <div>
               <label class="label">URL Slug</label>
               <input x-model="hospitalForm.slug" class="input font-mono" placeholder="kairali-hospital">
               <p class="text-xs text-gray-400 mt-1">Used in call routing — lowercase, hyphens only.</p>
+            </div>
+            <div>
+              <label class="label">Tier</label>
+              <select x-model="hospitalForm.tier" class="input">
+                <option value="hospital">Hospital — full features (outbound calls, transfer, all tools)</option>
+                <option value="clinic">Clinic — simplified (booking, schedule, location, emergency only)</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">Clinic tier reduces AI tool set and disables outbound schedulers.</p>
             </div>
           </div>
         </div>
@@ -830,7 +841,7 @@ function app() {
     appointments: [], apptFilter: '',
     callbacks: [], callbackFilter: '',
     telStatus: null,
-    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'' },
+    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'' },
     modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
     forms: {
       hospital: {}, dept: {}, doctor: {}, billing: {}, emergency: {}, faq: {}

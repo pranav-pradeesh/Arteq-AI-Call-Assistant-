@@ -168,6 +168,7 @@ class HospitalContext:
     faqs: list[FaqRow]
     emergency: list[EmergencyContact]
     knowledge_base: str = ""   # free-form staff handbook (parking, insurance, policies, …)
+    tier: str = "hospital"     # "clinic" | "hospital"
     queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
     loaded_at: float = 0.0
 
@@ -313,17 +314,18 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
             for r in emerg_rows
         ]
 
-        # Free-form knowledge base — graceful if the column doesn't exist yet.
-        # asyncpg autocommits each statement, so a missing-column error here
-        # does not poison the connection for the queries already run above.
+        # Free-form knowledge base + tier — graceful if columns don't exist yet.
         knowledge_base = ""
+        tier = "hospital"
         try:
-            kb = await conn.fetchval(
-                "SELECT knowledge_base FROM hospitals WHERE id=$1", hospital_id
+            row = await conn.fetchrow(
+                "SELECT knowledge_base, tier FROM hospitals WHERE id=$1", hospital_id
             )
-            knowledge_base = kb or ""
+            if row:
+                knowledge_base = row["knowledge_base"] or ""
+                tier = row["tier"] or "hospital"
         except Exception:
-            knowledge_base = ""
+            pass
 
     import time
     return HospitalContext(
@@ -339,6 +341,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         faqs=faqs,
         emergency=emergency,
         knowledge_base=knowledge_base,
+        tier=tier,
         loaded_at=time.time(),
     )
 

@@ -420,7 +420,7 @@ try:
         return f"Transferring you to {department}. Please hold."
 
 
-    # Exported list for use in Agent(tools=[...])
+    # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
         cancel_appointment,
@@ -432,7 +432,18 @@ try:
         transfer_to_department,
     ]
 
+    # Reduced tool set for clinic tier (no transfer, no complex routing)
+    CLINIC_TOOLS = [
+        book_appointment,
+        cancel_appointment,
+        request_callback,
+        get_doctor_schedule,
+        send_location_sms,
+        alert_emergency,
+    ]
+
 except ImportError:
     # livekit-agents not installed — tools unavailable (unit-test safe)
     ALL_TOOLS = []
+    CLINIC_TOOLS = []
     logger.warning("livekit_not_installed_tools_unavailable")

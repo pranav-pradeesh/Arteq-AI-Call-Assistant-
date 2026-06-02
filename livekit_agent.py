@@ -365,6 +365,7 @@ async def session_handler(ctx: JobContext) -> None:
     hospital_id  = await _resolve_hospital_id(room_name)
     hospital_ctx = await _load_hospital_ctx(hospital_id)
     hospital_name = (hospital_ctx.name if hospital_ctx else "Arteq Hospital")
+    hospital_tier = getattr(hospital_ctx, "tier", "hospital") if hospital_ctx else "hospital"
 
     # ── Outbound call context (stored in room metadata by dial_outbound()) ──
     outbound_context: dict | None = None
@@ -462,7 +463,11 @@ async def session_handler(ctx: JobContext) -> None:
     except AttributeError:
         pass   # userdata API might differ slightly between LiveKit versions
 
-    agent = Agent(instructions=system_prompt, tools=ALL_TOOLS)
+    # Clinics: skip outbound-heavy tools (follow-ups, confirmations not needed)
+    from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
+    tools = CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS
+
+    agent = Agent(instructions=system_prompt, tools=tools)
 
     # ── Intercept transcript for acoustic metadata + DTMF + context trim ───
 

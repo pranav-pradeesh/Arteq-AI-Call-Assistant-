@@ -110,7 +110,7 @@ async def list_hospitals():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number FROM hospitals ORDER BY name"
+            "slug, plivo_number, tier FROM hospitals ORDER BY name"
         )
     return [
         {
@@ -123,6 +123,7 @@ async def list_hospitals():
             "active": r["active"],
             "slug": r["slug"] or "",
             "plivo_number": r["plivo_number"] or "",
+            "tier": r["tier"] or "hospital",
             "knowledge_base": "",
         }
         for r in rows
@@ -135,7 +136,7 @@ async def get_hospital(hospital_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, knowledge_base FROM hospitals WHERE id=$1",
+            "slug, plivo_number, knowledge_base, tier FROM hospitals WHERE id=$1",
             hospital_id,
         )
     if not row:
@@ -151,6 +152,7 @@ async def get_hospital(hospital_id: str):
         "slug": row["slug"] or "",
         "plivo_number": row["plivo_number"] or "",
         "knowledge_base": row["knowledge_base"] or "",
+        "tier": row["tier"] or "hospital",
     }
 
 
@@ -171,6 +173,7 @@ class HospitalUpdate(BaseModel):
     active: Optional[bool] = None
     slug: Optional[str] = None
     knowledge_base: Optional[str] = None
+    tier: Optional[str] = None    # "clinic" | "hospital"
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_auth)])
@@ -181,9 +184,10 @@ async def create_hospital(body: HospitalUpdate):
     slug = body.slug or _derive_slug(body.name)
     pool = await _db()
     async with pool.acquire() as conn:
+        tier = body.tier if body.tier in ("clinic", "hospital") else "hospital"
         await conn.execute(
-            """INSERT INTO hospitals (id, name, name_ml, address, phone, hours, active, slug)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+            """INSERT INTO hospitals (id, name, name_ml, address, phone, hours, active, slug, tier)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
             new_id,
             body.name,
             body.name_ml or "",
@@ -192,8 +196,9 @@ async def create_hospital(body: HospitalUpdate):
             json.dumps(body.hours or {}),
             True,
             slug,
+            tier,
         )
-    return {"id": new_id, "slug": slug, "status": "created"}
+    return {"id": new_id, "slug": slug, "tier": tier, "status": "created"}
 
 
 @router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
@@ -223,6 +228,12 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate):
         if body.knowledge_base is not None:
             fields.append(f"knowledge_base=${i}")
             values.append(body.knowledge_base)
+            i += 1
+        if body.tier is not None:
+            allowed_tiers = {"clinic", "hospital"}
+            tier_val = body.tier if body.tier in allowed_tiers else "hospital"
+            fields.append(f"tier=${i}")
+            values.append(tier_val)
             i += 1
         if not fields:
             return {"status": "no_changes"}
@@ -994,6 +1005,7 @@ class HospitalWizardIn(BaseModel):
     address: Optional[str] = ""
     phone: Optional[str] = ""
     slug: Optional[str] = None          # auto-derived from name if omitted
+    tier: Optional[str] = "hospital"    # "clinic" | "hospital"
     hours: Optional[dict] = None
     departments: list[_DeptIn] = []
     faqs: list[_FaqIn] = []
@@ -1013,13 +1025,14 @@ async def hospital_wizard(body: HospitalWizardIn):
 
     async with pool.acquire() as conn:
         # Hospital row
+        tier = body.tier if body.tier in ("clinic", "hospital") else "hospital"
         await conn.execute(
             """INSERT INTO hospitals
-               (id, name, name_ml, address, phone, hours, active, slug)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+               (id, name, name_ml, address, phone, hours, active, slug, tier)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
             hospital_id, body.name, body.name_ml or "",
             body.address or "", body.phone or "",
-            json.dumps(body.hours or {}), True, slug,
+            json.dumps(body.hours or {}), True, slug, tier,
         )
 
         # Departments + doctors + schedules
