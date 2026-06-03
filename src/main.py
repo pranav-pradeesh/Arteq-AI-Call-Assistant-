@@ -13,6 +13,7 @@ Routes:
 """
 from __future__ import annotations
 
+import sys
 import uuid
 from contextlib import asynccontextmanager
 
@@ -20,10 +21,14 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from src.config.settings import settings
-from src.db.queries import close_pool, get_pool
-from src.observability.logger import configure_logging, get_logger
-from src.observability.metrics import get_metrics_response
+try:
+    from src.config.settings import settings
+    from src.db.queries import close_pool, get_pool
+    from src.observability.logger import configure_logging, get_logger
+    from src.observability.metrics import get_metrics_response
+except Exception as _import_exc:
+    print(f"\n[ARTEQ FATAL] Import error at startup: {_import_exc}\n", file=sys.stderr, flush=True)
+    raise
 
 logger = get_logger(__name__)
 

@@ -110,7 +110,7 @@ async def list_hospitals():
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, tier FROM hospitals ORDER BY name"
+            "slug, plivo_number, tier, agent_name, agent_language FROM hospitals ORDER BY name"
         )
     return [
         {
@@ -124,6 +124,8 @@ async def list_hospitals():
             "slug": r["slug"] or "",
             "plivo_number": r["plivo_number"] or "",
             "tier": r["tier"] or "hospital",
+            "agent_name": r["agent_name"] or "Arya",
+            "agent_language": r["agent_language"] or "ml-IN",
             "knowledge_base": "",
         }
         for r in rows
@@ -136,7 +138,8 @@ async def get_hospital(hospital_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, knowledge_base, tier FROM hospitals WHERE id=$1",
+            "slug, plivo_number, knowledge_base, tier, agent_name, agent_language "
+            "FROM hospitals WHERE id=$1",
             hospital_id,
         )
     if not row:
@@ -153,6 +156,8 @@ async def get_hospital(hospital_id: str):
         "plivo_number": row["plivo_number"] or "",
         "knowledge_base": row["knowledge_base"] or "",
         "tier": row["tier"] or "hospital",
+        "agent_name": row["agent_name"] or "Arya",
+        "agent_language": row["agent_language"] or "ml-IN",
     }
 
 
@@ -173,7 +178,9 @@ class HospitalUpdate(BaseModel):
     active: Optional[bool] = None
     slug: Optional[str] = None
     knowledge_base: Optional[str] = None
-    tier: Optional[str] = None    # "clinic" | "hospital"
+    tier: Optional[str] = None           # "clinic" | "hospital"
+    agent_name: Optional[str] = None     # AI persona name for this tenant
+    agent_language: Optional[str] = None # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, en-IN
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_auth)])
@@ -186,8 +193,9 @@ async def create_hospital(body: HospitalUpdate):
     async with pool.acquire() as conn:
         tier = body.tier if body.tier in ("clinic", "hospital") else "hospital"
         await conn.execute(
-            """INSERT INTO hospitals (id, name, name_ml, address, phone, hours, active, slug, tier)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+            """INSERT INTO hospitals
+               (id, name, name_ml, address, phone, hours, active, slug, tier, agent_name, agent_language)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
             new_id,
             body.name,
             body.name_ml or "",
@@ -197,6 +205,8 @@ async def create_hospital(body: HospitalUpdate):
             True,
             slug,
             tier,
+            body.agent_name or "Arya",
+            body.agent_language or "ml-IN",
         )
     return {"id": new_id, "slug": slug, "tier": tier, "status": "created"}
 
@@ -234,6 +244,14 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate):
             tier_val = body.tier if body.tier in allowed_tiers else "hospital"
             fields.append(f"tier=${i}")
             values.append(tier_val)
+            i += 1
+        if body.agent_name is not None:
+            fields.append(f"agent_name=${i}")
+            values.append(body.agent_name)
+            i += 1
+        if body.agent_language is not None:
+            fields.append(f"agent_language=${i}")
+            values.append(body.agent_language)
             i += 1
         if not fields:
             return {"status": "no_changes"}

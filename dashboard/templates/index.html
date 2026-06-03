@@ -267,6 +267,30 @@
             </div>
           </div>
         </div>
+        <div class="card col-span-2">
+          <h2 class="font-medium text-gray-900 mb-2">AI Persona</h2>
+          <p class="text-xs text-gray-400 mb-3">Each hospital/clinic gets its own agent name and language. Changes take effect on the next call.</p>
+          <div class="grid grid-cols-2 gap-4">
+            <div>
+              <label class="label">Agent Name</label>
+              <input x-model="hospitalForm.agent_name" class="input" placeholder="Arya">
+              <p class="text-xs text-gray-400 mt-1">The AI's name spoken to patients (e.g. Arya, Maya, Priya).</p>
+            </div>
+            <div>
+              <label class="label">Primary Language</label>
+              <select x-model="hospitalForm.agent_language" class="input">
+                <option value="ml-IN">Malayalam (ml-IN)</option>
+                <option value="hi-IN">Hindi (hi-IN)</option>
+                <option value="ta-IN">Tamil (ta-IN)</option>
+                <option value="kn-IN">Kannada (kn-IN)</option>
+                <option value="te-IN">Telugu (te-IN)</option>
+                <option value="en-IN">English India (en-IN)</option>
+                <option value="bn-IN">Bengali (bn-IN)</option>
+              </select>
+              <p class="text-xs text-gray-400 mt-1">TTS output language. STT always auto-detects spoken language.</p>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1085,7 +1109,7 @@ function app() {
     provisionLoading: false, provisionResult: null,
     hisForm: { enabled:false, type:'generic_rest', base_url:'', auth:{ type:'bearer', value:'' }, endpoints:{}, field_map:{}, practitioner_map:{}, timeout_seconds:8 },
     hisStatus: null,
-    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'' },
+    hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'', agent_name:'Arya', agent_language:'ml-IN' },
     modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
     forms: {
       hospital: {}, dept: {}, doctor: {}, billing: {}, emergency: {}, faq: {}

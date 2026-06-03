@@ -126,6 +126,13 @@ try:
             logger.info("tool_book_appointment", appt_id=appt_id, doctor=resolved_name,
                         his_synced=bool(his_appt_id))
         except Exception as exc:
+            err = str(exc).lower()
+            if "unique" in err or "duplicate" in err or "ix_appt_no_double_book" in err:
+                logger.warning("tool_book_slot_conflict", doctor=resolved_name, slot=slot)
+                return (
+                    f"That slot with Dr. {resolved_name} is already fully booked. "
+                    "Would you like a different time or another doctor?"
+                )
             logger.error("tool_book_appointment_failed", error=str(exc))
             return "Booking system temporarily unavailable — please call the front desk."
 

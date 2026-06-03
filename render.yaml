@@ -2,7 +2,7 @@ services:
   - type: web
     name: arteq-voice-agent
     runtime: python
-    plan: starter
+    plan: standard   # handles webhook traffic + dashboard for 25+ tenants
     region: singapore
     branch: claude/hospital-voice-agent-ml-XCG0G
     buildCommand: pip install -r requirements.txt
@@ -122,14 +122,16 @@ services:
         sync: false
 
   # ── LiveKit voice agent worker ─────────────────────────────────────────────
-  # Runs the AI agent pool that handles every concurrent call room.
-  # Scale this service up (more instances) for higher call volumes.
+  # Each instance handles up to 15 concurrent calls (max_concurrent_jobs=15).
+  # Scale numInstances for more simultaneous callers across all hospitals.
+  # Minimum recommended: 2 instances for resilience (one restart doesn't drop calls).
   - type: worker
     name: arteq-livekit-agent
     runtime: python
-    plan: starter
+    plan: standard   # starter has 512MB RAM which is tight under concurrent calls
     region: singapore
     branch: claude/hospital-voice-agent-ml-XCG0G
+    numInstances: 2
     buildCommand: pip install -r requirements.txt
     startCommand: python livekit_agent.py start
     envVars:

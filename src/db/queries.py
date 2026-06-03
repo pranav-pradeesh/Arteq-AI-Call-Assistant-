@@ -107,8 +107,8 @@ async def get_pool() -> asyncpg.Pool:
                 url = settings.DATABASE_URL.replace("postgresql+asyncpg://", "postgresql://")
                 _pool = await asyncpg.create_pool(
                     url,
-                    min_size=1,
-                    max_size=10,
+                    min_size=2,
+                    max_size=30,   # supports 25+ tenants with concurrent calls
                     command_timeout=30,
                     ssl=_resolve_ssl(url),
                     timeout=20,
@@ -201,6 +201,8 @@ class HospitalContext:
     emergency: list[EmergencyContact]
     knowledge_base: str = ""   # free-form staff handbook (parking, insurance, policies, …)
     tier: str = "hospital"     # "clinic" | "hospital"
+    agent_name: str = "Arya"         # per-hospital AI persona name
+    agent_language: str = "ml-IN"    # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, te-IN, en-IN
     queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
     loaded_at: float = 0.0
 
@@ -347,16 +349,21 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
             for r in emerg_rows
         ]
 
-        # Free-form knowledge base + tier — graceful if columns don't exist yet.
+        # Extended columns — graceful fallback if column doesn't exist yet (old DB).
         knowledge_base = ""
         tier = "hospital"
+        agent_name = "Arya"
+        agent_language = "ml-IN"
         try:
             row = await conn.fetchrow(
-                "SELECT knowledge_base, tier FROM hospitals WHERE id=$1", hospital_id
+                "SELECT knowledge_base, tier, agent_name, agent_language "
+                "FROM hospitals WHERE id=$1", hospital_id
             )
             if row:
                 knowledge_base = row["knowledge_base"] or ""
                 tier = row["tier"] or "hospital"
+                agent_name = row["agent_name"] or "Arya"
+                agent_language = row["agent_language"] or "ml-IN"
         except Exception:
             pass
 
@@ -375,6 +382,8 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         emergency=emergency,
         knowledge_base=knowledge_base,
         tier=tier,
+        agent_name=agent_name,
+        agent_language=agent_language,
         loaded_at=time.time(),
     )
 

@@ -312,6 +312,7 @@ class HospitalVoiceAgent(Agent):
         call_id: str,
         hospital_name: str,
         call_started_at: datetime,
+        agent_language: str = "ml-IN",
     ) -> None:
         super().__init__(
             instructions=system_prompt,
@@ -332,7 +333,7 @@ class HospitalVoiceAgent(Agent):
             tts=sarvam.TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="bulbul:v3",
-                target_language_code="ml-IN",
+                target_language_code=agent_language,
                 speaker="shubh",
             ),
         )
@@ -448,7 +449,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ── Build system prompt ───────────────────────────────────────────────────
     from src.config.settings import settings
-    agent_name    = settings.AGENT_NAME
+    # Per-hospital agent persona overrides the global env var default
+    agent_name     = (getattr(hospital_ctx, "agent_name", None) or settings.AGENT_NAME)
+    agent_language = (getattr(hospital_ctx, "agent_language", None) or settings.AGENT_LANGUAGE)
     system_prompt = _build_prompt(hospital_ctx, agent_name, outbound_context)
     if patient_profile:
         last = patient_profile["history"][0] if patient_profile["history"] else {}
@@ -502,6 +505,7 @@ async def entrypoint(ctx: JobContext) -> None:
         call_id=call_id,
         hospital_name=hospital_name,
         call_started_at=call_started_at,
+        agent_language=agent_language,
     )
 
     session = AgentSession(userdata=session_data)
@@ -577,4 +581,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint))
+    cli.run_app(WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        max_concurrent_jobs=15,   # tune per worker: 15 calls × N Render instances
+    ))

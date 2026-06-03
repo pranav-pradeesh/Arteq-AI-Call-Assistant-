@@ -137,15 +137,25 @@ class Settings(BaseSettings):
     def _reject_weak_secrets_in_production(self) -> "Settings":
         if self.ENV == "production":
             _WEAK = {"admin", "change-me-in-production", "change_me_in_production", ""}
+            errors = []
             if self.DASHBOARD_JWT_SECRET in _WEAK:
-                raise ValueError(
-                    "DASHBOARD_JWT_SECRET must be set to a strong secret in production. "
+                errors.append(
+                    "DASHBOARD_JWT_SECRET is not set or is a default value. "
                     "Generate one with: python -c \"import secrets; print(secrets.token_hex(32))\""
                 )
             if self.DASHBOARD_ADMIN_PASSWORD in _WEAK or len(self.DASHBOARD_ADMIN_PASSWORD) < 12:
-                raise ValueError(
-                    "DASHBOARD_ADMIN_PASSWORD must be at least 12 characters in production."
+                errors.append(
+                    "DASHBOARD_ADMIN_PASSWORD must be at least 12 characters and not a default value."
                 )
+            if errors:
+                import sys
+                msg = (
+                    "\n\n[ARTEQ STARTUP ERROR] Missing required secrets for production:\n"
+                    + "\n".join(f"  • {e}" for e in errors)
+                    + "\n\nSet these in Render Dashboard → Environment → Secret Files.\n"
+                )
+                print(msg, file=sys.stderr, flush=True)
+                raise ValueError(msg)
         return self
 
     @property
@@ -153,4 +163,9 @@ class Settings(BaseSettings):
         return self.ENV == "dev"
 
 
-settings = Settings()
+try:
+    settings = Settings()
+except Exception as _settings_exc:
+    import sys
+    print(f"\n[ARTEQ FATAL] Settings validation failed: {_settings_exc}\n", file=sys.stderr, flush=True)
+    raise
