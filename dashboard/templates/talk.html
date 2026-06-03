@@ -4,8 +4,8 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Talk to Arya — Arteq Hospital Voice Agent</title>
-  <!-- LiveKit browser SDK (UMD build, pinned major for stability) -->
-  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2/dist/livekit-client.umd.min.js"></script>
+  <!-- LiveKit browser SDK — pinned to stable minor for protocol compatibility -->
+  <script src="https://cdn.jsdelivr.net/npm/livekit-client@2.5.9/dist/livekit-client.umd.min.js"></script>
   <style>
     :root {
       --bg: #0b1020; --card: #141b30; --accent: #4f8cff; --accent-2: #22c55e;
@@ -187,8 +187,10 @@
         hangupBtn.disabled = false;
         setStatus("Connected — Arya is listening. Start speaking.", "ok");
       } catch (err) {
-        console.error(err);
-        setStatus("Could not connect: " + err.message, "err");
+        console.error("LiveKit connection error:", err);
+        // Surface the reason code alongside the message for easier diagnosis
+        const reason = err.reason !== undefined ? ` (code ${err.reason})` : "";
+        setStatus("Could not connect: " + err.message + reason, "err");
         connectBtn.disabled = false;
         if (room) { try { await room.disconnect(); } catch (_) {} room = null; }
       }
