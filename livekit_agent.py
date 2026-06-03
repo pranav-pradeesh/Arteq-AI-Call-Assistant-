@@ -39,6 +39,85 @@ from livekit.plugins import openai, sarvam, silero
 
 load_dotenv()
 
+# ── Sarvam Bulbul v3 TTS ────────────────────────────────────────────────────────
+# livekit-plugins-sarvam 1.1.7 only knows bulbul:v2 and unconditionally sends
+# `pitch` and `loudness`. Bulbul v3 rejects those two params (400). Subclass the
+# stream to drop them while keeping v3's better Malayalam voices.
+
+import base64 as _b64
+import aiohttp as _aiohttp
+from livekit.agents import (
+    APIConnectionError as _APIConnErr,
+    APIStatusError as _APIStatusErr,
+    APITimeoutError as _APITimeoutErr,
+)
+from livekit.plugins.sarvam.tts import (
+    TTS as _SarvamTTS,
+    ChunkedStream as _SarvamChunkedStream,
+    logger as _sarvam_log,
+)
+
+
+class _BulbulV3ChunkedStream(_SarvamChunkedStream):
+    async def _run(self, output_emitter) -> None:
+        payload = {
+            "target_language_code": self._opts.target_language_code,
+            "text": self._input_text,
+            "speaker": self._opts.speaker,
+            "pace": self._opts.pace,
+            "speech_sample_rate": self._opts.speech_sample_rate,
+            "enable_preprocessing": self._opts.enable_preprocessing,
+            "model": self._opts.model,
+        }
+        headers = {
+            "api-subscription-key": self._opts.api_key,
+            "Content-Type": "application/json",
+        }
+        try:
+            async with self._tts._ensure_session().post(
+                url=self._opts.base_url,
+                json=payload,
+                headers=headers,
+                timeout=_aiohttp.ClientTimeout(
+                    total=self._conn_options.timeout,
+                    sock_connect=self._conn_options.timeout,
+                ),
+            ) as res:
+                if res.status != 200:
+                    error_text = await res.text()
+                    _sarvam_log.error(f"Sarvam TTS API error: {res.status} - {error_text}")
+                    raise _APIStatusErr(
+                        message=f"Sarvam TTS API Error: {error_text}", status_code=res.status
+                    )
+                response_json = await res.json()
+                request_id = response_json.get("request_id", "")
+                audios = response_json.get("audios", [])
+                if not audios or not isinstance(audios, list):
+                    raise _APIConnErr("Sarvam TTS API response invalid: no audio data")
+                output_emitter.initialize(
+                    request_id=request_id or "unknown",
+                    sample_rate=self._tts.sample_rate,
+                    num_channels=self._tts.num_channels,
+                    mime_type="audio/wav",
+                )
+                for b64 in audios:
+                    output_emitter.push(_b64.b64decode(b64))
+        except asyncio.TimeoutError as e:
+            raise _APITimeoutErr("Sarvam TTS API request timed out") from e
+        except _aiohttp.ClientError as e:
+            raise _APIConnErr(f"Sarvam TTS API connection error: {e}") from e
+
+
+class BulbulV3TTS(_SarvamTTS):
+    """Sarvam Bulbul v3 TTS — drops pitch/loudness, which v3 does not accept."""
+
+    def synthesize(self, text: str, *, conn_options=None):
+        from livekit.agents import DEFAULT_API_CONNECT_OPTIONS
+        if conn_options is None:
+            conn_options = DEFAULT_API_CONNECT_OPTIONS
+        return _BulbulV3ChunkedStream(tts=self, input_text=text, conn_options=conn_options)
+
+
 # ── Constants ─────────────────────────────────────────────────────────────────
 
 _MAX_CTX = 20   # keep system prompt + last 20 messages (10 turns)
@@ -333,13 +412,13 @@ class HospitalVoiceAgent(Agent):
                 # livekit-plugins-openai 1.1.7.
                 model="llama-3.3-70b-versatile",
             ),
-            tts=sarvam.TTS(
+            tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="bulbul:v3",
-                # Sarvam Bulbul TTS requires the target language code; without
-                # it the request 400s and no audio is produced.
+                # Bulbul requires the target language code; without it the
+                # request 400s and no audio is produced.
                 target_language_code=agent_language,
-                speaker="shubh",
+                speaker="anushka",
             ),
         )
         self._greeting = greeting
