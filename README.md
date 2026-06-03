@@ -118,6 +118,23 @@ generated `.env` and restart. Without `--with-agent` only the web server runs
 | `--no-install` | skip dependency install (fast restart) |
 | `--port 8080` | override the web port |
 
+### Self-diagnostic for testers (`doctor`)
+
+One command checks everything and writes a copy-pasteable report. It sets up
+the venv first, then verifies Python, every `.env` key (without printing
+secrets), code imports, the control DB + tenant registry, and live Groq/Sarvam
+reachability.
+
+```bash
+# any platform
+python run.py doctor
+```
+
+It prints `[PASS]` / `[WARN]` / `[FAIL]` per check and writes the full report to
+`arteq-diagnostic.log` in the project root. Testers: when something breaks, run
+this and paste the contents of `arteq-diagnostic.log` — it never contains
+secret values, only whether each is set.
+
 ### Manual setup (alternative)
 
 ```bash

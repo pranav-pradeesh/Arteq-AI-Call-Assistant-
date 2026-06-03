@@ -88,3 +88,30 @@ def test_derive_slug():
     assert _derive_slug("Kairali Multi-Speciality Hospital") == "kairali-multi-speciality-hospital"
     assert _derive_slug("  Test  ") == "test"
     assert _derive_slug("ABC & XYZ") == "abc-xyz"
+
+
+def test_token_rate_limiter():
+    """Per-IP token guard allows up to the limit, then blocks within the window."""
+    from src import main
+    main._token_hits.clear()
+    limit = main.settings.TOKEN_RATE_LIMIT
+    ip = "1.2.3.4"
+    for _ in range(limit):
+        assert main._token_rate_ok(ip) is True
+    # Next request in the same window is rejected.
+    assert main._token_rate_ok(ip) is False
+    # A different IP is unaffected.
+    assert main._token_rate_ok("5.6.7.8") is True
+    main._token_hits.clear()
+
+
+def test_features_normalize_over_tier():
+    """normalize() fills every known key; clinic leaner than hospital."""
+    from src.tenancy import features as feat
+    hosp = feat.normalize({}, "hospital")
+    clinic = feat.normalize({}, "clinic")
+    assert set(hosp.keys()) == set(feat.FEATURES.keys())
+    assert set(clinic.keys()) == set(feat.FEATURES.keys())
+    # Explicit override wins over tier default.
+    overridden = feat.normalize({"campaigns": False}, "hospital")
+    assert overridden["campaigns"] is False

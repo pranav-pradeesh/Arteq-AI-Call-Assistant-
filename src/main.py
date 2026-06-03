@@ -106,10 +106,18 @@ app = FastAPI(
     redoc_url=None,
 )
 
+_cors_origins = [o.strip() for o in settings.CORS_ORIGINS.split(",") if o.strip()] or ["*"]
+if settings.ENV == "production" and _cors_origins == ["*"]:
+    logger.warning(
+        "cors_wildcard_in_production",
+        hint="Set CORS_ORIGINS to your dashboard/app origins to restrict access.",
+    )
+# allow_credentials stays False: auth uses Bearer tokens, not cookies, so a
+# wildcard origin never exposes credentialed requests.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
+    allow_origins=_cors_origins,
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -163,19 +171,63 @@ async def metrics():
 
 # ── LiveKit token endpoint ────────────────────────────────────────────────────
 
+# Per-IP sliding-window guard so the unauthenticated token endpoint can't be
+# abused to spin up unlimited agent rooms (each room costs STT/LLM/TTS spend).
+_token_hits: dict[str, list[float]] = {}
+
+
+def _token_rate_ok(client_ip: str) -> bool:
+    import time
+    now = time.monotonic()
+    window = settings.TOKEN_RATE_WINDOW_SECONDS
+    hits = [t for t in _token_hits.get(client_ip, []) if now - t < window]
+    if len(hits) >= settings.TOKEN_RATE_LIMIT:
+        _token_hits[client_ip] = hits
+        return False
+    hits.append(now)
+    _token_hits[client_ip] = hits
+    # Opportunistic cleanup so the dict can't grow unbounded.
+    if len(_token_hits) > 10000:
+        for k in [k for k, v in _token_hits.items()
+                  if not any(now - t < window for t in v)]:
+            _token_hits.pop(k, None)
+    return True
+
+
 @app.get("/api/v1/livekit/token")
-async def livekit_token(slug: str = "default", participant: str = "patient"):
+async def livekit_token(request: Request, slug: str = "default", participant: str = "patient"):
     """Returns a LiveKit JWT so the browser can join a hospital room.
 
-    Room name = "{slug}-call-{uuid}" (matches livekit_agent._resolve_hospital_id),
+    Room name = "{slug}-call-{uuid}" (matches livekit_agent._resolve_call_target),
     so every call lands in a fresh room. The token embeds a RoomConfiguration
     with RoomAgentDispatch(agent_name="arya"); LiveKit Cloud uses that to
     dispatch the worker into the room on creation (Cloud Agents do NOT
     auto-dispatch — explicit dispatch via the token is required).
+
+    Rate-limited per IP and the slug must resolve to a known active tenant
+    (or "default") so random slugs can't dispatch billable agent rooms.
     """
+    from fastapi import HTTPException
+
     if not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
-        from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="LiveKit not configured")
+
+    client_ip = (request.client.host if request.client else "") or "unknown"
+    if not _token_rate_ok(client_ip):
+        logger.warning("token_rate_limited", ip=client_ip, slug=slug)
+        raise HTTPException(status_code=429, detail="Too many requests")
+
+    slug = (slug or "default").strip().lower()
+    if slug != "default":
+        try:
+            from src.tenancy import registry
+            if not await registry.get_tenant(slug):
+                raise HTTPException(status_code=404, detail="Unknown tenant")
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error("token_tenant_lookup_failed", slug=slug, error=str(e))
+            raise HTTPException(status_code=503, detail="Tenant lookup failed")
 
     import uuid as _uuid
     room_name = f"{slug}-call-{_uuid.uuid4().hex[:12]}"

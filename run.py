@@ -258,7 +258,22 @@ def _terminate(procs) -> None:
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
+def run_doctor() -> int:
+    """Run the self-diagnostic inside the venv and return its exit code."""
+    py = str(venv_python())
+    return subprocess.run([py, str(ROOT / "tools" / "doctor.py")], cwd=str(ROOT)).returncode
+
+
 def main() -> int:
+    # `python run.py doctor` — setup, then diagnose. Survive the venv re-exec
+    # via an env flag so argparse never sees the positional token.
+    is_doctor = (len(sys.argv) > 1 and sys.argv[1] == "doctor") \
+        or os.environ.get("ARTEQ_DOCTOR") == "1"
+    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
+        sys.argv.pop(1)
+    if is_doctor:
+        os.environ["ARTEQ_DOCTOR"] = "1"
+
     parser = argparse.ArgumentParser(description="Arteq Hospital Voice Agent launcher")
     parser.add_argument("--with-agent", "-a", action="store_true", help="also run the LiveKit agent worker")
     parser.add_argument("--agent-only", action="store_true", help="run only the LiveKit agent worker")
@@ -285,6 +300,8 @@ def main() -> int:
 
     # We are now inside .venv.
     ensure_env()
+    if is_doctor:
+        return run_doctor()
     return run_processes(args)
 
 

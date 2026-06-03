@@ -128,6 +128,15 @@ class Settings(BaseSettings):
     # DTMF fallback
     DTMF_ENABLED: bool = True
 
+    # CORS — comma-separated allowed origins. "*" allows any (dev only).
+    # In production set to your dashboard/app origins e.g.
+    # "https://arteq.example.com,https://admin.example.com".
+    CORS_ORIGINS: str = "*"
+
+    # LiveKit token endpoint abuse guard — per-IP tokens allowed per window.
+    TOKEN_RATE_LIMIT: int = 12
+    TOKEN_RATE_WINDOW_SECONDS: int = 60
+
     # Dashboard auth
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"
