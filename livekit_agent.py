@@ -418,7 +418,7 @@ class HospitalVoiceAgent(Agent):
                 # Bulbul requires the target language code; without it the
                 # request 400s and no audio is produced.
                 target_language_code=agent_language,
-                speaker="anushka",
+                speaker="priya",
             ),
         )
         self._greeting = greeting
