@@ -652,7 +652,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
 
-    await session.start(agent=agent, room=ctx.room)
+    # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
+    # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
+    # logs with ReadTimeout tracebacks; we don't use cloud recording.
+    await session.start(agent=agent, room=ctx.room, record=False)
 
 
 if __name__ == "__main__":
