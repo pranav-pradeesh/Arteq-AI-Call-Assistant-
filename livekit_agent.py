@@ -581,7 +581,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
 
 if __name__ == "__main__":
-    cli.run_app(WorkerOptions(
-        entrypoint_fnc=entrypoint,
-        max_concurrent_jobs=15,   # tune per worker: 15 calls × N Render instances
-    ))
+    # agent_name = "arya" → LiveKit Cloud uses explicit dispatch. The token
+    # endpoint (src/main.py) attaches RoomAgentDispatch(agent_name="arya") so
+    # this worker joins the room on creation.
+    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="arya"))

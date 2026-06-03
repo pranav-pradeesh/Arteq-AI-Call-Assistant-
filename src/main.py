@@ -165,13 +165,25 @@ async def metrics():
 
 @app.get("/api/v1/livekit/token")
 async def livekit_token(slug: str = "default", participant: str = "patient"):
-    """Returns a LiveKit JWT so the browser can join a hospital room."""
+    """Returns a LiveKit JWT so the browser can join a hospital room.
+
+    Room name = "{slug}-call-{uuid}" (matches livekit_agent._resolve_hospital_id),
+    so every call lands in a fresh room. The token embeds a RoomConfiguration
+    with RoomAgentDispatch(agent_name="arya"); LiveKit Cloud uses that to
+    dispatch the worker into the room on creation (Cloud Agents do NOT
+    auto-dispatch — explicit dispatch via the token is required).
+    """
     if not settings.LIVEKIT_API_KEY or not settings.LIVEKIT_API_SECRET:
         from fastapi import HTTPException
         raise HTTPException(status_code=503, detail="LiveKit not configured")
 
+    import uuid as _uuid
+    room_name = f"{slug}-call-{_uuid.uuid4().hex[:12]}"
+
     try:
-        from livekit.api import AccessToken, VideoGrants
+        from livekit.api import (
+            AccessToken, VideoGrants, RoomConfiguration, RoomAgentDispatch,
+        )
         token = (
             AccessToken(settings.LIVEKIT_API_KEY, settings.LIVEKIT_API_SECRET)
             .with_identity(participant)
@@ -179,14 +191,19 @@ async def livekit_token(slug: str = "default", participant: str = "patient"):
             .with_grants(
                 VideoGrants(
                     room_join=True,
-                    room=slug,
+                    room=room_name,
                     can_publish=True,
                     can_subscribe=True,
                 )
             )
+            .with_room_config(
+                RoomConfiguration(
+                    agents=[RoomAgentDispatch(agent_name="arya")],
+                )
+            )
             .to_jwt()
         )
-        return {"token": token, "room": slug, "url": settings.LIVEKIT_URL}
+        return {"token": token, "room": room_name, "url": settings.LIVEKIT_URL}
     except Exception as e:
         from fastapi import HTTPException
         raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")

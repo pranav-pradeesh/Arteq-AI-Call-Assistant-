@@ -16,4 +16,7 @@ COPY . .
 
 EXPOSE 8000
 
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Default CMD = LiveKit agent worker so `lk agent create` and `docker run`
+# pull up Arya. Render's web service overrides this via startCommand in
+# render.yaml; docker-compose overrides via `command:` per service.
+CMD ["python", "livekit_agent.py", "start"]
