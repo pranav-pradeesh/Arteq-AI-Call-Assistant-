@@ -77,7 +77,7 @@ _MAX_HISTORY = 8
 # Hard cap on the hospital "handbook" free-text injected into the prompt.
 # The full KB (insurance + lab + policies) can be several thousand tokens;
 # capping keeps each request well under the Groq free-tier TPM limit.
-_MAX_KB_CHARS = 1200
+_MAX_KB_CHARS = 500
 
 # Limit concurrent API calls across all active calls (free-tier rate limits).
 # Groq free tier: 30 RPM per model. Sarvam: per-plan.

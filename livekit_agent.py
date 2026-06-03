@@ -33,7 +33,8 @@ _log = logging.getLogger("livekit.agents")
 import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
+from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import openai, sarvam, silero
 
@@ -120,7 +121,7 @@ class BulbulV3TTS(_SarvamTTS):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_MAX_CTX = 8   # keep system prompt + last 8 messages (4 turns) — Groq TPM is tight
+_MAX_CTX = 4   # keep system prompt + last 4 messages (2 turns) — Groq TPM is tight
 
 _DTMF = {
     "1": "OPD timing please",
@@ -381,9 +382,10 @@ class HospitalVoiceAgent(Agent):
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 # llama3-70b-8192 is deprecated by Groq; 3.3-versatile is the
-                # current 70B chat model. max_tokens is not accepted by
-                # livekit-plugins-openai 1.1.7.
+                # current 70B chat model. Cap output: replies are 1-2 sentences
+                # and output tokens count against Groq's tight free-tier TPM.
                 model="llama-3.3-70b-versatile",
+                max_completion_tokens=200,
             ),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
@@ -570,7 +572,18 @@ async def entrypoint(ctx: JobContext) -> None:
         agent_language=agent_language,
     )
 
-    session = AgentSession(userdata=session_data)
+    # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires
+    # a second LLM call that our on_user_turn_completed mutation invalidates),
+    # cap retries so a 429 doesn't hammer the same minute 4x, and limit tool
+    # steps so a turn can't chain many large LLM calls.
+    session = AgentSession(
+        userdata=session_data,
+        preemptive_generation=False,
+        max_tool_steps=2,
+        conn_options=SessionConnectOptions(
+            llm_conn_options=APIConnectOptions(max_retry=1, retry_interval=8.0),
+        ),
+    )
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     async def _on_end_async(_event=None):
