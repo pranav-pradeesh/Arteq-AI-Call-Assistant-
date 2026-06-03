@@ -379,7 +379,9 @@ class HospitalVoiceAgent(Agent):
                 model="saaras:v3",
                 language="unknown",
             ),
-            vad=silero.VAD.load(),
+            # Shorter end-of-speech silence → Arya starts replying ~0.2s sooner.
+            # 0.3s is still long enough to not cut a caller mid-pause.
+            vad=silero.VAD.load(min_silence_duration=0.3),
             llm=openai.LLM(
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
@@ -582,6 +584,10 @@ async def entrypoint(ctx: JobContext) -> None:
     session = AgentSession(
         userdata=session_data,
         preemptive_generation=False,
+        # Cut the post-speech wait before the LLM fires. Defaults are 0.5/6.0s;
+        # 0.3/3.0 makes Arya feel snappier without clipping slow speakers.
+        min_endpointing_delay=0.3,
+        max_endpointing_delay=3.0,
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
             llm_conn_options=APIConnectOptions(max_retry=1, retry_interval=8.0),
