@@ -21,11 +21,14 @@ Required env vars:
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import sys
 import uuid
 from datetime import datetime, timezone
 from typing import Optional
+
+_log = logging.getLogger("livekit.agents")
 
 import numpy as np
 from dotenv import load_dotenv
@@ -414,7 +417,7 @@ async def entrypoint(ctx: JobContext) -> None:
     room_name = ctx.room.name
     call_id = str(uuid.uuid4())
     call_started_at = datetime.now(timezone.utc)
-    print(f"[arteq] room={room_name} call_id={call_id[:8]}")
+    _log.info("arteq call room=%s call_id=%s", room_name, call_id[:8])
 
     # ── Hospital context ──────────────────────────────────────────────────────
     hospital_id   = await _resolve_hospital_id(room_name)
