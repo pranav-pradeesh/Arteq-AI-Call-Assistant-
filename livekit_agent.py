@@ -382,10 +382,11 @@ class HospitalVoiceAgent(Agent):
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 # llama3-70b-8192 is deprecated by Groq; 3.3-versatile is the
-                # current 70B chat model. Cap output: replies are 1-2 sentences
-                # and output tokens count against Groq's tight free-tier TPM.
+                # current 70B chat model. Cap output to bound TPM, but Malayalam
+                # script is token-dense (many tokens per char), so 200 truncates
+                # a normal 2-sentence reply mid-word. 512 fits a full reply.
                 model="llama-3.3-70b-versatile",
-                max_completion_tokens=200,
+                max_completion_tokens=512,
             ),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
