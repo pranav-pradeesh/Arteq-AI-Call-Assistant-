@@ -593,10 +593,16 @@ async def entrypoint(ctx: JobContext) -> None:
         try:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0
+            transcript: list[dict] = []
             try:
                 msgs = session.history.messages()
                 non_sys = [m for m in msgs if getattr(m, "role", "") != "system"]
                 total_turns = len(non_sys) // 2
+                for m in non_sys:
+                    content = getattr(m, "content", "")
+                    if isinstance(content, (list, tuple)):
+                        content = " ".join(str(c) for c in content)
+                    transcript.append({"role": getattr(m, "role", ""), "text": str(content)})
             except Exception:
                 pass
 
@@ -617,7 +623,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     total_turns=total_turns,
                     latency_avg_ms=0,
                     cost_paise=0,
-                    transcript=[],
+                    transcript=transcript,
                     intents=[],
                     outcome=outcome,
                 )
