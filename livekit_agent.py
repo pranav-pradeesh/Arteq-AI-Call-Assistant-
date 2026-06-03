@@ -41,7 +41,6 @@ load_dotenv()
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_LLM_MAX_TOKENS = 600
 _MAX_CTX = 20   # keep system prompt + last 20 messages (10 turns)
 
 _DTMF = {
@@ -404,11 +403,13 @@ class HospitalVoiceAgent(Agent):
             except Exception:
                 pass
 
-        # Context pruning: keep system prompt + last _MAX_CTX messages
+        # Context pruning. truncate() keeps the last N items and re-inserts the
+        # system prompt at the front. ChatContext.messages is a METHOD in
+        # agents 1.5.x (not a list), and there is no _messages attr — the old
+        # turn_ctx.messages / turn_ctx._messages code raised and silently
+        # skipped, so context grew unbounded.
         try:
-            msgs = turn_ctx.messages
-            if len(msgs) > _MAX_CTX + 1:
-                turn_ctx._messages = msgs[:1] + msgs[-_MAX_CTX:]
+            turn_ctx.truncate(max_items=_MAX_CTX + 1)
         except Exception:
             pass
 
@@ -525,7 +526,7 @@ async def entrypoint(ctx: JobContext) -> None:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0
             try:
-                msgs = session.history.messages
+                msgs = session.history.messages()
                 non_sys = [m for m in msgs if getattr(m, "role", "") != "system"]
                 total_turns = len(non_sys) // 2
             except Exception:
