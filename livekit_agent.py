@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
-from livekit.plugins import openai, sarvam, silero
+from livekit.plugins import openai, sarvam
 
 load_dotenv()
 
@@ -317,25 +317,34 @@ class HospitalVoiceAgent(Agent):
         call_started_at: datetime,
         agent_language: str = "ml-IN",
     ) -> None:
+        initial_ctx = agents_llm.ChatContext()
+        initial_ctx.append(role="system", text=system_prompt)
+
         super().__init__(
-            instructions=system_prompt,
+            chat_ctx=initial_ctx,
             tools=tools,
             stt=sarvam.STT(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="saaras:v3",
                 language="unknown",
-                mode="codemix",
+                # Required for turn_detection="stt" on AgentSession — emits
+                # start/end-of-speech events the session uses to flip turns.
+                # Without it the session waits forever and never replies.
+                flush_signal=True,
             ),
-            vad=silero.VAD.load(),
             llm=openai.LLM(
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
+                # llama3-70b-8192 is deprecated by Groq; 3.3-versatile is the
+                # current 70B chat model.
                 model="llama-3.3-70b-versatile",
                 max_tokens=_LLM_MAX_TOKENS,
             ),
             tts=sarvam.TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="bulbul:v3",
+                # Sarvam Bulbul TTS requires the target language code; without
+                # it the request 400s and no audio is produced.
                 target_language_code=agent_language,
                 speaker="shubh",
             ),
@@ -349,10 +358,13 @@ class HospitalVoiceAgent(Agent):
         self._call_started_at = call_started_at
 
     async def on_enter(self) -> None:
-        """Speak the opening greeting when the call connects."""
-        await self.session.generate_reply(
-            instructions=f"Say exactly: {self._greeting!r}"
-        )
+        """Speak the opening greeting when the call connects.
+
+        Uses session.say() so the greeting is sent straight to TTS without an
+        LLM round-trip — guarantees the exact Malayalam phrase plays back, and
+        is the pattern Sarvam docs recommend for fixed openings.
+        """
+        await self.session.say(self._greeting, allow_interruptions=True)
 
     async def on_user_turn_completed(
         self,
@@ -511,7 +523,11 @@ async def entrypoint(ctx: JobContext) -> None:
         agent_language=agent_language,
     )
 
-    session = AgentSession(userdata=session_data)
+    session = AgentSession(
+        userdata=session_data,
+        turn_detection="stt",          # ◀ ADD THIS
+        min_endpointing_delay=0.07,    # ◀ ADD THIS (handles Sarvam's ~70ms processing latency)
+    )
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     async def _on_end_async(_event=None):
