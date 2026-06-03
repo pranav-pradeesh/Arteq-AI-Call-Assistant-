@@ -330,9 +330,9 @@ class HospitalVoiceAgent(Agent):
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
                 # llama3-70b-8192 is deprecated by Groq; 3.3-versatile is the
-                # current 70B chat model.
+                # current 70B chat model. max_tokens is not accepted by
+                # livekit-plugins-openai 1.1.7.
                 model="llama-3.3-70b-versatile",
-                max_tokens=_LLM_MAX_TOKENS,
             ),
             tts=sarvam.TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
