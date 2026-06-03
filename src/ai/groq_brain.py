@@ -166,37 +166,18 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
         ext_part = f" — Ext {d.phone_ext}" if d.phone_ext else ""
         lines.append(f"  • {d.name}{ml_part}{floor_part}{ext_part}")
 
-    lines.extend(["", "DOCTORS & SCHEDULES:"])
+    # Doctor names + dept only. Schedules and fees are fetched on demand via the
+    # get_doctor_schedule / check_availability tools — keeping them out of the
+    # prompt cuts thousands of tokens (Groq free-tier TPM is small).
+    lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
     for doc in ctx.doctors:
         ml_name = f" ({doc.name_ml})" if doc.name_ml else ""
         lines.append(f"  Dr. {doc.name}{ml_name} — {doc.dept_name}")
-        # Condense schedule into one line per doctor (e.g. "Mon 9:00–13:00; Wed 10:00–12:00")
-        if doc.slots:
-            parts = []
-            for slot in doc.slots:
-                day_name = _DOW_NAMES[slot.dow] if 0 <= slot.dow <= 6 else str(slot.dow)
-                parts.append(f"{day_name[:3]} {slot.start}–{slot.end}")
-            lines.append(f"    {'; '.join(parts)}")
-
-    lines.extend(["", "CONSULTATION FEES:"])
-    for b in ctx.billing:
-        dept_key = b.item.replace("consultation:", "")
-        ml_part = f" ({b.item_ml})" if b.item_ml else ""
-        price = f"₹{int(b.price_min)}–₹{int(b.price_max)}"
-        notes = f" ({b.notes})" if b.notes else ""
-        lines.append(f"  {dept_key}{ml_part}: {price}{notes}")
 
     lines.extend(["", "EMERGENCY CONTACTS:"])
     for e in ctx.emergency:
         ml_part = f" ({e.label_ml})" if e.label_ml else ""
         lines.append(f"  {e.label}{ml_part}: {e.phone}")
-
-    if ctx.faqs:
-        lines.extend(["", "FAQ:"])
-        # English answers only — the model translates as needed.
-        for faq in ctx.faqs:
-            lines.append(f"  Q: {faq.question}")
-            lines.append(f"  A: {faq.answer}")
 
     if ctx.queue_data:
         lines.extend(["", "OPD QUEUE TODAY (approximate):"])
