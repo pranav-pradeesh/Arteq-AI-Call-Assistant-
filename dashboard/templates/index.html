@@ -85,10 +85,16 @@
     <!-- Nav items -->
     <nav class="flex-1 px-3 py-3 space-y-0.5">
       <template x-if="!currentHospital">
-        <button @click="tab='hospitals'" class="nav-item w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
-          :class="tab==='hospitals'?'bg-blue-50 text-blue-700 font-medium':'text-gray-600 hover:bg-gray-50'">
-          🏥 All Hospitals
-        </button>
+        <div class="space-y-0.5">
+          <button @click="tab='hospitals'" class="nav-item w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+            :class="tab==='hospitals'?'bg-blue-50 text-blue-700 font-medium':'text-gray-600 hover:bg-gray-50'">
+            🏥 All Hospitals
+          </button>
+          <button @click="tab='tenants'; loadTenants()" class="nav-item w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors"
+            :class="tab==='tenants'?'bg-blue-50 text-blue-700 font-medium':'text-gray-600 hover:bg-gray-50'">
+            🏢 Tenants
+          </button>
+        </div>
       </template>
       <template x-if="currentHospital">
         <div class="space-y-0.5">
@@ -144,6 +150,44 @@
             <div class="mt-3 pt-3 border-t border-gray-100 flex gap-2">
               <button @click.stop="selectHospital(h)" class="btn-primary text-xs py-1 px-3">Manage</button>
               <button @click.stop="openHospitalModal(h)" class="btn-secondary text-xs py-1 px-3">Edit</button>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
+
+    <!-- ── TENANTS (multi-DB control plane) ── -->
+    <div x-show="tab==='tenants'">
+      <div class="flex items-center justify-between mb-2">
+        <h1 class="text-xl font-semibold text-gray-900">Tenants</h1>
+        <button @click="openTenantModal()" class="btn-primary">+ Onboard Hospital / Clinic</button>
+      </div>
+      <p class="text-sm text-gray-500 mb-6">Each tenant runs on its OWN Supabase database. Features are auto-filled from the tier and editable per tenant.</p>
+      <div x-show="tenants.length===0" class="card text-center py-12 text-gray-400">
+        No tenants yet. Onboard your first hospital or clinic.
+      </div>
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-3">
+        <template x-for="t in tenants" :key="t.slug">
+          <div class="card">
+            <div class="flex items-start justify-between mb-3">
+              <div>
+                <div class="font-semibold text-gray-900" x-text="t.name"></div>
+                <div class="text-xs text-gray-400" x-text="t.slug"></div>
+              </div>
+              <div class="flex gap-1">
+                <span :class="t.active?'badge-green':'badge-red'" x-text="t.active?'Active':'Inactive'"></span>
+                <span class="badge-blue" x-text="t.tier==='clinic'?'Clinic':'Hospital'"></span>
+              </div>
+            </div>
+            <div class="text-xs text-gray-400 mb-1" x-text="t.db_url ? 'DB: '+(t.db_url.split('@')[1]||'set') : 'No DB URL ⚠'"></div>
+            <div class="text-xs text-gray-400 mb-2" x-text="'Persona: '+(t.agent_name||'Arya')+' · '+(t.agent_language||'ml-IN')"></div>
+            <div class="flex flex-wrap gap-1 mb-3">
+              <template x-for="(on,k) in t.features" :key="k">
+                <span x-show="on" class="text-[10px] px-1.5 py-0.5 rounded bg-gray-100 text-gray-600" x-text="k"></span>
+              </template>
+            </div>
+            <div class="pt-3 border-t border-gray-100 flex gap-2">
+              <button @click="openTenantModal(t)" class="btn-secondary text-xs py-1 px-3">Edit</button>
             </div>
           </div>
         </template>
@@ -934,6 +978,84 @@
   </div>
 </div>
 
+<!-- Tenant Onboarding Modal -->
+<div x-show="modals.tenant" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="modals.tenant=false">
+  <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-2xl mx-4 max-h-[90vh] overflow-auto" @click.stop>
+    <h2 class="text-lg font-semibold mb-4" x-text="tenantEditing ? 'Edit Tenant' : 'Onboard Hospital / Clinic'"></h2>
+    <div class="space-y-4">
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Name *</label><input x-model="tenantForm.name" class="input" placeholder="City Care Hospital"></div>
+        <div><label class="label">Name (Malayalam)</label><input x-model="tenantForm.name_ml" class="input" placeholder="ആശുപത്രി"></div>
+      </div>
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="label">Slug <span class="text-gray-400">(auto if blank)</span></label>
+          <input x-model="tenantForm.slug" :disabled="tenantEditing" class="input" placeholder="city-care">
+        </div>
+        <div>
+          <label class="label">Tier</label>
+          <select x-model="tenantForm.tier" @change="applyTierDefaults()" class="input">
+            <option value="hospital">Hospital (full features)</option>
+            <option value="clinic">Clinic (leaner)</option>
+          </select>
+        </div>
+      </div>
+
+      <div>
+        <label class="label">Supabase DB URL (this tenant's OWN database) <span :class="tenantEditing?'text-gray-400':'text-red-500'" x-text="tenantEditing?'':'*'"></span></label>
+        <input x-model="tenantForm.db_url" class="input font-mono text-xs" placeholder="postgresql://user:pass@db.xxxx.supabase.co:5432/postgres">
+        <p class="text-[11px] text-gray-400 mt-1">On save we run all migrations against this DB and seed the hospital. Leave blank to register without provisioning (single-DB fallback).</p>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Agent name</label><input x-model="tenantForm.agent_name" class="input" placeholder="Arya"></div>
+        <div>
+          <label class="label">Agent language</label>
+          <select x-model="tenantForm.agent_language" class="input">
+            <option value="ml-IN">Malayalam (ml-IN)</option>
+            <option value="hi-IN">Hindi (hi-IN)</option>
+            <option value="ta-IN">Tamil (ta-IN)</option>
+            <option value="kn-IN">Kannada (kn-IN)</option>
+            <option value="te-IN">Telugu (te-IN)</option>
+            <option value="en-IN">English (en-IN)</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Phone</label><input x-model="tenantForm.phone" class="input" placeholder="+91 …"></div>
+        <div><label class="label">Plivo number</label><input x-model="tenantForm.plivo_number" class="input" placeholder="+91 … (optional)"></div>
+      </div>
+      <div><label class="label">Address</label><textarea x-model="tenantForm.address" rows="2" class="input" placeholder="Address"></textarea></div>
+      <div class="grid grid-cols-2 gap-3">
+        <div><label class="label">Contact person</label><input x-model="tenantForm.contact_person" class="input" placeholder="Admin name"></div>
+        <div><label class="label">Contact phone</label><input x-model="tenantForm.contact_phone" class="input" placeholder="+91 …"></div>
+      </div>
+      <div><label class="label">Notes</label><textarea x-model="tenantForm.notes" rows="2" class="input" placeholder="Internal notes"></textarea></div>
+
+      <div>
+        <label class="label mb-2 block">Features <span class="text-gray-400">(prefilled from tier — toggle per tenant)</span></label>
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 border border-gray-100 rounded-xl p-3">
+          <template x-for="(label,key) in featuresCatalog.features" :key="key">
+            <label class="flex items-start gap-2 text-sm cursor-pointer">
+              <input type="checkbox" x-model="tenantForm.features[key]" class="rounded mt-0.5">
+              <span class="text-gray-700 text-xs leading-tight" x-text="label"></span>
+            </label>
+          </template>
+        </div>
+      </div>
+
+      <div x-show="tenantEditing" class="flex items-center gap-2">
+        <input type="checkbox" x-model="tenantForm.active" class="rounded"><label class="text-sm">Active</label>
+      </div>
+    </div>
+    <div class="flex justify-end gap-3 mt-6">
+      <button @click="modals.tenant=false" class="btn-secondary">Cancel</button>
+      <button @click="saveTenant()" :disabled="tenantSaving" class="btn-primary" x-text="tenantSaving ? 'Saving…' : 'Save'"></button>
+    </div>
+  </div>
+</div>
+
 <!-- Department Modal -->
 <div x-show="modals.dept" x-cloak class="fixed inset-0 z-50 flex items-center justify-center bg-black/40" @click.self="modals.dept=false">
   <div class="bg-white rounded-2xl shadow-2xl p-6 w-full max-w-md mx-4" @click.stop>
@@ -1099,6 +1221,11 @@ function app() {
     loginPassword: '', loginError: '', loginLoading: false,
     tab: 'hospitals',
     hospitals: [],
+    tenants: [],
+    featuresCatalog: { features: {}, tier_defaults: {} },
+    tenantForm: {},
+    tenantEditing: false,
+    tenantSaving: false,
     currentHospital: null,
     departments: [], doctors: [], billing: [], emergency: [], faqs: [],
     calls: [], stats: {},
@@ -1110,7 +1237,7 @@ function app() {
     hisForm: { enabled:false, type:'generic_rest', base_url:'', auth:{ type:'bearer', value:'' }, endpoints:{}, field_map:{}, practitioner_map:{}, timeout_seconds:8 },
     hisStatus: null,
     hospitalForm: { name:'', name_ml:'', phone:'', address:'', active:true, hours:{}, knowledge_base:'', tier:'hospital', slug:'', agent_name:'Arya', agent_language:'ml-IN' },
-    modals: { hospital:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
+    modals: { hospital:false, tenant:false, dept:false, doctor:false, schedule:false, billing:false, emergency:false, faq:false },
     forms: {
       hospital: {}, dept: {}, doctor: {}, billing: {}, emergency: {}, faq: {}
     },
@@ -1284,6 +1411,64 @@ function app() {
         await this.loadHospitals();
         this.modals.hospital = false;
       } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+
+    // ── Tenants (multi-DB) ───────────────────────────────────────────────────
+    async loadFeaturesCatalog() {
+      if (Object.keys(this.featuresCatalog.features).length) return;
+      try { this.featuresCatalog = await this.api('/features/catalog') || this.featuresCatalog; } catch {}
+    },
+    async loadTenants() {
+      await this.loadFeaturesCatalog();
+      try { this.tenants = await this.api('/tenants') || []; } catch(e) { this.notify('Error: '+e.message,'error'); }
+    },
+    applyTierDefaults() {
+      const d = this.featuresCatalog.tier_defaults[this.tenantForm.tier] || {};
+      this.tenantForm.features = { ...d };
+    },
+    async openTenantModal(t=null) {
+      await this.loadFeaturesCatalog();
+      this.tenantEditing = !!t;
+      if (t) {
+        this.tenantForm = {
+          name:t.name, name_ml:t.name_ml||'', slug:t.slug, tier:t.tier||'hospital',
+          db_url:t.db_url||'', agent_name:t.agent_name||'Arya', agent_language:t.agent_language||'ml-IN',
+          phone:t.phone||'', plivo_number:t.plivo_number||'', address:t.address||'',
+          contact_person:t.contact_person||'', contact_phone:t.contact_phone||'', notes:t.notes||'',
+          active:t.active, features:{ ...(t.features||{}) },
+        };
+      } else {
+        this.tenantForm = {
+          name:'', name_ml:'', slug:'', tier:'hospital', db_url:'',
+          agent_name:'Arya', agent_language:'ml-IN', phone:'', plivo_number:'',
+          address:'', contact_person:'', contact_phone:'', notes:'', active:true,
+          features:{ ...(this.featuresCatalog.tier_defaults['hospital']||{}) },
+        };
+      }
+      this.modals.tenant = true;
+    },
+    async saveTenant() {
+      const f = this.tenantForm;
+      if (!f.name) { this.notify('Name is required','error'); return; }
+      this.tenantSaving = true;
+      try {
+        if (this.tenantEditing) {
+          await this.api(`/tenants/${f.slug}`, { method:'PUT', body: JSON.stringify({
+            name:f.name, name_ml:f.name_ml, tier:f.tier, db_url:f.db_url,
+            plivo_number:f.plivo_number, agent_name:f.agent_name, agent_language:f.agent_language,
+            address:f.address, phone:f.phone, contact_person:f.contact_person,
+            contact_phone:f.contact_phone, notes:f.notes, active:f.active,
+          })});
+          await this.api(`/tenants/${f.slug}/features`, { method:'PUT', body: JSON.stringify({ features:f.features }) });
+          this.notify('Tenant updated');
+        } else {
+          const res = await this.api('/tenants', { method:'POST', body: JSON.stringify(f) });
+          this.notify(`Tenant created — ${res.migrations_applied||0} migrations applied`);
+        }
+        await this.loadTenants();
+        this.modals.tenant = false;
+      } catch(e) { this.notify('Error: '+e.message,'error'); }
+      finally { this.tenantSaving = false; }
     },
 
     // ── Hospital settings form ───────────────────────────────────────────────

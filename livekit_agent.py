@@ -136,8 +136,13 @@ _DTMF = {
 }
 
 
-def _build_llm():
-    """Resilient LLM: Groq llama-3.3-70b primary, Sarvam-M fallback.
+def _build_llm(premium: bool = True):
+    """Resilient LLM: Groq primary, Sarvam-M fallback.
+
+    `premium` (tenant feature flag) picks the Groq model: 70b when on, 8b when
+    off. On Groq's free tier 70b actually has a HIGHER shared TPM (12k vs 6k),
+    so 70b is the safe default; the flag exists so a paid/cost-sensitive tenant
+    can drop to 8b from the dashboard.
 
     Groq's free tier shares a small org-wide TPM (12k) across all concurrent
     calls, so a second turn in the same minute often 429s — the agent would
@@ -155,7 +160,7 @@ def _build_llm():
         # model. Malayalam script is token-dense, so 200 truncates a 2-sentence
         # reply mid-word; 512 fits a full reply. Low temp curbs llama-3.3's
         # habit of emitting its <function=...> tool syntax as spoken text.
-        model="llama-3.3-70b-versatile",
+        model="llama-3.3-70b-versatile" if premium else "llama-3.1-8b-instant",
         max_completion_tokens=512,
         temperature=0.4,
     )
@@ -214,23 +219,45 @@ class AcousticSensoryLayer:
 # Hospital context helpers
 # ==============================================================================
 
-async def _resolve_hospital_id(room_name: str) -> str:
+async def _resolve_call_target(room_name: str) -> tuple[str, dict, Optional[dict]]:
+    """Resolve room -> (hospital_id, features, tenant).
+
+    Looks the slug up in the control-DB tenant registry. If that tenant has its
+    OWN database (db_url), binds this call's async context to that DB so every
+    subsequent query routes there. The hospital row is then resolved inside the
+    correct database. Falls back to single-DB / settings.HOSPITAL_ID on miss.
+    """
     slug = room_name.split("-call-")[0] if "-call-" in room_name else room_name
+    from src.config.settings import settings
+    features: dict = {}
+    tenant: Optional[dict] = None
+
+    try:
+        from src.tenancy import registry
+        from src.db.queries import set_tenant_db_url
+        tenant = await registry.get_tenant(slug.lower())
+        if tenant:
+            features = tenant.get("features", {}) or {}
+            if tenant.get("db_url"):
+                set_tenant_db_url(tenant["db_url"])
+    except Exception as exc:
+        print(f"[warn] tenant registry lookup failed: {exc}", file=sys.stderr)
+
     try:
         from src.db.queries import get_pool
-        from src.config.settings import settings
-        pool = await get_pool()
+        pool = await get_pool()   # tenant pool if bound above, else control
         async with pool.acquire() as conn:
             row = await conn.fetchrow(
                 "SELECT id FROM hospitals WHERE "
                 "slug=$1 OR LOWER(REPLACE(name,' ','-'))=$1 LIMIT 1",
                 slug.lower(),
             )
-        return str(row["id"]) if row else settings.HOSPITAL_ID
+        hospital_id = str(row["id"]) if row else settings.HOSPITAL_ID
     except Exception as exc:
         print(f"[warn] hospital ID lookup failed: {exc}", file=sys.stderr)
-        from src.config.settings import settings
-        return settings.HOSPITAL_ID
+        hospital_id = settings.HOSPITAL_ID
+
+    return hospital_id, features, tenant
 
 
 async def _load_hospital_ctx(hospital_id: str):
@@ -421,6 +448,7 @@ class HospitalVoiceAgent(Agent):
         hospital_name: str,
         call_started_at: datetime,
         agent_language: str = "ml-IN",
+        premium_llm: bool = True,
     ) -> None:
         super().__init__(
             instructions=system_prompt,
@@ -433,7 +461,7 @@ class HospitalVoiceAgent(Agent):
             # Shorter end-of-speech silence → Arya starts replying ~0.2s sooner.
             # 0.3s is still long enough to not cut a caller mid-pause.
             vad=silero.VAD.load(min_silence_duration=0.3),
-            llm=_build_llm(),
+            llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="bulbul:v3",
@@ -527,8 +555,8 @@ async def entrypoint(ctx: JobContext) -> None:
     call_started_at = datetime.now(timezone.utc)
     _log.info("arteq call room=%s call_id=%s", room_name, call_id[:8])
 
-    # ── Hospital context ──────────────────────────────────────────────────────
-    hospital_id   = await _resolve_hospital_id(room_name)
+    # ── Hospital context (tenant-aware: binds to the tenant's own DB) ──────────
+    hospital_id, tenant_features, _tenant = await _resolve_call_target(room_name)
     hospital_ctx  = await _load_hospital_ctx(hospital_id)
     hospital_name = hospital_ctx.name if hospital_ctx else "Arteq Hospital"
     hospital_tier = getattr(hospital_ctx, "tier", "hospital") if hospital_ctx else "hospital"
@@ -553,7 +581,8 @@ async def entrypoint(ctx: JobContext) -> None:
             if ident.startswith("+") or (ident.startswith("91") and len(ident) >= 12):
                 caller_phone = ident if ident.startswith("+") else f"+{ident}"
                 break
-        if caller_phone:
+        from src.tenancy.features import enabled as _feat_on
+        if caller_phone and _feat_on(tenant_features, "patient_recognition"):
             patient_profile = await _load_patient_profile(caller_phone, hospital_id)
     except Exception:
         pass
@@ -575,9 +604,14 @@ async def entrypoint(ctx: JobContext) -> None:
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
     greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name)
 
-    # ── Tool set (clinic tier gets a leaner set) ───────────────────────────────
+    # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
-    tools = CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS
+    from src.tenancy.features import enabled as _feat_on
+    tools = list(CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS)
+    def _tool_name(t) -> str:
+        return getattr(t, "name", None) or getattr(t, "__name__", "")
+    if not _feat_on(tenant_features, "multi_department_routing"):
+        tools = [t for t in tools if _tool_name(t) != "transfer_to_department"]
 
     # ── Acoustic sensory layer ────────────────────────────────────────────────
     sensory = AcousticSensoryLayer()
@@ -618,6 +652,7 @@ async def entrypoint(ctx: JobContext) -> None:
         hospital_name=hospital_name,
         call_started_at=call_started_at,
         agent_language=agent_language,
+        premium_llm=_feat_on(tenant_features, "premium_llm"),
     )
 
     # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires

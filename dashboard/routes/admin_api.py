@@ -1411,6 +1411,247 @@ async def test_his_connection(hospital_id: str):
         return {"reachable": False, "reason": str(exc)}
 
 
+# ── Tenants (multi-DB control plane) ────────────────────────────────────────────
+#
+# Each tenant (hospital/clinic) has its OWN Supabase database. The control DB
+# (settings.DATABASE_URL) holds the registry that maps slug -> db_url + features.
+# Onboarding: create the registry row, provision the tenant DB (run all
+# migrations), then seed the hospital + departments/doctors/faqs into that DB.
+# Features are auto-filled from the tier matrix and editable per tenant.
+
+class TenantOnboardIn(BaseModel):
+    # identity / persona
+    name: str
+    name_ml: Optional[str] = ""
+    slug: Optional[str] = None              # auto-derived if omitted
+    tier: Optional[str] = "hospital"        # "hospital" | "clinic"
+    agent_name: Optional[str] = "Arya"
+    agent_language: Optional[str] = "ml-IN"
+    # contact / location
+    address: Optional[str] = ""
+    phone: Optional[str] = ""
+    contact_person: Optional[str] = ""
+    contact_phone: Optional[str] = ""
+    plivo_number: Optional[str] = ""
+    notes: Optional[str] = ""
+    # the hospital's OWN Supabase connection string (admin pastes it)
+    db_url: Optional[str] = ""
+    # feature flag overrides on top of tier defaults; None = pure tier defaults
+    features: Optional[dict] = None
+    # optional seed data for the tenant DB
+    hours: Optional[dict] = None
+    departments: list[_DeptIn] = []
+    faqs: list[_FaqIn] = []
+    emergency_contacts: list[_EmergencyIn] = []
+
+
+class TenantUpdateIn(BaseModel):
+    name: Optional[str] = None
+    name_ml: Optional[str] = None
+    tier: Optional[str] = None
+    db_url: Optional[str] = None
+    plivo_number: Optional[str] = None
+    agent_name: Optional[str] = None
+    agent_language: Optional[str] = None
+    address: Optional[str] = None
+    phone: Optional[str] = None
+    contact_person: Optional[str] = None
+    contact_phone: Optional[str] = None
+    notes: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class FeaturesIn(BaseModel):
+    features: dict
+
+
+async def _seed_tenant_db(db_url: str, slug: str, body: TenantOnboardIn) -> str:
+    """Seed the hospital row + departments/doctors/faqs/emergency into the
+    tenant's own DB. Returns the new hospital_id (within that DB)."""
+    from src.tenancy.pools import tenant_pool
+
+    hospital_id = str(uuid.uuid4())
+    pool = await tenant_pool(db_url)
+    async with pool.acquire() as conn:
+        tier = body.tier if body.tier in ("clinic", "hospital") else "hospital"
+        await conn.execute(
+            """INSERT INTO hospitals
+               (id, name, name_ml, address, phone, hours, active, slug, tier,
+                agent_name, agent_language)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)""",
+            hospital_id, body.name, body.name_ml or "",
+            body.address or "", body.phone or "",
+            json.dumps(body.hours or {}), True, slug, tier,
+            body.agent_name or "Arya", body.agent_language or "ml-IN",
+        )
+        for dept in body.departments:
+            dept_id = str(uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO departments
+                   (id, hospital_id, name, name_ml, floor, location_hint, phone_ext, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                dept_id, hospital_id, dept.name, dept.name_ml or "",
+                dept.floor or "", dept.location_hint or "", dept.phone_ext or "", True,
+            )
+            for doc in dept.doctors:
+                doc_id = str(uuid.uuid4())
+                await conn.execute(
+                    """INSERT INTO doctors
+                       (id, hospital_id, dept_id, name, name_ml, specialty, qualifications, active)
+                       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+                    doc_id, hospital_id, dept_id, doc.name, doc.name_ml or "",
+                    doc.specialty or "", doc.qualifications or "", True,
+                )
+                for sched in doc.schedules:
+                    await conn.execute(
+                        """INSERT INTO schedules
+                           (id, doctor_id, hospital_id, day_of_week, start_time, end_time, room, active)
+                           VALUES ($1,$2,$3,$4,$5::time,$6::time,$7,$8)""",
+                        str(uuid.uuid4()), doc_id, hospital_id,
+                        sched.day_of_week, sched.start_time, sched.end_time,
+                        sched.room or "", True,
+                    )
+        for faq in body.faqs:
+            await conn.execute(
+                """INSERT INTO faqs
+                   (id, hospital_id, category, question, answer, answer_ml, tags, priority, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+                str(uuid.uuid4()), hospital_id, faq.category or "general",
+                faq.question, faq.answer, faq.answer_ml or "",
+                json.dumps(faq.tags or []), faq.priority or 0, True,
+            )
+        for ec in body.emergency_contacts:
+            await conn.execute(
+                """INSERT INTO emergency_contacts
+                   (id, hospital_id, label, label_ml, phone, priority, active)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7)""",
+                str(uuid.uuid4()), hospital_id, ec.label, ec.label_ml or "",
+                ec.phone, ec.priority or 0, True,
+            )
+    return hospital_id
+
+
+@router.get("/features/catalog", dependencies=[Depends(_require_auth)])
+async def features_catalog():
+    """The feature key->label list plus per-tier default maps, for the form."""
+    from src.tenancy import features as feat
+    return {
+        "features": feat.FEATURES,
+        "tier_defaults": {t: feat.default_features(t) for t in feat.TIER_DEFAULTS},
+    }
+
+
+@router.get("/tenants", dependencies=[Depends(_require_auth)])
+async def list_tenants_route(include_inactive: bool = True):
+    from src.tenancy import registry
+    tenants = await registry.list_tenants(include_inactive=include_inactive)
+    for t in tenants:
+        t["id"] = str(t["id"])
+        if t.get("created_at"):
+            t["created_at"] = t["created_at"].isoformat()
+    return tenants
+
+
+@router.get("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+async def get_tenant_route(slug: str):
+    from src.tenancy import registry
+    t = await registry.get_tenant(slug)
+    if not t:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    t["id"] = str(t["id"])
+    if t.get("created_at"):
+        t["created_at"] = t["created_at"].isoformat()
+    return t
+
+
+@router.post("/tenants", dependencies=[Depends(_require_auth)])
+async def create_tenant_route(body: TenantOnboardIn):
+    """Onboard a hospital/clinic: registry row (features auto from tier) +
+    provision its own Supabase DB (run migrations) + seed hospital data."""
+    from src.tenancy import registry
+    from src.tenancy.pools import provision_tenant_db
+
+    if not body.name:
+        raise HTTPException(status_code=400, detail="name is required")
+    slug = body.slug or _derive_slug(body.name)
+
+    if await registry.get_tenant(slug):
+        raise HTTPException(status_code=409, detail=f"Tenant slug '{slug}' already exists")
+
+    migrations_applied = 0
+    hospital_id = ""
+    if body.db_url:
+        try:
+            migrations_applied = await provision_tenant_db(body.db_url)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502,
+                detail=f"Could not reach/provision tenant DB: {exc}",
+            )
+        try:
+            hospital_id = await _seed_tenant_db(body.db_url, slug, body)
+        except Exception as exc:
+            logger.warning("tenant_seed_failed", slug=slug, error=str(exc))
+
+    tenant = await registry.create_tenant(
+        slug=slug,
+        name=body.name,
+        name_ml=body.name_ml or "",
+        tier=body.tier or "hospital",
+        db_url=body.db_url or "",
+        features=body.features,
+        plivo_number=body.plivo_number or "",
+        agent_name=body.agent_name or "Arya",
+        agent_language=body.agent_language or "ml-IN",
+        address=body.address or "",
+        phone=body.phone or "",
+        contact_person=body.contact_person or "",
+        contact_phone=body.contact_phone or "",
+        notes=body.notes or "",
+    )
+    tenant["id"] = str(tenant["id"])
+    if tenant.get("created_at"):
+        tenant["created_at"] = tenant["created_at"].isoformat()
+    return {
+        "tenant": tenant,
+        "slug": slug,
+        "hospital_id": hospital_id,
+        "migrations_applied": migrations_applied,
+        "status": "created",
+    }
+
+
+@router.put("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+async def update_tenant_route(slug: str, body: TenantUpdateIn):
+    from src.tenancy import registry
+    fields = {k: v for k, v in body.model_dump().items() if v is not None}
+    t = await registry.update_tenant(slug, fields)
+    if not t:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    t["id"] = str(t["id"])
+    if t.get("created_at"):
+        t["created_at"] = t["created_at"].isoformat()
+    return t
+
+
+@router.put("/tenants/{slug}/features", dependencies=[Depends(_require_auth)])
+async def set_tenant_features_route(slug: str, body: FeaturesIn):
+    from src.tenancy import registry
+    t = await registry.set_features(slug, body.features)
+    if not t:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"slug": slug, "features": t["features"]}
+
+
+@router.delete("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+async def deactivate_tenant_route(slug: str):
+    from src.tenancy import registry
+    ok = await registry.deactivate_tenant(slug)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Tenant not found")
+    return {"slug": slug, "active": False}
+
+
 # ── Utility ───────────────────────────────────────────────────────────────────
 
 def _maybe_json(value):

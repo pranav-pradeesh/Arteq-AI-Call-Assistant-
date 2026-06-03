@@ -71,6 +71,24 @@ _pool: Optional[asyncpg.Pool] = None
 _pool_lock = asyncio.Lock()
 _pool_failed = False   # fail-fast after first connection failure
 
+# Multi-tenant routing: when a call is bound to a tenant with its OWN database,
+# the agent sets this contextvar to that tenant's db_url. get_pool() then routes
+# ALL data queries (context, appointments, call logs, …) to that tenant's pool.
+# Empty/unset = control DB (single-DB mode + admin/registry operations).
+import contextvars
+_tenant_db_url: contextvars.ContextVar[str] = contextvars.ContextVar("tenant_db_url", default="")
+
+
+def set_tenant_db_url(db_url: str) -> None:
+    """Bind the current async context (one call) to a tenant's own database."""
+    _tenant_db_url.set(db_url or "")
+
+
+async def get_control_pool() -> asyncpg.Pool:
+    """The CONTROL database pool — always settings.DATABASE_URL, never routed.
+    Use for the tenant registry and migrations."""
+    return await _get_control_pool()
+
 
 def _resolve_ssl(url: str):
     """Decide the asyncpg ssl parameter from DB_SSL + the connection host.
@@ -95,7 +113,7 @@ def _resolve_ssl(url: str):
     return "require"
 
 
-async def get_pool() -> asyncpg.Pool:
+async def _get_control_pool() -> asyncpg.Pool:
     global _pool, _pool_failed
     if _pool is not None:
         return _pool
@@ -117,6 +135,16 @@ async def get_pool() -> asyncpg.Pool:
                 _pool_failed = True
                 raise
     return _pool
+
+
+async def get_pool() -> asyncpg.Pool:
+    """Tenant-routed pool. If the current context is bound to a tenant DB
+    (set_tenant_db_url), return that tenant's pool; otherwise the control pool."""
+    db_url = _tenant_db_url.get()
+    if db_url:
+        from src.tenancy.pools import tenant_pool
+        return await tenant_pool(db_url)
+    return await _get_control_pool()
 
 
 async def close_pool() -> None:

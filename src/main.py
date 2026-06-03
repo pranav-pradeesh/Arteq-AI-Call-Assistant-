@@ -23,7 +23,7 @@ from fastapi.staticfiles import StaticFiles
 
 try:
     from src.config.settings import settings
-    from src.db.queries import close_pool, get_pool
+    from src.db.queries import close_pool, get_control_pool as get_pool
     from src.observability.logger import configure_logging, get_logger
     from src.observability.metrics import get_metrics_response
 except Exception as _import_exc:
