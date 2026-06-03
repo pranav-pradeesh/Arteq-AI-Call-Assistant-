@@ -37,6 +37,7 @@ from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, 
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import openai, sarvam, silero
+from openai import AsyncClient as _AsyncOpenAI  # raw SDK, for custom-header Sarvam client
 
 load_dotenv()
 
@@ -133,6 +134,46 @@ _DTMF = {
     "*": "please repeat that",
     "#": "thank you goodbye",
 }
+
+
+def _build_llm():
+    """Resilient LLM: Groq llama-3.3-70b primary, Sarvam-M fallback.
+
+    Groq's free tier shares a small org-wide TPM (12k) across all concurrent
+    calls, so a second turn in the same minute often 429s — the agent would
+    otherwise go silent mid-call (worse than a dumb IVR). FallbackAdapter swaps
+    to Sarvam-M (built for Indian languages, separate quota) the instant Groq
+    fails, so Arya always answers.
+
+    Sarvam's OpenAI-compatible endpoint authenticates with an
+    `api-subscription-key` header, not Bearer, so it needs a custom client.
+    """
+    groq = openai.LLM(
+        base_url="https://api.groq.com/openai/v1",
+        api_key=os.getenv("GROQ_API_KEY", ""),
+        # llama3-70b-8192 is deprecated; 3.3-versatile is the current 70B chat
+        # model. Malayalam script is token-dense, so 200 truncates a 2-sentence
+        # reply mid-word; 512 fits a full reply. Low temp curbs llama-3.3's
+        # habit of emitting its <function=...> tool syntax as spoken text.
+        model="llama-3.3-70b-versatile",
+        max_completion_tokens=512,
+        temperature=0.4,
+    )
+
+    sarvam_key = os.getenv("SARVAM_API_KEY", "")
+    if not sarvam_key:
+        return groq
+
+    sarvam_llm = openai.LLM(
+        model="sarvam-m",
+        temperature=0.4,
+        client=_AsyncOpenAI(
+            api_key=sarvam_key,
+            base_url="https://api.sarvam.ai/v1",
+            default_headers={"api-subscription-key": sarvam_key},
+        ),
+    )
+    return agents_llm.FallbackAdapter([groq, sarvam_llm])
 
 
 # ==============================================================================
@@ -384,20 +425,7 @@ class HospitalVoiceAgent(Agent):
             # Shorter end-of-speech silence → Arya starts replying ~0.2s sooner.
             # 0.3s is still long enough to not cut a caller mid-pause.
             vad=silero.VAD.load(min_silence_duration=0.3),
-            llm=openai.LLM(
-                base_url="https://api.groq.com/openai/v1",
-                api_key=os.getenv("GROQ_API_KEY", ""),
-                # llama3-70b-8192 is deprecated by Groq; 3.3-versatile is the
-                # current 70B chat model. Cap output to bound TPM, but Malayalam
-                # script is token-dense (many tokens per char), so 200 truncates
-                # a normal 2-sentence reply mid-word. 512 fits a full reply.
-                model="llama-3.3-70b-versatile",
-                max_completion_tokens=512,
-                # Lower temp curbs llama-3.3's tendency to emit its internal
-                # <function=...> tool-call syntax as spoken text (seen in real
-                # call transcripts being read aloud by TTS).
-                temperature=0.4,
-            ),
+            llm=_build_llm(),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="bulbul:v3",
