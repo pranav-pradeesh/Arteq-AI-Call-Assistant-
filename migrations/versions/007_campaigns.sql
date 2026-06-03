@@ -27,5 +27,10 @@ CREATE TABLE IF NOT EXISTS campaign_recipients (
     called_at    TIMESTAMPTZ
 );
 
+-- Heal pre-existing campaign_recipients tables created before these columns
+-- existed (CREATE TABLE IF NOT EXISTS would otherwise skip them).
+ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS call_status TEXT NOT NULL DEFAULT 'pending';
+ALTER TABLE campaign_recipients ADD COLUMN IF NOT EXISTS called_at   TIMESTAMPTZ;
+
 CREATE INDEX IF NOT EXISTS ix_crecp_campaign ON campaign_recipients(campaign_id);
 CREATE INDEX IF NOT EXISTS ix_crecp_status  ON campaign_recipients(call_status);
