@@ -35,7 +35,7 @@ from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
-from livekit.plugins import openai, sarvam
+from livekit.plugins import openai, sarvam, silero
 
 load_dotenv()
 
@@ -317,21 +317,15 @@ class HospitalVoiceAgent(Agent):
         call_started_at: datetime,
         agent_language: str = "ml-IN",
     ) -> None:
-        initial_ctx = agents_llm.ChatContext()
-        initial_ctx.append(role="system", text=system_prompt)
-
         super().__init__(
-            chat_ctx=initial_ctx,
+            instructions=system_prompt,
             tools=tools,
             stt=sarvam.STT(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model="saaras:v3",
                 language="unknown",
-                # Required for turn_detection="stt" on AgentSession — emits
-                # start/end-of-speech events the session uses to flip turns.
-                # Without it the session waits forever and never replies.
-                flush_signal=True,
             ),
+            vad=silero.VAD.load(),
             llm=openai.LLM(
                 base_url="https://api.groq.com/openai/v1",
                 api_key=os.getenv("GROQ_API_KEY", ""),
@@ -523,11 +517,7 @@ async def entrypoint(ctx: JobContext) -> None:
         agent_language=agent_language,
     )
 
-    session = AgentSession(
-        userdata=session_data,
-        turn_detection="stt",          # ◀ ADD THIS
-        min_endpointing_delay=0.07,    # ◀ ADD THIS (handles Sarvam's ~70ms processing latency)
-    )
+    session = AgentSession(userdata=session_data)
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     async def _on_end_async(_event=None):
