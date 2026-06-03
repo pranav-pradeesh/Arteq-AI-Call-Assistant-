@@ -296,6 +296,8 @@ STYLE: Reply in the caller's language (Malayalam default; also Hindi/Tamil/Kanna
 
 NEVER invent doctor names, timings, fees, or availability — if unknown, use a tool or transfer. Before booking, repeat the name, doctor, date and time back to confirm.
 
+CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}") in what you say — call tools silently through the tool interface. If you need booking details, simply ask the caller for them in one short sentence.
+
 If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → patient may be in pain/frightened: speak very gently, reassure first.
 
 EMERGENCY (chest pain, severe bleeding, unconscious, can't breathe, stroke, poisoning): call alert_emergency FIRST, say "Connecting you to emergency — please stay on the line."
@@ -391,6 +393,10 @@ class HospitalVoiceAgent(Agent):
                 # a normal 2-sentence reply mid-word. 512 fits a full reply.
                 model="llama-3.3-70b-versatile",
                 max_completion_tokens=512,
+                # Lower temp curbs llama-3.3's tendency to emit its internal
+                # <function=...> tool-call syntax as spoken text (seen in real
+                # call transcripts being read aloud by TTS).
+                temperature=0.4,
             ),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
