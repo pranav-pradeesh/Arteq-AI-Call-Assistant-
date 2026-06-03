@@ -355,7 +355,8 @@ HOSPITAL:
 TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
-def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict]) -> str:
+def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
+                    returning_name: str = "") -> str:
     hosp_name = (hospital_ctx.name_ml or hospital_ctx.name) if hospital_ctx else "the hospital"
 
     if outbound_context:
@@ -389,9 +390,16 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
         hour = datetime.now(pytz.timezone("Asia/Kolkata")).hour
         from src.ai.groq_brain import build_greeting_text
         from src.config.settings import settings
-        return build_greeting_text(hosp_name, settings.AGENT_NAME, hour)
+        base = build_greeting_text(hosp_name, settings.AGENT_NAME, hour)
     except Exception:
-        return f"Namaste! {hosp_name}-ലേക്ക് സ്വാഗതം. ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
+        base = f"Namaste! {hosp_name}-ലേക്ക് സ്വാഗതം. ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
+
+    # Returning caller recognised by phone → greet by name in the very first line
+    # (something a menu-tree IVR can never do).
+    if returning_name:
+        first = returning_name.split()[0]
+        return f"Namaste {first}! {base}"
+    return base
 
 
 # ==============================================================================
@@ -564,7 +572,8 @@ async def entrypoint(ctx: JobContext) -> None:
             "Greet them by name."
         )
 
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context)
+    returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
+    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name)
 
     # ── Tool set (clinic tier gets a leaner set) ───────────────────────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
