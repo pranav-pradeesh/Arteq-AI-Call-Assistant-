@@ -35,6 +35,7 @@ import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
+from livekit.agents import AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import openai, sarvam, silero
@@ -103,6 +104,17 @@ def _detect_tts_lang(text: str, fallback: str) -> str:
     return fallback
 
 
+# Deterministic safety net: weaker LLMs still transliterate "Doctor" to Malayalam
+# despite the prompt rule. Rewrite the common forms (full word + "ഡോ." abbrev)
+# back to English so Bulbul pronounces it as "Doctor", not "ഡോ". The bare two-
+# letter "ഡോ" without a period is left alone — it appears inside other words.
+_DR_RE = re.compile(r"ഡോക്ടര്‍|ഡോക്ടർ|ഡോക്ടര്|ഡോ\.")
+
+
+def _normalize_for_tts(text: str) -> str:
+    return _DR_RE.sub("Doctor ", text)
+
+
 def _tts_cache_key(opts, text: str, lang: str) -> str:
     import hashlib
     raw = f"{opts.model}|{lang}|{opts.speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
@@ -119,8 +131,9 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         from src.cache.store import tts_cache, TTS_CACHE_TTL
         # Detect reply language per-utterance so one agent speaks every caller's
         # language (the LLM replies in their language; we match the voice to it).
-        lang = _detect_tts_lang(self._input_text, self._opts.target_language_code)
-        cache_key = _tts_cache_key(self._opts, self._input_text, lang)
+        text = _normalize_for_tts(self._input_text)
+        lang = _detect_tts_lang(text, self._opts.target_language_code)
+        cache_key = _tts_cache_key(self._opts, text, lang)
         cached = tts_cache.get(cache_key)
         if cached is not None:
             output_emitter.initialize(
@@ -138,7 +151,7 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         # the only voice knobs v3 accepts here.
         payload = {
             "target_language_code": lang,
-            "text": self._input_text,
+            "text": text,
             "speaker": self._opts.speaker,
             "pace": self._opts.pace,
             "speech_sample_rate": self._opts.speech_sample_rate,
@@ -236,7 +249,11 @@ class BulbulV3TTS(_SarvamTTS):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-_MAX_CTX = 4   # keep system prompt + last 4 messages (2 turns) — Groq TPM is tight
+# Keep system prompt + last 12 messages (6 turns). A booking spans several
+# turns (name → doctor → date → time → confirm); at 2 turns the agent forgot
+# what the caller already said. The per-turn cost is dominated by the large
+# system prompt re-sent every turn, so a few short history messages are cheap.
+_MAX_CTX = 12
 
 _DTMF = {
     "1": "OPD timing please",
@@ -248,6 +265,25 @@ _DTMF = {
     "*": "please repeat that",
     "#": "thank you goodbye",
 }
+
+
+class _GroqLLM(openai.LLM):
+    """Groq LLM that injects anti-repetition penalties on every turn.
+
+    The voice pipeline calls ``chat()`` internally, so there's no per-call hook to
+    pass penalties through — we set them here. frequency_penalty curbs the same
+    word recurring within a reply; presence_penalty pushes the model to introduce
+    new wording instead of echoing the caller's phrasing back. Both are Groq/OpenAI
+    chat params; Sarvam's leg stays plain (it may reject them).
+    """
+
+    def chat(self, **kwargs):
+        ek = kwargs.get("extra_kwargs")
+        extra = dict(ek) if isinstance(ek, dict) else {}
+        extra.setdefault("frequency_penalty", 0.4)
+        extra.setdefault("presence_penalty", 0.3)
+        kwargs["extra_kwargs"] = extra
+        return super().chat(**kwargs)
 
 
 def _build_llm(premium: bool = True):
@@ -265,15 +301,16 @@ def _build_llm(premium: bool = True):
     `api-subscription-key` header, not Bearer, so it needs a custom client.
     """
     def _groq(model: str) -> openai.LLM:
-        return openai.LLM(
+        return _GroqLLM(
             base_url="https://api.groq.com/openai/v1",
             api_key=os.getenv("GROQ_API_KEY", ""),
             # Malayalam script is token-dense, so 200 truncates a 2-sentence
-            # reply mid-word; 512 fits a full reply. Low temp curbs llama-3.3's
-            # habit of emitting its <function=...> tool syntax as spoken text.
+            # reply mid-word; 512 fits a full reply. 0.5 adds enough variation to
+            # sound human without letting llama-3.3 drift into emitting its
+            # <function=...> tool syntax as spoken text.
             model=model,
             max_completion_tokens=512,
-            temperature=0.4,
+            temperature=0.5,
         )
 
     chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")] \
@@ -480,11 +517,19 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
 
 STYLE: Reply in the caller's language (Malayalam default; also Hindi/Tamil/Kannada/Telugu/English/Manglish). Max 2 SHORT sentences, end with ONE question. Warm, human, not robotic.
 
-SCRIPT: Keep EVERY English and medical word in plain English letters — Yes, No, OK, ICU, OPD, scanning, copy, SMS, appointment, cardiology, doctor. NEVER transliterate an English word into Malayalam script: say "Yes"/"No"/"OK", never "ഇയെസ്"/"ഇയേസ്"/"നോ"/"ഓകെ"; never "കാപ്പി", never "ഫങ്ഷൻ". Malayalam words stay in Malayalam script.
+ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
+
+NATURAL SPEECH: Write full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — because the voice uses it for breathing and intonation. NEVER repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase. Vary your openings (don't start every reply with the same word).
+
+HUMAN WARMTH: Open most replies with a brief, varied human acknowledgment in the caller's language — "ശരി," / "മനസ്സിലായി," / "തീർച്ചയായും," / "ഉം," / "Sure," — then answer. Rotate them; never use the same one twice in a row. When you book/confirm/help, react like a person ("Great!" / "നന്നായി!"). Keep it to one or two words — warmth, not filler.
+
+SCRIPT: Keep EVERY English and medical word in plain English letters — Yes, No, OK, ICU, OPD, scanning, copy, SMS, appointment, cardiology, Doctor. Always write the word "Doctor" (or "Dr.") in English — NEVER "ഡോ"/"ഡോക്ടർ". NEVER transliterate an English word into Malayalam script: say "Yes"/"No"/"OK", never "ഇയെസ്"/"ഇയേസ്"/"നോ"/"ഓകെ"; never "കാപ്പി", never "ഫങ്ഷൻ". Malayalam words stay in Malayalam script.
 
 ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" — for: whether a department exists, its floor/location, operating hours, open/closed, doctor names and their department, emergency numbers, address, phone, and anything in the HANDBOOK. You already know these; just say the answer.
 
 USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency. Before booking, repeat name, doctor, date and time back to confirm.
+
+NEXT-AVAILABLE DOCTOR: When the caller asks for a department/specialty (e.g. "a cardiologist") rather than a named doctor, do NOT list every doctor and make them choose. Pick ONE doctor in that department, check_availability, and offer the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
 NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
 
@@ -849,7 +894,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        preemptive_generation=False,
+        # Start the LLM the moment the caller pauses, before end-of-turn is fully
+        # confirmed, then keep or discard the draft once VAD settles. Removes most
+        # of the post-speech dead air, so replies feel near-instant.
+        preemptive_generation=True,
         # Cut the post-speech wait before the LLM fires. Defaults are 0.5/6.0s;
         # 0.2/3.0 makes Arya feel near-realtime. max stays 3.0 so a slow speaker
         # who keeps talking past a pause still isn't cut off.
@@ -938,6 +986,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
     await session.start(agent=agent, room=ctx.room, record=False)
+
+    # Reception ambience: a low office hum under the whole call so the caller
+    # feels they reached a real front desk, not a dead line; plus a soft keyboard
+    # clatter while Arya "looks things up" (thinking_sound plays only during LLM
+    # turns), masking processing latency the way a human receptionist's typing
+    # does. Volumes kept well under the voice so speech stays clear. Best-effort —
+    # a failure here must never drop the call.
+    try:
+        bg = BackgroundAudioPlayer(
+            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.12),
+            thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5),
+        )
+        await bg.start(room=ctx.room, agent_session=session)
+    except Exception as bg_exc:
+        print(f"[arteq] background ambience disabled: {bg_exc}", file=sys.stderr)
 
 
 def prewarm(proc) -> None:
