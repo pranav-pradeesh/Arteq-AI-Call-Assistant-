@@ -1250,7 +1250,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # a failure here must never drop the call.
     try:
         bg = BackgroundAudioPlayer(
-            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.12),
+            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.35),
             thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5),
         )
         await bg.start(room=ctx.room, agent_session=session)
