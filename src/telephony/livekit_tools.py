@@ -185,7 +185,6 @@ try:
         hospital_id  = _ud(context, "hospital_id", "")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", "")
-        hospital_ctx = _ud(context, "hospital_ctx")
         hospital_name = _ud(context, "hospital_name", "the hospital")
 
         try:

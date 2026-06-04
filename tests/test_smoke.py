@@ -3,7 +3,6 @@ Smoke tests — verify imports and pure-function logic without a live DB or API.
 Run: pytest tests/test_smoke.py
 """
 import asyncio
-import pytest
 
 
 def test_settings_import():
@@ -64,7 +63,7 @@ def test_cache_store_ttl_expired():
 
 def test_hospital_context_hours_for_day():
     """HospitalContext.hours_for_day returns (open, close) or None."""
-    from src.db.queries import HospitalContext, DeptInfo
+    from src.db.queries import HospitalContext
     ctx = HospitalContext(
         hospital_id="test",
         name="Test",

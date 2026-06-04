@@ -41,10 +41,25 @@ def _row_to_tenant(row) -> dict:
 
 
 async def get_tenant(slug: str) -> Optional[dict]:
-    """Resolve a tenant by slug. Returns None if unknown."""
+    """Resolve a tenant by slug. Returns None if unknown.
+
+    Cached (TTL) because it sits on the pre-greeting critical path of every
+    inbound call; writes below invalidate the slug.
+    """
+    from src.cache.store import tenant_cache, TENANT_CACHE_TTL
+    hit = tenant_cache.get(slug)
+    if hit is not None:
+        return hit or None      # cached miss stored as {}
     pool = await get_control_pool()
     row = await pool.fetchrow("SELECT * FROM tenants WHERE slug = $1", slug)
-    return _row_to_tenant(row) if row else None
+    tenant = _row_to_tenant(row) if row else None
+    tenant_cache.set(slug, tenant or {}, ttl=TENANT_CACHE_TTL)
+    return tenant
+
+
+def _invalidate_tenant(slug: str) -> None:
+    from src.cache.store import tenant_cache
+    tenant_cache.delete(slug)
 
 
 async def get_tenant_by_plivo(number: str) -> Optional[dict]:
@@ -107,6 +122,7 @@ async def create_tenant(
         contact_phone, notes, active,
     )
     logger.info("tenant_created", slug=slug, tier=tier)
+    _invalidate_tenant(slug)
     return _row_to_tenant(row)
 
 
@@ -124,6 +140,7 @@ async def update_tenant(slug: str, fields: dict) -> Optional[dict]:
         f"UPDATE tenants SET {assignments} WHERE slug = $1 RETURNING *",
         slug, *values,
     )
+    _invalidate_tenant(slug)
     return _row_to_tenant(row) if row else None
 
 
@@ -138,6 +155,7 @@ async def set_features(slug: str, features: dict) -> Optional[dict]:
         "UPDATE tenants SET features = $2::jsonb WHERE slug = $1 RETURNING *",
         slug, json.dumps(merged),
     )
+    _invalidate_tenant(slug)
     return _row_to_tenant(row) if row else None
 
 
@@ -146,4 +164,5 @@ async def deactivate_tenant(slug: str) -> bool:
     result = await pool.execute(
         "UPDATE tenants SET active = FALSE WHERE slug = $1", slug
     )
+    _invalidate_tenant(slug)
     return result.endswith("1")

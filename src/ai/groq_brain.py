@@ -18,18 +18,13 @@ so history is portable across providers within a single call.
 from __future__ import annotations
 
 import asyncio
-import json
-import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Optional
 
-import httpx
 import pytz
 
 from src.ai.base import BrainResult
-from src.config.settings import settings
 from src.db.queries import HospitalContext
 from src.observability.logger import get_logger
 
@@ -53,11 +48,13 @@ _LANG_NAMES = {
 def build_greeting_text(hosp_name: str, agent_name: str, hour: int) -> str:
     """Time-of-day Malayalam greeting. Pure function so it can be pre-warmed."""
     if 5 <= hour < 12:
-        opener = "സുപ്രഭാതം!"        # morning
+        opener = "Good morning!"
     elif 12 <= hour < 17:
-        opener = "ശുഭ ഉച്ചനേരം!"      # afternoon
+        opener = "Good afternoon!"
+    elif 17 <= hour < 21:
+        opener = "Good evening!"
     else:
-        opener = "ശുഭ സന്ധ്യ!"        # evening
+        opener = "Good night!"
     return (
         f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. "
         f"ഞാൻ {agent_name}. എങ്ങനെ സഹായിക്കാം?"
@@ -67,7 +64,7 @@ _MODEL_SMART = "llama-3.3-70b-versatile"
 _MODEL_FAST = "llama-3.1-8b-instant"
 
 _SARVAM_CHAT_URL = "https://api.sarvam.ai/v1/chat/completions"
-_SARVAM_MODEL = "sarvam-m"
+_SARVAM_MODEL = "sarvam-30b"  # sarvam-m deprecated by Sarvam (returns 400)
 
 # History limit: keep last 8 messages (4 turns). Kept small because the
 # system prompt is large and Groq's free tier caps at 6000 tokens/minute —
@@ -171,8 +168,17 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
     # prompt cuts thousands of tokens (Groq free-tier TPM is small).
     lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
     for doc in ctx.doctors:
-        ml_name = f" ({doc.name_ml})" if doc.name_ml else ""
-        lines.append(f"  Dr. {doc.name}{ml_name} — {doc.dept_name}")
+        # DB may already store "Dr. X"; strip so we don't print "Dr. Dr. X".
+        # Names are proper nouns spoken in English (per the SCRIPT rule), so the
+        # Malayalam variant is omitted here — including it makes the model read
+        # each name twice (English + Malayalam) on the voice path.
+        nm = doc.name.strip()
+        low = nm.lower()
+        if low.startswith("dr. "):
+            nm = nm[4:].strip()
+        elif low.startswith("dr "):
+            nm = nm[3:].strip()
+        lines.append(f"  Dr. {nm} — {doc.dept_name}")
 
     lines.extend(["", "EMERGENCY CONTACTS:"])
     for e in ctx.emergency:

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import os
 import sys
 from pathlib import Path
 

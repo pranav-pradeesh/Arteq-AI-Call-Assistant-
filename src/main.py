@@ -14,12 +14,10 @@ Routes:
 from __future__ import annotations
 
 import sys
-import uuid
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
 
 try:
     from src.config.settings import settings
@@ -250,7 +248,7 @@ async def livekit_token(request: Request, slug: str = "default", participant: st
             )
             .with_room_config(
                 RoomConfiguration(
-                    agents=[RoomAgentDispatch(agent_name="arya")],
+                    agents=[RoomAgentDispatch(agent_name=settings.LIVEKIT_DISPATCH_NAME)],
                 )
             )
             .to_jwt()

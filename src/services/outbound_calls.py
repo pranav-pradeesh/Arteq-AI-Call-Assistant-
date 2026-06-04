@@ -14,7 +14,6 @@ from datetime import datetime
 
 import structlog
 
-from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
 

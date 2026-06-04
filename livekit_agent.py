@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import sys
 import uuid
 from datetime import datetime, timezone
@@ -56,19 +57,91 @@ from livekit.agents import (
 from livekit.plugins.sarvam.tts import (
     TTS as _SarvamTTS,
     ChunkedStream as _SarvamChunkedStream,
+    MODEL_SPEAKER_COMPATIBILITY as _SARVAM_COMPAT,
     logger as _sarvam_log,
 )
 
 
+# Unicode script ranges → Sarvam Bulbul v3 target_language_code. Bulbul speaks
+# the text in the phonetics of this language, so it MUST match the script the
+# LLM replied in — otherwise an English/Hindi/Tamil reply gets Malayalam
+# phonetics. Detected per-utterance so one agent handles every caller language.
+_SCRIPT_RANGES = [
+    ("ml-IN", 0x0D00, 0x0D7F),  # Malayalam
+    ("ta-IN", 0x0B80, 0x0BFF),  # Tamil
+    ("te-IN", 0x0C00, 0x0C7F),  # Telugu
+    ("kn-IN", 0x0C80, 0x0CFF),  # Kannada
+    ("hi-IN", 0x0900, 0x097F),  # Devanagari (Hindi/Marathi)
+    ("bn-IN", 0x0980, 0x09FF),  # Bengali
+    ("gu-IN", 0x0A80, 0x0AFF),  # Gujarati
+    ("pa-IN", 0x0A00, 0x0A7F),  # Gurmukhi (Punjabi)
+    ("od-IN", 0x0B00, 0x0B7F),  # Odia
+]
+
+
+def _detect_tts_lang(text: str, fallback: str) -> str:
+    """Pick target_language_code from the dominant Indic script in `text`.
+
+    Counts characters per script; the script with the most chars wins. Pure
+    Latin (no Indic chars) → en-IN. Empty/unknown → the configured fallback.
+    """
+    counts: dict[str, int] = {}
+    latin = 0
+    for ch in text:
+        cp = ord(ch)
+        if 0x41 <= cp <= 0x7A and ch.isalpha():
+            latin += 1
+            continue
+        for code, lo, hi in _SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                counts[code] = counts.get(code, 0) + 1
+                break
+    if counts:
+        return max(counts, key=counts.get)
+    if latin:
+        return "en-IN"
+    return fallback
+
+
+def _tts_cache_key(opts, text: str, lang: str) -> str:
+    import hashlib
+    raw = f"{opts.model}|{lang}|{opts.speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
+    return "tts:" + hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+
 class _BulbulV3ChunkedStream(_SarvamChunkedStream):
     async def _run(self, output_emitter) -> None:
+        # Audio cache: identical text+voice → identical audio. The greeting is
+        # synthesized on every call, so caching it (O(1) lookup) removes a full
+        # Bulbul round-trip from the first thing the caller hears. LRU + 24h TTL
+        # keep the hottest phrases (greeting, confirmations) warm; dynamic
+        # replies churn out harmlessly at the cold end.
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+        # Detect reply language per-utterance so one agent speaks every caller's
+        # language (the LLM replies in their language; we match the voice to it).
+        lang = _detect_tts_lang(self._input_text, self._opts.target_language_code)
+        cache_key = _tts_cache_key(self._opts, self._input_text, lang)
+        cached = tts_cache.get(cache_key)
+        if cached is not None:
+            output_emitter.initialize(
+                request_id="cache",
+                sample_rate=self._tts.sample_rate,
+                num_channels=self._tts.num_channels,
+                mime_type="audio/wav",
+            )
+            for chunk in cached:
+                output_emitter.push(chunk)
+            return
+
+        # v3-only payload: pitch, loudness and enable_preprocessing are all
+        # rejected by bulbul:v3, so none are sent. pace + speech_sample_rate are
+        # the only voice knobs v3 accepts here.
         payload = {
-            "target_language_code": self._opts.target_language_code,
+            "target_language_code": lang,
             "text": self._input_text,
             "speaker": self._opts.speaker,
             "pace": self._opts.pace,
             "speech_sample_rate": self._opts.speech_sample_rate,
-            "enable_preprocessing": self._opts.enable_preprocessing,
             "model": self._opts.model,
         }
         headers = {
@@ -102,16 +175,57 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
                     num_channels=self._tts.num_channels,
                     mime_type="audio/wav",
                 )
-                for b64 in audios:
-                    output_emitter.push(_b64.b64decode(b64))
+                decoded = [_b64.b64decode(b64) for b64 in audios]
+                for chunk in decoded:
+                    output_emitter.push(chunk)
+                tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
         except asyncio.TimeoutError as e:
             raise _APITimeoutErr("Sarvam TTS API request timed out") from e
         except _aiohttp.ClientError as e:
             raise _APIConnErr(f"Sarvam TTS API connection error: {e}") from e
 
 
+# Bulbul v3 voice roster (Sarvam docs). v3 rejects pitch, loudness and
+# enable_preprocessing; its native sample rate is 24000 Hz (v2 used 22050).
+_BULBUL_V3_SPEAKERS = [
+    "shubh", "aditya", "ritu", "priya", "neha", "rahul", "pooja", "rohan",
+    "simran", "kavya", "amit", "dev", "ishita", "shreya", "ratan", "varun",
+    "manan", "sumit", "roopa", "kabir", "aayan", "ashutosh", "advait", "anand",
+    "tanya", "tarun", "sunny", "mani", "gokul", "vijay", "shruti", "suhani",
+    "mohit", "kavitha", "rehan", "soham", "rupali",
+]
+
+# Teach the upstream (v2-only) plugin about v3 so its built-in speaker check
+# validates against the real v3 roster instead of logging "unknown model" and
+# skipping validation on every construction.
+_SARVAM_COMPAT["bulbul:v3"] = {
+    "all": list(_BULBUL_V3_SPEAKERS),
+    "female": [],
+    "male": [],
+}
+
+
 class BulbulV3TTS(_SarvamTTS):
-    """Sarvam Bulbul v3 TTS — drops pitch/loudness, which v3 does not accept."""
+    """Sarvam Bulbul v3 TTS.
+
+    The upstream plugin models only bulbul:v2 — it defaults to a v2 speaker at
+    22050 Hz and its ChunkedStream always sends pitch/loudness. This subclass
+    targets v3 purely:
+      - forces model="bulbul:v3" and the v3-native 24000 Hz sample rate,
+      - validates the speaker against the v3 roster (via the parent, now that v3
+        is registered) — a bad voice fails fast instead of a raw 400,
+      - emits a payload with ONLY v3-accepted fields (no pitch / loudness /
+        enable_preprocessing) through _BulbulV3ChunkedStream.
+    """
+
+    def __init__(self, *, speaker: str = "priya", speech_sample_rate: int = 24000, **kwargs):
+        kwargs.pop("model", None)   # v3 is enforced; ignore any caller override
+        super().__init__(
+            model="bulbul:v3",
+            speaker=speaker,
+            speech_sample_rate=speech_sample_rate,
+            **kwargs,
+        )
 
     def synthesize(self, text: str, *, conn_options=None):
         from livekit.agents import DEFAULT_API_CONNECT_OPTIONS
@@ -137,48 +251,52 @@ _DTMF = {
 
 
 def _build_llm(premium: bool = True):
-    """Resilient LLM: Groq primary, Sarvam-M fallback.
+    """Resilient LLM with a 3-leg fallback chain: 70b → 8b → Sarvam.
 
-    `premium` (tenant feature flag) picks the Groq model: 70b when on, 8b when
-    off. On Groq's free tier 70b actually has a HIGHER shared TPM (12k vs 6k),
-    so 70b is the safe default; the flag exists so a paid/cost-sensitive tenant
-    can drop to 8b from the dashboard.
-
-    Groq's free tier shares a small org-wide TPM (12k) across all concurrent
-    calls, so a second turn in the same minute often 429s — the agent would
-    otherwise go silent mid-call (worse than a dumb IVR). FallbackAdapter swaps
-    to Sarvam-M (built for Indian languages, separate quota) the instant Groq
-    fails, so Arya always answers.
+    `premium` (tenant feature flag) picks the Groq primary: 70b when on, 8b when
+    off. The chain matters because Groq's free tier enforces a *per-model* daily
+    token cap (TPD, 100k): when 70b's cap is exhausted it 429s every turn. Each
+    model has its OWN bucket, so llama-3.1-8b-instant keeps serving — and it's
+    sub-second, vs Sarvam's ~12s. So 8b is the fast middle leg; Sarvam (Indian-
+    language, fully separate provider/quota) is the last resort that guarantees
+    Arya never goes silent even if all of Groq is down.
 
     Sarvam's OpenAI-compatible endpoint authenticates with an
     `api-subscription-key` header, not Bearer, so it needs a custom client.
     """
-    groq = openai.LLM(
-        base_url="https://api.groq.com/openai/v1",
-        api_key=os.getenv("GROQ_API_KEY", ""),
-        # llama3-70b-8192 is deprecated; 3.3-versatile is the current 70B chat
-        # model. Malayalam script is token-dense, so 200 truncates a 2-sentence
-        # reply mid-word; 512 fits a full reply. Low temp curbs llama-3.3's
-        # habit of emitting its <function=...> tool syntax as spoken text.
-        model="llama-3.3-70b-versatile" if premium else "llama-3.1-8b-instant",
-        max_completion_tokens=512,
-        temperature=0.4,
-    )
+    def _groq(model: str) -> openai.LLM:
+        return openai.LLM(
+            base_url="https://api.groq.com/openai/v1",
+            api_key=os.getenv("GROQ_API_KEY", ""),
+            # Malayalam script is token-dense, so 200 truncates a 2-sentence
+            # reply mid-word; 512 fits a full reply. Low temp curbs llama-3.3's
+            # habit of emitting its <function=...> tool syntax as spoken text.
+            model=model,
+            max_completion_tokens=512,
+            temperature=0.4,
+        )
+
+    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")] \
+        if premium else [_groq("llama-3.1-8b-instant")]
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
-    if not sarvam_key:
-        return groq
+    if sarvam_key:
+        chain.append(openai.LLM(
+            # sarvam-m was deprecated by Sarvam (returns 400). sarvam-30b is the
+            # current Indian-language chat model — separate provider, so it keeps
+            # answering when all Groq legs are capped. ~12s latency, hence last.
+            model="sarvam-30b",
+            temperature=0.4,
+            client=_AsyncOpenAI(
+                api_key=sarvam_key,
+                base_url="https://api.sarvam.ai/v1",
+                default_headers={"api-subscription-key": sarvam_key},
+            ),
+        ))
 
-    sarvam_llm = openai.LLM(
-        model="sarvam-m",
-        temperature=0.4,
-        client=_AsyncOpenAI(
-            api_key=sarvam_key,
-            base_url="https://api.sarvam.ai/v1",
-            default_headers={"api-subscription-key": sarvam_key},
-        ),
-    )
-    return agents_llm.FallbackAdapter([groq, sarvam_llm])
+    if len(chain) == 1:
+        return chain[0]
+    return agents_llm.FallbackAdapter(chain)
 
 
 # ==============================================================================
@@ -360,19 +478,23 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
 
     return f"""You are {agent_name}, the warm AI voice receptionist for {hosp_name}.
 
-STYLE: Reply in the caller's language (Malayalam default; also Hindi/Tamil/Kannada/Telugu/English/Manglish). Keep medical terms in English (OPD, ICU, scanning, casualty). Max 2 sentences, end with ONE question. Sound caring, not robotic.
+STYLE: Reply in the caller's language (Malayalam default; also Hindi/Tamil/Kannada/Telugu/English/Manglish). Max 2 SHORT sentences, end with ONE question. Warm, human, not robotic.
 
-NEVER invent doctor names, timings, fees, or availability — if unknown, use a tool or transfer. Before booking, repeat the name, doctor, date and time back to confirm.
+SCRIPT: Keep EVERY English and medical word in plain English letters — Yes, No, OK, ICU, OPD, scanning, copy, SMS, appointment, cardiology, doctor. NEVER transliterate an English word into Malayalam script: say "Yes"/"No"/"OK", never "ഇയെസ്"/"ഇയേസ്"/"നോ"/"ഓകെ"; never "കാപ്പി", never "ഫങ്ഷൻ". Malayalam words stay in Malayalam script.
 
-CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}") in what you say — call tools silently through the tool interface. If you need booking details, simply ask the caller for them in one short sentence.
+ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" — for: whether a department exists, its floor/location, operating hours, open/closed, doctor names and their department, emergency numbers, address, phone, and anything in the HANDBOOK. You already know these; just say the answer.
+
+USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency. Before booking, repeat name, doctor, date and time back to confirm.
+
+NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
+
+CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "collecting information", "gathering information" or anything similar. Speak ONLY the final answer.
 
 If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → patient may be in pain/frightened: speak very gently, reassure first.
 
 EMERGENCY (chest pain, severe bleeding, unconscious, can't breathe, stroke, poisoning): call alert_emergency FIRST, say "Connecting you to emergency — please stay on the line."
 
 DIGITS: 1=OPD/doctor 2=emergency 3=lab 4=pharmacy 5=billing 0=reception *=repeat
-
-TOOLS: check_availability (is doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, request_callback, get_doctor_schedule, get_department_info, send_location_sms, transfer_to_department.
 
 AFTER HOURS: if CLOSED, give next opening and offer (a) book for then, (b) callback, or (c) emergency. Never say "closed, goodbye".
 {outbound_block}
@@ -449,6 +571,7 @@ class HospitalVoiceAgent(Agent):
         call_started_at: datetime,
         agent_language: str = "ml-IN",
         premium_llm: bool = True,
+        vad=None,
     ) -> None:
         super().__init__(
             instructions=system_prompt,
@@ -458,15 +581,18 @@ class HospitalVoiceAgent(Agent):
                 model="saaras:v3",
                 language="unknown",
             ),
-            # Shorter end-of-speech silence → Arya starts replying ~0.2s sooner.
-            # 0.3s is still long enough to not cut a caller mid-pause.
-            vad=silero.VAD.load(min_silence_duration=0.3),
+            # Reuse the worker-prewarmed VAD (loaded once in prewarm_fnc) so the
+            # Silero model load is off the per-call critical path. Fall back to a
+            # fresh load if prewarm was skipped. 0.2s end-of-speech silence →
+            # Arya starts replying sooner; still long enough not to cut a caller
+            # in a natural mid-sentence pause.
+            vad=vad or silero.VAD.load(min_silence_duration=0.2),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
-                model="bulbul:v3",
                 # Bulbul requires the target language code; without it the
-                # request 400s and no audio is produced.
+                # request 400s and no audio is produced. Model (bulbul:v3),
+                # speaker and 24000 Hz sample rate are enforced by BulbulV3TTS.
                 target_language_code=agent_language,
                 speaker="priya",
             ),
@@ -541,6 +667,67 @@ class HospitalVoiceAgent(Agent):
             turn_ctx.truncate(max_items=_MAX_CTX + 1)
         except Exception:
             pass
+
+    async def tts_node(self, text, model_settings):
+        """Streaming tool-syntax stripper — lowest latency for voice.
+
+        Groq's llama-3.3-70b sometimes emits a tool call as literal text
+        (`<function=name>{json}</function>` or a `<tool_call>` block) instead of
+        through the API tool channel; spoken aloud it is gibberish.
+
+        Rather than buffer the whole reply (which would delay first audio until
+        the LLM finished), we strip incrementally: flush every chunk of clean
+        text the instant it is provably outside a tool tag, and only hold back
+        the minimal tail that could still be the start of one. TTS therefore
+        starts on the first words while the LLM is still generating the rest.
+        """
+        async def _clean():
+            buf = ""
+            async for chunk in text:
+                buf += chunk
+                buf = _TOOL_SYNTAX_COMPLETE_RE.sub("", buf)   # drop closed blocks
+                emit, buf = _split_safe(buf)                   # hold only tag-prefix tail
+                if emit:
+                    yield emit
+            tail = _strip_tool_syntax(buf)                     # flush any unterminated tail
+            if tail:
+                yield tail
+
+        async for frame in Agent.default.tts_node(self, _clean(), model_settings):
+            yield frame
+
+
+# Complete tool-call blocks (have a closing tag) — safe to remove mid-stream.
+_TOOL_SYNTAX_COMPLETE_RE = re.compile(
+    r"<function\s*=.*?</function\s*>|<tool_call>.*?</tool_call>",
+    re.DOTALL | re.IGNORECASE,
+)
+
+# Any tool-call markup including an unterminated tail — used at stream end.
+_TOOL_SYNTAX_RE = re.compile(
+    r"<function\s*=.*?</function\s*>"
+    r"|<tool_call>.*?</tool_call>"
+    r"|<function\s*=.*$"
+    r"|<tool_call>.*$",
+    re.DOTALL | re.IGNORECASE,
+)
+
+_TOOL_OPENERS = ("<function", "<tool_call")
+
+
+def _split_safe(buf: str) -> tuple[str, str]:
+    """Split into (emit_now, hold). Hold from the first '<' that could begin a
+    tool opener — everything before it is provably speakable."""
+    for i, ch in enumerate(buf):
+        if ch == "<":
+            tail = buf[i:].lower()
+            if any(op.startswith(tail) or tail.startswith(op) for op in _TOOL_OPENERS):
+                return buf[:i], buf[i:]
+    return buf, ""
+
+
+def _strip_tool_syntax(text: str) -> str:
+    return _TOOL_SYNTAX_RE.sub("", text).strip()
 
 
 # ==============================================================================
@@ -653,6 +840,7 @@ async def entrypoint(ctx: JobContext) -> None:
         call_started_at=call_started_at,
         agent_language=agent_language,
         premium_llm=_feat_on(tenant_features, "premium_llm"),
+        vad=ctx.proc.userdata.get("vad"),
     )
 
     # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires
@@ -663,8 +851,9 @@ async def entrypoint(ctx: JobContext) -> None:
         userdata=session_data,
         preemptive_generation=False,
         # Cut the post-speech wait before the LLM fires. Defaults are 0.5/6.0s;
-        # 0.3/3.0 makes Arya feel snappier without clipping slow speakers.
-        min_endpointing_delay=0.3,
+        # 0.2/3.0 makes Arya feel near-realtime. max stays 3.0 so a slow speaker
+        # who keeps talking past a pause still isn't cut off.
+        min_endpointing_delay=0.2,
         max_endpointing_delay=3.0,
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
@@ -751,8 +940,23 @@ async def entrypoint(ctx: JobContext) -> None:
     await session.start(agent=agent, room=ctx.room, record=False)
 
 
+def prewarm(proc) -> None:
+    """Load the Silero VAD model once per worker process, before any call.
+
+    Silero load is the heaviest per-call setup step; doing it here keeps it off
+    the critical path so the first turn responds sooner.
+    """
+    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.2)
+
+
 if __name__ == "__main__":
-    # agent_name = "arya" → LiveKit Cloud uses explicit dispatch. The token
-    # endpoint (src/main.py) attaches RoomAgentDispatch(agent_name="arya") so
-    # this worker joins the room on creation.
-    cli.run_app(WorkerOptions(entrypoint_fnc=entrypoint, agent_name="arya"))
+    # LiveKit Cloud uses explicit dispatch. The token endpoint (src/main.py)
+    # attaches RoomAgentDispatch(agent_name=LIVEKIT_DISPATCH_NAME) so this worker
+    # joins the room on creation. Name MUST match the token side. Override
+    # LIVEKIT_DISPATCH_NAME locally to isolate a dev worker from prod.
+    from src.config.settings import settings as _settings
+    cli.run_app(WorkerOptions(
+        entrypoint_fnc=entrypoint,
+        prewarm_fnc=prewarm,
+        agent_name=_settings.LIVEKIT_DISPATCH_NAME,
+    ))

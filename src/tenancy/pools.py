@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import pathlib
-from typing import Optional
 
 import asyncpg
 

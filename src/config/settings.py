@@ -33,6 +33,12 @@ class Settings(BaseSettings):
     LIVEKIT_URL: str = ""          # wss://your-project.livekit.cloud
     LIVEKIT_API_KEY: str = ""
     LIVEKIT_API_SECRET: str = ""
+    # Explicit-dispatch agent name. Worker registers under this name and the
+    # token endpoint dispatches to it. MUST match between worker + token.
+    # Override locally (e.g. "arya-local") to isolate a dev worker from the
+    # deployed "arya" worker on the same LiveKit project — otherwise Cloud
+    # load-balances calls across both and a stale prod worker can answer.
+    LIVEKIT_DISPATCH_NAME: str = "arya"
     LIVEKIT_SIP_HOST: str = ""     # e.g. "xx.sip.livekit.cloud" — from LiveKit dashboard
     LIVEKIT_SIP_OUTBOUND_TRUNK_ID: str = ""  # set after running POST /admin/sip/setup
 

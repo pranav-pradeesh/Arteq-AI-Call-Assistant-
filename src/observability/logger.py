@@ -32,7 +32,6 @@ def configure_logging() -> None:
             structlog.processors.StackInfoRenderer(),
             structlog.processors.JSONRenderer(),
         ]
-        renderer = structlog.processors.JSONRenderer()
     else:
         # Human-readable for local development
         processors = [
@@ -41,7 +40,6 @@ def configure_logging() -> None:
             structlog.processors.TimeStamper(fmt="%H:%M:%S"),
             structlog.dev.ConsoleRenderer(colors=True),
         ]
-        renderer = structlog.dev.ConsoleRenderer(colors=True)
 
     structlog.configure(
         processors=processors,

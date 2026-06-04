@@ -1,0 +1,19 @@
+# Ruff config — single source of truth for lint rules so every machine
+# reports identical results. Run: ruff check .
+
+target-version = "py311"
+line-length = 100
+
+[lint]
+# pyflakes (F) catches real bugs: unused imports/vars, redefinitions, undefined
+# names. pycodestyle syntax errors (E7/E9) catch malformed code. Line-length
+# (E501) is excluded on purpose — long lines here are deliberate (SQL, prompts).
+select = ["E4", "E7", "E9", "F", "W6"]
+
+[lint.per-file-ignores]
+# These modules intentionally place imports after runtime setup that MUST run
+# first (UTF-8 stdout reconfig, load_dotenv, logging init). The imports sit next
+# to the code that uses them, with explanatory comments. E402 here is by design.
+"livekit_agent.py" = ["E402"]
+"src/main.py" = ["E402"]
+"src/db/queries.py" = ["E402"]

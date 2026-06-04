@@ -27,7 +27,6 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
-import shutil
 import signal
 import subprocess
 import sys
@@ -36,6 +35,14 @@ import time
 import venv
 import webbrowser
 from pathlib import Path
+
+# The banner/status glyphs are Unicode; Windows' default cp1252 console would
+# crash on them. Force UTF-8 output so the launcher runs on every terminal.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 ROOT = Path(__file__).resolve().parent
 VENV_DIR = ROOT / ".venv"
@@ -191,22 +198,29 @@ def run_processes(args: argparse.Namespace) -> int:
     port = args.port or read_env_port()
     procs: list[tuple[str, subprocess.Popen]] = []
 
-    web_cmd = [py, "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", str(port)]
+    web_cmd = [py, "-u", "-m", "uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", str(port)]
     if args.reload:
         web_cmd.append("--reload")
-    agent_cmd = [py, "livekit_agent.py", "dev"]
+    agent_cmd = [py, "-u", "livekit_agent.py", "dev"]
+
+    # Force unbuffered, UTF-8 child output so logs stream live and Malayalam
+    # transcripts never crash a piped (non-tty) stdout.
+    child_env = dict(os.environ)
+    child_env["PYTHONUNBUFFERED"] = "1"
+    child_env["PYTHONIOENCODING"] = "utf-8"
+    child_env["PYTHONUTF8"] = "1"
 
     try:
         if not args.agent_only:
             say(f"Starting web server on http://localhost:{port}", "step")
-            procs.append(("web", subprocess.Popen(web_cmd, cwd=str(ROOT))))
+            procs.append(("web", subprocess.Popen(web_cmd, cwd=str(ROOT), env=child_env)))
 
         if args.with_agent or args.agent_only:
             if not env_has_voice_keys():
                 say("Agent worker requested but SARVAM/GROQ/LIVEKIT keys are not set in .env.", "warn")
                 say("The worker will start but cannot answer until keys are added.", "warn")
             say("Starting LiveKit agent worker (Arya)…", "step")
-            procs.append(("agent", subprocess.Popen(agent_cmd, cwd=str(ROOT))))
+            procs.append(("agent", subprocess.Popen(agent_cmd, cwd=str(ROOT), env=child_env)))
 
         if not args.agent_only and not args.no_browser:
             url = f"http://localhost:{port}/talk"

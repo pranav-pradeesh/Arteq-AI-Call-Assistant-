@@ -89,7 +89,7 @@
     <div class="orb-wrap"><div class="orb" id="orb">🎙️</div></div>
 
     <label for="slug">Hospital</label>
-    <input id="slug" value="demo" autocomplete="off" spellcheck="false" />
+    <input id="slug" value="default" autocomplete="off" spellcheck="false" />
 
     <div class="row">
       <button class="btn-connect" id="connectBtn">Start call</button>
@@ -147,7 +147,7 @@
     }
 
     async function connect() {
-      const slug = ($("slug").value || "demo").trim().toLowerCase();
+      const slug = ($("slug").value || "default").trim().toLowerCase();
       connectBtn.disabled = true;
       setStatus("Requesting access token…", "warn");
       try {

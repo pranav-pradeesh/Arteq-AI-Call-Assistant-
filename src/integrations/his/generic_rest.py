@@ -35,7 +35,6 @@ Config shape (stored in hospitals.his_config):
 """
 from __future__ import annotations
 
-import sys
 from typing import Optional
 
 import httpx
