@@ -850,6 +850,35 @@ def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
     return max(0, round(stt + tts + llm))
 
 
+class _LatencyMeter:
+    """Running average of perceived response latency — the time from the caller
+    finishing their turn to Arya's first audio. Built from the per-stage metrics
+    LiveKit emits on `metrics_collected`: end-of-utterance delay (VAD settle) +
+    LLM time-to-first-token + TTS time-to-first-byte. Each stage is averaged
+    independently (they don't all fire on every turn), then summed, so a missing
+    metric on one turn doesn't skew the total. Surfaced as latency_avg_ms on the
+    call log to catch a prod latency regression we can't otherwise see."""
+
+    def __init__(self) -> None:
+        self._sum = {"eou": 0.0, "llm": 0.0, "tts": 0.0}
+        self._cnt = {"eou": 0, "llm": 0, "tts": 0}
+
+    def on_metrics(self, ev) -> None:
+        m = getattr(ev, "metrics", ev)
+        # Duck-type by attribute: metric classes vary across plugin versions.
+        for attr, key in (("end_of_utterance_delay", "eou"), ("ttft", "llm"), ("ttfb", "tts")):
+            val = getattr(m, attr, None)
+            if isinstance(val, (int, float)) and val > 0:
+                self._sum[key] += float(val)
+                self._cnt[key] += 1
+
+    def avg_ms(self) -> int:
+        total_s = sum(
+            (self._sum[k] / self._cnt[k]) for k in self._sum if self._cnt[k]
+        )
+        return round(total_s * 1000)
+
+
 class _Backchannel:
     """Murmurs a short "ഉം" on the background-audio track while the caller is
     still talking — the "mm-hm" a human receptionist makes to show they're
@@ -1120,6 +1149,10 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
+    # Perceived-latency meter: averages EOU + LLM TTFT + TTS TTFB across the call.
+    meter = _LatencyMeter()
+    session.on("metrics_collected", meter.on_metrics)
+
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     async def _on_end_async(_event=None):
         try:
@@ -1155,7 +1188,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     started_at=call_started_at,
                     ended_at=ended_at,
                     total_turns=total_turns,
-                    latency_avg_ms=0,
+                    latency_avg_ms=meter.avg_ms(),
                     cost_paise=cost_paise,
                     transcript=transcript,
                     intents=[],
