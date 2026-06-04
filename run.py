@@ -264,15 +264,29 @@ def run_doctor() -> int:
     return subprocess.run([py, str(ROOT / "tools" / "doctor.py")], cwd=str(ROOT)).returncode
 
 
+def run_smoke_call(extra: list[str]) -> int:
+    """Run the headless live-voice smoke-call inside the venv."""
+    py = str(venv_python())
+    return subprocess.run(
+        [py, str(ROOT / "tools" / "smoke_call.py")] + extra, cwd=str(ROOT)
+    ).returncode
+
+
 def main() -> int:
-    # `python run.py doctor` — setup, then diagnose. Survive the venv re-exec
-    # via an env flag so argparse never sees the positional token.
-    is_doctor = (len(sys.argv) > 1 and sys.argv[1] == "doctor") \
-        or os.environ.get("ARTEQ_DOCTOR") == "1"
-    if len(sys.argv) > 1 and sys.argv[1] == "doctor":
-        sys.argv.pop(1)
-    if is_doctor:
-        os.environ["ARTEQ_DOCTOR"] = "1"
+    # Positional subcommands (`doctor`, `smoke-call`) — setup the venv first,
+    # then dispatch. Survive the venv re-exec via env flags so argparse never
+    # sees the positional token.
+    def _take_subcommand(name: str, env_flag: str) -> bool:
+        active = (len(sys.argv) > 1 and sys.argv[1] == name) \
+            or os.environ.get(env_flag) == "1"
+        if len(sys.argv) > 1 and sys.argv[1] == name:
+            sys.argv.pop(1)
+        if active:
+            os.environ[env_flag] = "1"
+        return active
+
+    is_doctor = _take_subcommand("doctor", "ARTEQ_DOCTOR")
+    is_smoke = _take_subcommand("smoke-call", "ARTEQ_SMOKECALL")
 
     parser = argparse.ArgumentParser(description="Arteq Hospital Voice Agent launcher")
     parser.add_argument("--with-agent", "-a", action="store_true", help="also run the LiveKit agent worker")
@@ -302,6 +316,8 @@ def main() -> int:
     ensure_env()
     if is_doctor:
         return run_doctor()
+    if is_smoke:
+        return run_smoke_call(sys.argv[1:])
     return run_processes(args)
 
 

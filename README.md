@@ -135,6 +135,22 @@ It prints `[PASS]` / `[WARN]` / `[FAIL]` per check and writes the full report to
 this and paste the contents of `arteq-diagnostic.log` — it never contains
 secret values, only whether each is set.
 
+### Headless live-voice test (`smoke-call`)
+
+`doctor` proves every dependency is reachable; `smoke-call` proves the actual
+voice loop works **without a human mic**. It boots the agent worker, joins a
+room, lets the agent (Arya) dispatch, and verifies she speaks back.
+
+```bash
+python run.py smoke-call            # uses the "default" tenant
+python run.py smoke-call <slug>     # test a specific tenant
+```
+
+PASS = agent joined and produced audio. It logs the captured greeting
+transcript (Malayalam) and writes `arteq-smokecall.log`; the agent-side log is
+`arteq-worker.log`. If it FAILs, `arteq-worker.log` shows the agent-side cause
+(STT/LLM/TTS keys, LiveKit dispatch, etc.).
+
 ### Manual setup (alternative)
 
 ```bash
