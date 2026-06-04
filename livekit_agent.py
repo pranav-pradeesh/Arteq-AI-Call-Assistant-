@@ -123,9 +123,36 @@ _TTS_EN_MAP = {
 # Longest-first so multi-token forms win over any shorter prefix match.
 _TTS_EN_RE = re.compile("|".join(re.escape(k) for k in sorted(_TTS_EN_MAP, key=len, reverse=True)))
 
+# Inflected forms: Malayalam glues case/postpositional suffixes straight onto a
+# loanword (അപ്പോയിന്റ്മെന്റ് → അപ്പോയിന്റ്മെന്റിന് "for the appointment"). We
+# absorb any trailing Malayalam letters after a known *long, unambiguous* root so
+# the whole word becomes the English term. Restricted to long roots only — a
+# short root like നോ ("no") is a prefix of നോക്കി ("looked") and would mis-fire,
+# so short/ambiguous terms stay exact-match in _TTS_EN_MAP above.
+_TTS_EN_STEMS = {
+    "അപ്പോയിന്റ്മെന്റ": "appointment", "അപ്പോയിന്റ്മെൻറ": "appointment",
+    "കാർഡിയോളജി": "cardiology", "ന്യൂറോളജി": "neurology",
+    "സ്കാനി": "scanning", "റിപ്പോർട്ട": "report", "ഡോക്ടറ": "Doctor",
+}
+# stem + any run of Malayalam-block chars (the glued suffix). Longest stem first.
+_TTS_EN_STEM_RE = re.compile(
+    "(?:" + "|".join(re.escape(s) for s in sorted(_TTS_EN_STEMS, key=len, reverse=True)) + r")[ഀ-ൿ]*"
+)
+_TTS_EN_STEM_LOOKUP = sorted(_TTS_EN_STEMS, key=len, reverse=True)
+
+
+def _stem_repl(m: "re.Match") -> str:
+    word = m.group(0)
+    for stem in _TTS_EN_STEM_LOOKUP:
+        if word.startswith(stem):
+            return " " + _TTS_EN_STEMS[stem] + " "
+    return word
+
 
 def _normalize_for_tts(text: str) -> str:
-    out = _TTS_EN_RE.sub(lambda m: " " + _TTS_EN_MAP[m.group(0)] + " ", text)
+    # Inflected long roots first (absorbs glued suffixes), then exact short forms.
+    out = _TTS_EN_STEM_RE.sub(_stem_repl, text)
+    out = _TTS_EN_RE.sub(lambda m: " " + _TTS_EN_MAP[m.group(0)] + " ", out)
     out = re.sub(r"\s{2,}", " ", out)
     out = re.sub(r"\s+([,.?!।])", r"\1", out)  # drop space before punctuation
     return out.strip()
@@ -701,6 +728,15 @@ class HospitalVoiceAgent(Agent):
 
         stripped = text.strip()
 
+        # Remember the caller's language (script-detected) so the live backchannel
+        # murmurs in their language, not always Malayalam. Callers rarely switch
+        # language mid-call, so the previous turn's detection is a safe predictor.
+        if stripped:
+            try:
+                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, "ml-IN")
+            except Exception:
+                pass
+
         # DTMF: single digit → remap to natural language phrase
         if stripped in _DTMF:
             try:
@@ -791,6 +827,29 @@ def _strip_tool_syntax(text: str) -> str:
     return _TOOL_SYNTAX_RE.sub("", text).strip()
 
 
+# Provider rates (paise). Tune via env if pricing changes; defaults reflect
+# Sarvam's published list as of 2026-06: Saaras STT ₹30/audio-hr, Bulbul TTS
+# ₹0.30 per 1000 chars. Groq LLaMA on the free tier costs us ~0 per call.
+_STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
+_TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
+_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "0"))   # Groq free tier
+
+
+def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
+    """Rough per-call cost in paise. STT bills on call duration (it transcribes
+    the whole audio stream), TTS bills on the characters Arya actually spoke, and
+    the LLM is ~free on Groq. Good enough to surface a per-call rupee figure on
+    the dashboard and catch a runaway-cost regression — not an invoice."""
+    minutes = max(duration_s, 0.0) / 60.0
+    stt = minutes * _STT_PAISE_PER_MIN
+    spoken_chars = sum(
+        len(m.get("text", "")) for m in transcript if m.get("role") == "assistant"
+    )
+    tts = (spoken_chars / 1000.0) * _TTS_PAISE_PER_KCHAR
+    llm = (len(transcript) // 2) * _LLM_PAISE_PER_TURN
+    return max(0, round(stt + tts + llm))
+
+
 class _Backchannel:
     """Murmurs a short "ഉം" on the background-audio track while the caller is
     still talking — the "mm-hm" a human receptionist makes to show they're
@@ -803,37 +862,53 @@ class _Backchannel:
     it acknowledges without ever talking over or nagging the caller.
     """
 
-    # Natural Malayalam listening sounds. These ARE the "mm / aa / oo" backchannels
-    # the human ear expects — written in Malayalam script so the TTS voices them
-    # correctly (spelling "uhh"/"ooo" in Latin makes Bulbul mispronounce them).
-    # Mix of continuers (ഉം/ആ) and light assessments (ഓ/അതെ/ശരി) for variety.
-    _TOKENS = ["ഉം,", "ഉം ഉം,", "ആ,", "ഓ,", "ശരി,", "അതെ,"]
+    # Natural listening sounds per language. These ARE the "mm / aa / oo"
+    # backchannels the human ear expects — written in native script so the TTS
+    # voices them correctly (spelling "uhh"/"ooo" in Latin makes Bulbul
+    # mispronounce them). Mix of continuers and light assessments for variety.
+    # The set is chosen per-call from the caller's detected language so a Hindi
+    # caller never hears a Malayalam "ഉം".
+    _TOKEN_SETS = {
+        "ml-IN": ["ഉം,", "ഉം ഉം,", "ആ,", "ഓ,", "ശരി,", "അതെ,"],
+        "hi-IN": ["हम्म,", "हाँ,", "अच्छा,", "जी,", "ओह,"],
+        "ta-IN": ["ம்ம்,", "ஆமா,", "சரி,", "ஆ,"],
+        "te-IN": ["హా,", "సరే,", "అవును,", "ఆ,"],
+        "kn-IN": ["ಹೌದು,", "ಸರಿ,", "ಹಾ,"],
+        "en-IN": ["mm,", "uh huh,", "right,", "okay,", "oh,"],
+    }
     _DELAY = 1.8      # how long the caller must keep talking before we murmur
-    _COOLDOWN = 6.0   # min gap between murmurs
+    _COOLDOWN = 6.0   # min gap between murmurs while listening (re-arm period)
 
     def __init__(self, bg: "BackgroundAudioPlayer", session: AgentSession, lang: str) -> None:
         self._bg = bg
         self._session = session
-        self._lang = lang
-        self._clips: Optional[list] = None  # one resampled frame-list per token
+        self._default_lang = lang
+        # lazy per-language cache: lang -> list of resampled frame-lists (one per token)
+        self._clips_by_lang: dict = {}
         self._synth_lock = asyncio.Lock()
         self._last = 0.0
         self._prev_idx = -1
-        self._tasks: set = set()
+        self._loop_task: Optional[asyncio.Task] = None
 
-    async def _ensure_clips(self) -> None:
-        if self._clips is not None:
-            return
+    def _lang(self) -> str:
+        lang = self._session.userdata.get("caller_lang", self._default_lang)
+        return lang if lang in self._TOKEN_SETS else self._default_lang
+
+    async def _ensure_clips(self, lang: str) -> list:
+        cached = self._clips_by_lang.get(lang)
+        if cached is not None:
+            return cached
         async with self._synth_lock:
-            if self._clips is not None:
-                return
+            cached = self._clips_by_lang.get(lang)
+            if cached is not None:
+                return cached
             tts = BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
-                target_language_code=self._lang,
+                target_language_code=lang,
                 speaker="priya",
             )
             clips: list = []
-            for token in self._TOKENS:
+            for token in self._TOKEN_SETS.get(lang, self._TOKEN_SETS["ml-IN"]):
                 raw: list = []
                 stream = tts.synthesize(token)
                 try:
@@ -850,17 +925,34 @@ class _Backchannel:
                 out.extend(res.flush())
                 if out:
                     clips.append(out)
-            self._clips = clips
+            self._clips_by_lang[lang] = clips
+            return clips
 
     def on_user_state(self, ev) -> None:
-        if getattr(ev, "new_state", "") != "speaking":
-            return
-        t = asyncio.create_task(self._maybe())
-        self._tasks.add(t)
-        t.add_done_callback(self._tasks.discard)
+        new_state = getattr(ev, "new_state", "")
+        if new_state == "speaking":
+            # Re-arm: one loop per speaking-onset that keeps murmuring while the
+            # caller talks. Guard against stacking loops if events double-fire.
+            if self._loop_task is None or self._loop_task.done():
+                self._loop_task = asyncio.create_task(self._loop())
+        elif new_state == "listening" and self._loop_task is not None:
+            # Caller stopped — stop nagging immediately.
+            self._loop_task.cancel()
+            self._loop_task = None
+
+    async def _loop(self) -> None:
+        # Initial beat: only murmur once the caller has clearly kept talking.
+        await asyncio.sleep(self._DELAY)
+        while self._session.user_state == "speaking":
+            try:
+                await self._maybe()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                pass
+            await asyncio.sleep(self._COOLDOWN)
 
     async def _maybe(self) -> None:
-        await asyncio.sleep(self._DELAY)
         loop = asyncio.get_running_loop()
         if self._session.user_state != "speaking":
             return
@@ -868,19 +960,17 @@ class _Backchannel:
             return
         if loop.time() - self._last < self._COOLDOWN:
             return
-        try:
-            await self._ensure_clips()
-            if not self._clips:
-                return
-            self._last = loop.time()
-            idx = self._pick_idx()
-            self._bg.play(AudioConfig(source=self._frame_iter(idx), volume=0.7))
-        except Exception:
-            pass
+        lang = self._lang()
+        clips = await self._ensure_clips(lang)
+        if not clips:
+            return
+        self._last = loop.time()
+        idx = self._pick_idx(clips)
+        self._bg.play(AudioConfig(source=self._frame_iter(clips, idx), volume=0.7))
 
-    def _pick_idx(self) -> int:
+    def _pick_idx(self, clips: list) -> int:
         # Random choice, but never the same sound twice in a row.
-        n = len(self._clips or [])
+        n = len(clips)
         if n <= 1:
             self._prev_idx = 0
             return 0
@@ -890,8 +980,8 @@ class _Backchannel:
         self._prev_idx = idx
         return idx
 
-    async def _frame_iter(self, idx: int):
-        for f in (self._clips or [[]])[idx]:
+    async def _frame_iter(self, clips: list, idx: int):
+        for f in clips[idx]:
             yield f
 
 
@@ -990,6 +1080,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "room_name":           room_name,
         "transfer_requested":  False,
         "transfer_destination": "",
+        "caller_lang":         "ml-IN",
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1055,6 +1146,8 @@ async def entrypoint(ctx: JobContext) -> None:
             try:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
+                duration_s = (ended_at - call_started_at).total_seconds()
+                cost_paise = _estimate_cost_paise(duration_s, transcript)
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
@@ -1063,7 +1156,7 @@ async def entrypoint(ctx: JobContext) -> None:
                     ended_at=ended_at,
                     total_turns=total_turns,
                     latency_avg_ms=0,
-                    cost_paise=0,
+                    cost_paise=cost_paise,
                     transcript=transcript,
                     intents=[],
                     outcome=outcome,
