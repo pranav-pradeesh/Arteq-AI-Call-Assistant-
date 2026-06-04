@@ -848,6 +848,54 @@ async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptSt
     return {"status": "updated", "appointment_status": body.status}
 
 
+@router.post(
+    "/hospitals/{hospital_id}/appointments/{appt_id}/confirm-payment",
+    dependencies=[Depends(_require_auth)],
+)
+async def confirm_payment(hospital_id: str, appt_id: str):
+    """Staff confirms an offline payment: activates the queue token and notifies
+    the patient over WhatsApp/SMS with their token number."""
+    from src.db.queries import activate_appointment_token
+
+    info = await activate_appointment_token(appt_id, hospital_id)
+    if info is None:
+        raise HTTPException(status_code=404, detail="Appointment not found")
+
+    # Notify the patient (best-effort, non-blocking on failure).
+    try:
+        slot = info["slot_time"]
+        date_s = slot.date().isoformat() if slot else ""
+        time_s = slot.strftime("%H:%M") if slot else ""
+        hosp = await _hospital_name(hospital_id)
+        from src.services.whatsapp_service import get_messenger
+        if info["patient_phone"]:
+            await get_messenger().send_token_active(
+                phone=info["patient_phone"],
+                hospital_name=hosp,
+                patient_name=info["patient_name"],
+                doctor_name=info["doctor_name"],
+                date=date_s,
+                time=time_s,
+                token_number=info["token_number"],
+            )
+    except Exception as exc:
+        logger.warning("confirm_payment_notify_failed", error=str(exc))
+
+    return {
+        "status": "confirmed",
+        "payment_status": "paid",
+        "token_number": info["token_number"],
+        "token_active": True,
+    }
+
+
+async def _hospital_name(hospital_id: str) -> str:
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT name FROM hospitals WHERE id=$1", hospital_id)
+    return (row["name"] if row else "") or "the hospital"
+
+
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
 @router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_auth)])

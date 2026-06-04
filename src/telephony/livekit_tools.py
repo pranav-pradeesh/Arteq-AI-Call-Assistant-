@@ -172,12 +172,36 @@ try:
         hospital_ctx = _ud(context, "hospital_ctx")
         hospital_name = _ud(context, "hospital_name", "the hospital")
 
-        doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
         slot = _parse_slot(appointment_date, appointment_time)
         if slot is None:
             # Never write a booking with an unparseable time — ask, don't guess.
             logger.warning("tool_book_bad_slot", date=appointment_date, time=appointment_time)
             return "I didn't quite catch the date and time. Which day and what time would you like?"
+
+        doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
+
+        # Load balancing: when the caller named a department (or "any doctor")
+        # rather than a specific doctor, pick the least-loaded doctor who
+        # consults that day instead of funnelling everyone to one name.
+        if not doctor_id and hospital_ctx:
+            dept = hospital_ctx.find_dept(doctor_name)
+            if dept:
+                try:
+                    from src.db.queries import get_least_loaded_doctor
+                    chosen = await get_least_loaded_doctor(
+                        hospital_id, dept.id, slot.date().isoformat()
+                    )
+                    if chosen:
+                        doctor_id = chosen["id"]
+                        dept_id = chosen["dept_id"]
+                        resolved_name = chosen["name"]
+                        logger.info("tool_book_load_balanced", dept=dept.name, doctor=resolved_name)
+                except Exception as exc:
+                    logger.warning("tool_book_load_balance_failed", error=str(exc))
+
+        # Queue priority — emergency / senior get seen earlier once paid.
+        from src.services.priority import compute_priority, extract_age
+        priority = compute_priority(age=extract_age(notes), notes=notes)
 
         # Try HIS first (if configured). Failure falls through to local DB only.
         his_appt_id: Optional[str] = None
@@ -202,7 +226,7 @@ try:
 
         try:
             from src.db.queries import create_appointment
-            appt_id = await create_appointment(
+            result = await create_appointment(
                 hospital_id=hospital_id,
                 patient_name=patient_name,
                 patient_phone=caller_phone,
@@ -212,12 +236,16 @@ try:
                 notes=notes,
                 call_id=call_id,
                 his_appointment_id=his_appt_id,
+                priority=priority,
             )
+            appt_id = result["id"]
+            confirmation_code = result["confirmation_code"]
             logger.info("tool_book_appointment", appt_id=appt_id, doctor=resolved_name,
                         his_synced=bool(his_appt_id))
         except Exception as exc:
             err = str(exc).lower()
-            if "unique" in err or "duplicate" in err or "ix_appt_no_double_book" in err:
+            if ("unique" in err or "duplicate" in err
+                    or "ix_appt_no_double_book" in err or "slot_already_booked" in err):
                 logger.warning("tool_book_slot_conflict", doctor=resolved_name, slot=slot)
                 return (
                     f"That slot with Dr. {resolved_name} is already fully booked. "
@@ -226,19 +254,19 @@ try:
             logger.error("tool_book_appointment_failed", error=str(exc))
             return "Booking system temporarily unavailable — please call the front desk."
 
-        # Fire-and-forget: SMS + staff alert
+        # Fire-and-forget: patient notification (WhatsApp/SMS) + staff alert
         async def _side_effects():
             try:
-                from src.services.sms_service import SMSService
                 from src.services.staff_alert import StaffAlertService
-                sms = SMSService()
-                await sms.send_appointment_confirmation(
+                from src.services.whatsapp_service import get_messenger
+                await get_messenger().send_appointment_confirmation(
                     phone=caller_phone,
                     hospital_name=hospital_name,
                     patient_name=patient_name,
                     doctor_name=resolved_name,
                     date=appointment_date,
                     time=appointment_time,
+                    code=confirmation_code,
                 )
                 alerts = StaffAlertService()
                 await alerts.alert_new_booking(
@@ -255,9 +283,12 @@ try:
         asyncio.create_task(_side_effects())
 
         slot_readable = slot.strftime("%d %B %Y at %I:%M %p") if slot else f"{appointment_date} {appointment_time}"
+        spoken_code = " ".join(confirmation_code.replace("ARYA-", ""))  # spell out for clarity
         return (
             f"Appointment booked for {patient_name} with Dr. {resolved_name} "
-            f"on {slot_readable}. Confirmation SMS sent."
+            f"on {slot_readable}. Your booking code is {spoken_code}. "
+            "Please pay the consultation fee at the hospital to activate your "
+            "queue token. I've sent the details to your phone."
         )
 
 
@@ -696,9 +727,9 @@ try:
 
         async def _side_effects():
             try:
-                from src.services.sms_service import SMSService
                 from src.services.staff_alert import StaffAlertService
-                await SMSService().send_appointment_confirmation(
+                from src.services.whatsapp_service import get_messenger
+                await get_messenger().send_appointment_confirmation(
                     phone=caller_phone,
                     hospital_name=hospital_name,
                     patient_name=patient_name,

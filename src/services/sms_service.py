@@ -48,15 +48,45 @@ class SMSService:
         doctor_name: str,
         date: str,
         time: str,
+        code: str = "",
     ) -> bool:
-        """Send appointment confirmation details to patient."""
+        """Send appointment confirmation details to patient.
+
+        `code` is the booking reference; the token activates only after the
+        consultation fee is paid at the hospital."""
+        lines = [
+            "Appointment Booked",
+            f"Hospital: {hospital_name}",
+            f"Doctor: Dr. {doctor_name}",
+            f"Date: {date}",
+            f"Time: {time}",
+        ]
+        if code:
+            lines.append(f"Booking code: {code}")
+            lines.append("Pay the fee at the hospital to activate your queue token.")
+        lines.append("\nSent by Arya.")
+        return await self._send(phone, "\n".join(lines))
+
+    async def send_token_active(
+        self,
+        phone: str,
+        hospital_name: str,
+        patient_name: str,
+        doctor_name: str,
+        date: str,
+        time: str,
+        token_number: int,
+    ) -> bool:
+        """Notify the patient that payment is received and their queue token is live."""
         message = (
-            f"Appointment Confirmed\n"
+            "Payment Received — Token Active\n"
             f"Hospital: {hospital_name}\n"
+            f"Patient: {patient_name}\n"
             f"Doctor: Dr. {doctor_name}\n"
             f"Date: {date}\n"
-            f"Time: {time}\n\n"
-            "Sent by Arya."
+            f"Time: {time}\n"
+            f"Your token number: {token_number}\n\n"
+            "Show this at the desk. Sent by Arya."
         )
         return await self._send(phone, message)
 

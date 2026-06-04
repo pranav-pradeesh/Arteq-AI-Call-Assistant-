@@ -29,6 +29,12 @@ class Settings(BaseSettings):
     PLIVO_AUTH_TOKEN: str = ""
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
+    # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
+    # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
+    WHATSAPP_ENABLED: bool = False
+    PLIVO_WHATSAPP_NUMBER: str = ""   # WABA sender, E.164 e.g. +918047XXXXXX
+    WHATSAPP_FALLBACK_TO_SMS: bool = True
+
     # LiveKit — voice agent + SIP trunking
     LIVEKIT_URL: str = ""          # wss://your-project.livekit.cloud
     LIVEKIT_API_KEY: str = ""

@@ -474,6 +474,17 @@ async def write_call_log(
 
 # ── Appointments ──────────────────────────────────────────────────────────────
 
+import secrets as _secrets
+
+# Confirmation codes avoid ambiguous chars (0/O, 1/I) so they're easy to read
+# aloud and back to staff over a phone line.
+_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+
+def _gen_confirmation_code() -> str:
+    return "ARYA-" + "".join(_secrets.choice(_CODE_ALPHABET) for _ in range(4))
+
+
 async def create_appointment(
     hospital_id: str,
     patient_name: str,
@@ -484,12 +495,19 @@ async def create_appointment(
     notes: str,
     call_id: str,
     his_appointment_id: Optional[str] = None,
-) -> str:
-    """Insert a new appointment; returns the new UUID as a string.
+    priority: int = 0,
+) -> dict:
+    """Insert a new appointment; returns {"id", "confirmation_code"}.
 
-    Rejects a duplicate (same doctor + slot + hospital) that is still active,
-    so two concurrent calls cannot double-book the same slot.
+    Booked appointments start unpaid with no active token — the token is
+    assigned later via activate_appointment_token() once the fee is paid.
+
+    Concurrency: the ix_appt_no_double_book unique index is the source of truth —
+    two simultaneous bookings of the same doctor+slot can't both commit, so the
+    second raises a unique violation (surfaced as ValueError('slot_already_booked')).
+    The pre-check below just turns the common case into a cheaper, clearer error.
     """
+    code = _gen_confirmation_code()
     pool = await get_pool()
     async with pool.acquire() as conn:
         if slot_time and doctor_id:
@@ -505,23 +523,127 @@ async def create_appointment(
             if conflict:
                 raise ValueError("slot_already_booked")
 
+        try:
+            row = await conn.fetchrow(
+                """INSERT INTO appointments
+                   (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
+                    slot_time, notes, call_id, status, reminder_sent,
+                    his_appointment_id, confirmation_code, priority, payment_status)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9,$10,$11,'unpaid')
+                   RETURNING id""",
+                hospital_id,
+                patient_name,
+                patient_phone,
+                _uuid_mod.UUID(doctor_id) if doctor_id else None,
+                _uuid_mod.UUID(dept_id) if dept_id else None,
+                slot_time,
+                notes or "",
+                call_id,
+                his_appointment_id,
+                code,
+                priority,
+            )
+        except asyncpg.UniqueViolationError as exc:
+            # Lost the race for this slot (ix_appt_no_double_book).
+            raise ValueError("slot_already_booked") from exc
+    return {"id": str(row["id"]), "confirmation_code": code}
+
+
+async def activate_appointment_token(
+    appointment_id: str, hospital_id: str
+) -> Optional[dict]:
+    """Confirm offline payment and assign a live queue token.
+
+    Assigns the next token_number for that doctor on that day, ordered by
+    priority (desc) then booking time, then marks the appointment paid +
+    confirmed with token_active=true. Idempotent: re-confirming an already
+    active token returns its existing details without re-numbering.
+
+    Returns details for the WhatsApp/SMS notification, or None if not found.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            appt = await conn.fetchrow(
+                """SELECT a.id, a.doctor_id, a.slot_time, a.patient_name,
+                          a.patient_phone, a.token_number, a.token_active,
+                          d.name AS doctor_name
+                   FROM appointments a
+                   LEFT JOIN doctors d ON a.doctor_id = d.id
+                   WHERE a.id=$1 AND a.hospital_id=$2
+                   FOR UPDATE OF a""",
+                _uuid_mod.UUID(appointment_id), hospital_id,
+            )
+            if appt is None:
+                return None
+
+            token = appt["token_number"]
+            if not appt["token_active"]:
+                # Next token for this doctor on this calendar day.
+                if appt["doctor_id"] and appt["slot_time"]:
+                    nxt = await conn.fetchval(
+                        """SELECT COALESCE(MAX(token_number), 0) + 1
+                           FROM appointments
+                           WHERE doctor_id=$1
+                             AND slot_time::date = $2
+                             AND token_active = true""",
+                        appt["doctor_id"], appt["slot_time"].date(),
+                    )
+                    token = int(nxt)
+                else:
+                    token = 1
+                await conn.execute(
+                    """UPDATE appointments
+                       SET payment_status='paid', token_active=true,
+                           token_number=$2, status='confirmed', updated_at=NOW()
+                       WHERE id=$1""",
+                    appt["id"], token,
+                )
+    return {
+        "id": str(appt["id"]),
+        "token_number": token,
+        "patient_name": appt["patient_name"] or "",
+        "patient_phone": appt["patient_phone"] or "",
+        "doctor_name": appt["doctor_name"] or "",
+        "slot_time": appt["slot_time"],
+    }
+
+
+async def get_least_loaded_doctor(
+    hospital_id: str, dept_id: str, date_str: str
+) -> Optional[dict]:
+    """Pick the doctor in a department with the fewest active appointments on a
+    given date, among those who actually consult that day (have a schedule).
+
+    Balances patient load instead of funnelling everyone to one doctor.
+    Returns {"id", "name", "dept_id"} or None if no doctor consults that day.
+    """
+    import datetime as _dt
+    try:
+        date = _dt.date.fromisoformat(date_str)
+    except ValueError:
+        return None
+    db_dow = (date.weekday() + 1) % 7  # DB convention: 0=Sun … 6=Sat
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
         row = await conn.fetchrow(
-            """INSERT INTO appointments
-               (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
-                slot_time, notes, call_id, status, reminder_sent, his_appointment_id)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9)
-               RETURNING id""",
-            hospital_id,
-            patient_name,
-            patient_phone,
-            _uuid_mod.UUID(doctor_id) if doctor_id else None,
-            _uuid_mod.UUID(dept_id) if dept_id else None,
-            slot_time,
-            notes or "",
-            call_id,
-            his_appointment_id,
+            """SELECT d.id::text AS id, d.name, d.dept_id::text AS dept_id,
+                      COUNT(a.id) AS load
+               FROM doctors d
+               JOIN schedules s
+                 ON s.doctor_id = d.id AND s.day_of_week = $3 AND s.active = true
+               LEFT JOIN appointments a
+                 ON a.doctor_id = d.id
+                AND a.slot_time::date = $4
+                AND a.status IN ('booked','confirmed','requested')
+               WHERE d.hospital_id = $1 AND d.dept_id = $2 AND d.active = true
+               GROUP BY d.id, d.name, d.dept_id
+               ORDER BY load ASC, d.name ASC
+               LIMIT 1""",
+            hospital_id, _uuid_mod.UUID(dept_id), db_dow, date,
         )
-    return str(row["id"])
+    return dict(row) if row else None
 
 
 async def cancel_appointment_by_id(appointment_id: str, hospital_id: str) -> bool:
