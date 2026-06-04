@@ -332,10 +332,14 @@ class _GroqLLM(openai.LLM):
 def _build_llm(premium: bool = True):
     """Resilient LLM with a 3-leg fallback chain: 70b → 8b → Sarvam.
 
-    `premium` (tenant feature flag) picks the Groq primary: 70b when on, 8b when
-    off. The chain matters because Groq's free tier enforces a *per-model* daily
-    token cap (TPD, 100k): when 70b's cap is exhausted it 429s every turn. Each
-    model has its OWN bucket, so llama-3.1-8b-instant keeps serving — and it's
+    70b is the primary for EVERY tenant: the 8b model is too weak at Malayalam +
+    multi-rule prompt adherence — on live calls it parroted the caller's question
+    back instead of acting on it and transliterated English words ("ഇയേസ്" for
+    "Yes") despite the SCRIPT rule. 70b follows both reliably and is free on Groq.
+
+    The chain matters because Groq's free tier enforces a *per-model* daily token
+    cap (TPD, 100k): when 70b's cap is exhausted it 429s every turn. Each model
+    has its OWN bucket, so llama-3.1-8b-instant keeps serving — and it's
     sub-second, vs Sarvam's ~12s. So 8b is the fast middle leg; Sarvam (Indian-
     language, fully separate provider/quota) is the last resort that guarantees
     Arya never goes silent even if all of Groq is down.
@@ -356,8 +360,9 @@ def _build_llm(premium: bool = True):
             temperature=0.5,
         )
 
-    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")] \
-        if premium else [_groq("llama-3.1-8b-instant")]
+    # premium retained for signature compat; both tiers now lead with 70b for
+    # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
+    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")]
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
     if sarvam_key:
@@ -572,7 +577,7 @@ ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" 
 
 USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency. Before booking, repeat name, doctor, date and time back to confirm.
 
-NEXT-AVAILABLE DOCTOR: When the caller asks for a department/specialty (e.g. "a cardiologist") rather than a named doctor, do NOT list every doctor and make them choose. Pick ONE doctor in that department, check_availability, and offer the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
+NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor, NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in that department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
 NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
 
