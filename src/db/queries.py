@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import secrets as _secrets
 import uuid as _uuid_mod
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -474,8 +475,6 @@ async def write_call_log(
 
 # ── Appointments ──────────────────────────────────────────────────────────────
 
-import secrets as _secrets
-
 # Confirmation codes avoid ambiguous chars (0/O, 1/I) so they're easy to read
 # aloud and back to staff over a phone line.
 _CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -581,6 +580,14 @@ async def activate_appointment_token(
             if not appt["token_active"]:
                 # Next token for this doctor on this calendar day.
                 if appt["doctor_id"] and appt["slot_time"]:
+                    # Serialise token numbering per (doctor, day) so two staff
+                    # confirming different appointments at once can't both read
+                    # the same MAX and assign a duplicate token. Lock is released
+                    # at transaction end.
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext($1))",
+                        f"arya_token:{appt['doctor_id']}:{appt['slot_time'].date()}",
+                    )
                     nxt = await conn.fetchval(
                         """SELECT COALESCE(MAX(token_number), 0) + 1
                            FROM appointments
@@ -629,7 +636,7 @@ async def get_least_loaded_doctor(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT d.id::text AS id, d.name, d.dept_id::text AS dept_id,
-                      COUNT(a.id) AS load
+                      COUNT(DISTINCT a.id) AS load
                FROM doctors d
                JOIN schedules s
                  ON s.doctor_id = d.id AND s.day_of_week = $3 AND s.active = true

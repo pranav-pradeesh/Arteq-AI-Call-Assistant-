@@ -1,0 +1,12 @@
+# LiveKit SIP bridge config. Connects Plivo's SIP leg to LiveKit rooms.
+# api_key / api_secret are injected from env (SIP_API_KEY / SIP_API_SECRET) to
+# match the keys the main server accepts.
+ws_url: ws://livekit:7880
+redis:
+  address: redis:6379
+sip_port: 5060
+rtp_port: 10000-10100
+use_external_ip: false
+logging:
+  level: info
+  json: false

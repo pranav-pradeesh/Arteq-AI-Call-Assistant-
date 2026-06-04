@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
     # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
-    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_ENABLED: bool = True
     PLIVO_WHATSAPP_NUMBER: str = ""   # WABA sender, E.164 e.g. +918047XXXXXX
     WHATSAPP_FALLBACK_TO_SMS: bool = True
 
