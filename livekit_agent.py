@@ -23,6 +23,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 import re
 import sys
 import uuid
@@ -104,15 +105,30 @@ def _detect_tts_lang(text: str, fallback: str) -> str:
     return fallback
 
 
-# Deterministic safety net: weaker LLMs still transliterate "Doctor" to Malayalam
-# despite the prompt rule. Rewrite the common forms (full word + "ഡോ." abbrev)
-# back to English so Bulbul pronounces it as "Doctor", not "ഡോ". The bare two-
-# letter "ഡോ" without a period is left alone — it appears inside other words.
-_DR_RE = re.compile(r"ഡോക്ടര്‍|ഡോക്ടർ|ഡോക്ടര്|ഡോ\.")
+# Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
+# text correctly *when the English word is in Latin script*, so the only job here
+# is to undo the cases where a weaker LLM transliterated a common English term
+# into Malayalam despite the prompt rule. We map the bare forms back to Latin so
+# Bulbul pronounces them in English. The prompt does the heavy lifting; this
+# catches the high-frequency hospital terms the model most often slips on.
+# Inflected forms (Malayalam suffixes glued on) are left to the prompt.
+_TTS_EN_MAP = {
+    "ഡോക്ടര്‍": "Doctor", "ഡോക്ടർ": "Doctor", "ഡോക്ടര്": "Doctor", "ഡോ.": "Doctor",
+    "അപ്പോയിന്റ്മെന്റ്": "appointment", "അപ്പോയിന്റ്മെൻറ്": "appointment",
+    "കാർഡിയോളജി": "cardiology", "ന്യൂറോളജി": "neurology",
+    "ഓകെ": "OK", "ഇയെസ്": "Yes", "ഇയേസ്": "Yes", "നോ": "No",
+    "സ്കാനിംഗ്": "scanning", "സ്കാനിങ്": "scanning",
+    "റിപ്പോർട്ട്": "report", "ടോക്കൺ": "token", "കൗണ്ടർ": "counter",
+}
+# Longest-first so multi-token forms win over any shorter prefix match.
+_TTS_EN_RE = re.compile("|".join(re.escape(k) for k in sorted(_TTS_EN_MAP, key=len, reverse=True)))
 
 
 def _normalize_for_tts(text: str) -> str:
-    return _DR_RE.sub("Doctor ", text)
+    out = _TTS_EN_RE.sub(lambda m: " " + _TTS_EN_MAP[m.group(0)] + " ", text)
+    out = re.sub(r"\s{2,}", " ", out)
+    out = re.sub(r"\s+([,.?!।])", r"\1", out)  # drop space before punctuation
+    return out.strip()
 
 
 def _tts_cache_key(opts, text: str, lang: str) -> str:
@@ -787,7 +803,11 @@ class _Backchannel:
     it acknowledges without ever talking over or nagging the caller.
     """
 
-    _TOKEN = "ഉം,"
+    # Natural Malayalam listening sounds. These ARE the "mm / aa / oo" backchannels
+    # the human ear expects — written in Malayalam script so the TTS voices them
+    # correctly (spelling "uhh"/"ooo" in Latin makes Bulbul mispronounce them).
+    # Mix of continuers (ഉം/ആ) and light assessments (ഓ/അതെ/ശരി) for variety.
+    _TOKENS = ["ഉം,", "ഉം ഉം,", "ആ,", "ഓ,", "ശരി,", "അതെ,"]
     _DELAY = 1.8      # how long the caller must keep talking before we murmur
     _COOLDOWN = 6.0   # min gap between murmurs
 
@@ -795,37 +815,42 @@ class _Backchannel:
         self._bg = bg
         self._session = session
         self._lang = lang
-        self._frames: Optional[list] = None
+        self._clips: Optional[list] = None  # one resampled frame-list per token
         self._synth_lock = asyncio.Lock()
         self._last = 0.0
+        self._prev_idx = -1
         self._tasks: set = set()
 
-    async def _ensure_frames(self) -> None:
-        if self._frames is not None:
+    async def _ensure_clips(self) -> None:
+        if self._clips is not None:
             return
         async with self._synth_lock:
-            if self._frames is not None:
+            if self._clips is not None:
                 return
             tts = BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 target_language_code=self._lang,
                 speaker="priya",
             )
-            raw: list = []
-            stream = tts.synthesize(self._TOKEN)
-            try:
-                async for ev in stream:
-                    raw.append(ev.frame)
-            finally:
-                await stream.aclose()
-            # Bulbul renders at 24k mono; the background mixer track is 48k mono,
-            # so resample once at cache time and replay the 48k frames thereafter.
-            res = rtc.AudioResampler(24000, 48000, num_channels=1)
-            out: list = []
-            for f in raw:
-                out.extend(res.push(f))
-            out.extend(res.flush())
-            self._frames = out
+            clips: list = []
+            for token in self._TOKENS:
+                raw: list = []
+                stream = tts.synthesize(token)
+                try:
+                    async for ev in stream:
+                        raw.append(ev.frame)
+                finally:
+                    await stream.aclose()
+                # Bulbul renders at 24k mono; the background mixer track is 48k
+                # mono, so resample once at cache time and replay 48k thereafter.
+                res = rtc.AudioResampler(24000, 48000, num_channels=1)
+                out: list = []
+                for f in raw:
+                    out.extend(res.push(f))
+                out.extend(res.flush())
+                if out:
+                    clips.append(out)
+            self._clips = clips
 
     def on_user_state(self, ev) -> None:
         if getattr(ev, "new_state", "") != "speaking":
@@ -844,16 +869,29 @@ class _Backchannel:
         if loop.time() - self._last < self._COOLDOWN:
             return
         try:
-            await self._ensure_frames()
-            if not self._frames:
+            await self._ensure_clips()
+            if not self._clips:
                 return
             self._last = loop.time()
-            self._bg.play(AudioConfig(source=self._frame_iter(), volume=0.7))
+            idx = self._pick_idx()
+            self._bg.play(AudioConfig(source=self._frame_iter(idx), volume=0.7))
         except Exception:
             pass
 
-    async def _frame_iter(self):
-        for f in self._frames or []:
+    def _pick_idx(self) -> int:
+        # Random choice, but never the same sound twice in a row.
+        n = len(self._clips or [])
+        if n <= 1:
+            self._prev_idx = 0
+            return 0
+        idx = random.randrange(n)
+        if idx == self._prev_idx:
+            idx = (idx + 1) % n
+        self._prev_idx = idx
+        return idx
+
+    async def _frame_iter(self, idx: int):
+        for f in (self._clips or [[]])[idx]:
             yield f
 
 
