@@ -18,8 +18,11 @@ Tool catalogue:
 from __future__ import annotations
 
 import asyncio
+import re
 import uuid
+from datetime import date as _date
 from datetime import datetime
+from datetime import time as _time
 from typing import Optional
 
 import pytz
@@ -28,6 +31,98 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 _IST = pytz.timezone("Asia/Kolkata")
+
+# Relative day words → offset from today. The LLM is told to send YYYY-MM-DD, but
+# on live calls it (and the caller, via the transcript) often pass natural words —
+# "tomorrow", "നാളെ" — so we resolve them rather than failing the booking.
+_REL_DAYS = {
+    "today": 0, "tonight": 0, "ഇന്ന്": 0, "ഇന്ന": 0, "ഇപ്പോൾ": 0, "ഇപ്പോള്": 0,
+    "tomorrow": 1, "tmrw": 1, "നാളെ": 1,
+    "day after tomorrow": 2, "day after": 2, "overmorrow": 2,
+    "മറ്റന്നാൾ": 2, "മറ്റന്നാള്": 2, "മറ്റന്നാള": 2,
+}
+_WEEKDAYS = {
+    "monday": 0, "tuesday": 1, "wednesday": 2, "thursday": 3,
+    "friday": 4, "saturday": 5, "sunday": 6,
+}
+# Malayalam time-of-day words → hint for am/pm when the number alone is ambiguous.
+_ML_MERIDIEM = {
+    "രാവിലെ": "am", "പുലർച്ച": "am", "പുലര്‍ച്ച": "am",   # morning / dawn
+    "ഉച്ച": "pm", "ഉച്ചയ്ക്ക്": "pm",                      # noon
+    "വൈകുന്നേരം": "pm", "വൈകീട്ട്": "pm", "ഉച്ചതിരിഞ്ഞ്": "pm",  # evening / afternoon
+    "രാത്രി": "pm", "രാത്രിയിൽ": "pm",                     # night
+}
+_DATE_FORMATS = ("%Y-%m-%d", "%d-%m-%Y", "%d/%m/%Y", "%Y/%m/%d", "%d %B %Y", "%d %b %Y", "%d %B", "%d %b")
+
+
+def _parse_date(date_str: str) -> Optional[_date]:
+    s = (date_str or "").strip()
+    if not s:
+        return None
+    today = datetime.now(_IST).date()
+    low = s.lower()
+    for word, off in _REL_DAYS.items():
+        if word in low:
+            return _date.fromordinal(today.toordinal() + off)
+    for name, wd in _WEEKDAYS.items():
+        if name in low:
+            ahead = (wd - today.weekday()) % 7
+            ahead = ahead or 7  # "monday" said on a Monday means next Monday
+            return _date.fromordinal(today.toordinal() + ahead)
+    for fmt in _DATE_FORMATS:
+        try:
+            d = datetime.strptime(s, fmt).date()
+            # Formats without a year default to 1900; roll to this year (or next).
+            if d.year == 1900:
+                d = d.replace(year=today.year)
+                if d < today:
+                    d = d.replace(year=today.year + 1)
+            return d
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_time(time_str: str) -> Optional[_time]:
+    s = (time_str or "").strip()
+    if not s:
+        return None
+    low = s.lower()
+    meridiem = None
+    if "pm" in low or "p.m" in low:
+        meridiem = "pm"
+    elif "am" in low or "a.m" in low:
+        meridiem = "am"
+    for word, m in _ML_MERIDIEM.items():
+        if word in s:
+            meridiem = meridiem or m
+            break
+    m = re.search(r"(\d{1,2})\s*[:.]?\s*(\d{2})?", s)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2)) if m.group(2) else 0
+    if meridiem == "pm" and hour < 12:
+        hour += 12
+    elif meridiem == "am" and hour == 12:
+        hour = 0
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return _time(hour, minute)
+
+
+def _parse_slot(date_str: str, time_str: str) -> Optional[datetime]:
+    """Parse a date + time into an IST-aware datetime, or None on failure.
+
+    Accepts the canonical 'YYYY-MM-DD' + 'HH:MM' the LLM is told to send, plus the
+    loose natural forms it and callers actually use: relative days ('tomorrow',
+    'നാളെ'), weekday names, common date layouts, and 12-hour / Malayalam times
+    ('രാവിലെ 10 മണി', '3 pm'). Returns None only when no time or date is found."""
+    d = _parse_date(date_str)
+    t = _parse_time(time_str)
+    if d is None or t is None:
+        return None
+    return _IST.localize(datetime.combine(d, t))
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
@@ -40,15 +135,6 @@ def _ud(context, key: str, default=None):
             return context.session.userdata.get(key, default)
         except AttributeError:
             return default
-
-
-def _parse_slot(date_str: str, time_str: str) -> Optional[datetime]:
-    """Parse 'YYYY-MM-DD' + 'HH:MM' → IST-aware datetime, or None on failure."""
-    try:
-        naive = datetime.strptime(f"{date_str.strip()} {time_str.strip()}", "%Y-%m-%d %H:%M")
-        return _IST.localize(naive)
-    except Exception:
-        return None
 
 
 def _fuzzy_find_doctor(hospital_ctx, name: str):
@@ -88,6 +174,10 @@ try:
 
         doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
         slot = _parse_slot(appointment_date, appointment_time)
+        if slot is None:
+            # Never write a booking with an unparseable time — ask, don't guess.
+            logger.warning("tool_book_bad_slot", date=appointment_date, time=appointment_time)
+            return "I didn't quite catch the date and time. Which day and what time would you like?"
 
         # Try HIS first (if configured). Failure falls through to local DB only.
         his_appt_id: Optional[str] = None
@@ -635,6 +725,32 @@ try:
         )
 
 
+    @function_tool
+    async def end_call(context: RunContext, farewell: str = "") -> str:
+        """End the call. Call this the moment the caller signals they are done —
+        "ok thanks", "that's all", "goodbye", "ശരി നന്ദി", "മതി" — or after you
+        have finished helping and they have nothing more. Speak a short warm
+        farewell; do NOT ask another question. `farewell` is the goodbye line to
+        say in the caller's language."""
+        room_name = _ud(context, "room_name", "")
+        goodbye = (farewell or "").strip() or "Thank you for calling. Take care, goodbye!"
+
+        # Let the farewell audio play, then drop the room (which hangs up the SIP
+        # call). Fixed delay because the tool can't await TTS completion directly;
+        # 7s comfortably covers a one-line goodbye.
+        async def _hangup() -> None:
+            await asyncio.sleep(7.0)
+            try:
+                from src.services.livekit_sip import delete_room
+                await delete_room(room_name)
+            except Exception as exc:
+                logger.warning("end_call_hangup_failed", error=str(exc))
+
+        if room_name:
+            asyncio.create_task(_hangup())
+        logger.info("tool_end_call", room=room_name)
+        return goodbye
+
     # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
@@ -647,6 +763,7 @@ try:
         send_location_sms,
         alert_emergency,
         transfer_to_department,
+        end_call,
     ]
 
     # Reduced tool set for clinic tier (no transfer, no complex routing)
@@ -659,6 +776,7 @@ try:
         get_doctor_schedule,
         send_location_sms,
         alert_emergency,
+        end_call,
     ]
 
 except ImportError:

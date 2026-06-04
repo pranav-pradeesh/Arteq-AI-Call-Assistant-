@@ -59,6 +59,25 @@ def _lk():
         raise RuntimeError("livekit package not installed — pip install livekit") from exc
 
 
+async def delete_room(room_name: str) -> bool:
+    """Tear down a room, disconnecting every participant — including the SIP leg,
+    which hangs up the phone call. Used to end a call after Arya says goodbye."""
+    if not room_name:
+        return False
+    try:
+        from livekit import api as lk_api
+        lk = _lk()
+        try:
+            await lk.room.delete_room(lk_api.DeleteRoomRequest(room=room_name))
+        finally:
+            await lk.aclose()
+        logger.info("room_deleted_hangup", room=room_name)
+        return True
+    except Exception as exc:
+        logger.warning("room_delete_failed", room=room_name, error=str(exc))
+        return False
+
+
 # ── One-time provisioning ──────────────────────────────────────────────────────
 
 async def setup_sip_outbound_trunk() -> str:
