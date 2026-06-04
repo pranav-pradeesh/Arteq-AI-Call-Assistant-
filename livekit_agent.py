@@ -775,6 +775,88 @@ def _strip_tool_syntax(text: str) -> str:
     return _TOOL_SYNTAX_RE.sub("", text).strip()
 
 
+class _Backchannel:
+    """Murmurs a short "ഉം" on the background-audio track while the caller is
+    still talking — the "mm-hm" a human receptionist makes to show they're
+    listening. It plays on the separate ambience track, so it never reaches the
+    STT input or the agent's own turn detection: a purely outbound human-feel cue
+    with no effect on the speech pipeline.
+
+    Fires at most once per speaking-onset, only after the caller has clearly been
+    talking for a beat, never while Arya is speaking, and behind a cooldown — so
+    it acknowledges without ever talking over or nagging the caller.
+    """
+
+    _TOKEN = "ഉം,"
+    _DELAY = 1.8      # how long the caller must keep talking before we murmur
+    _COOLDOWN = 6.0   # min gap between murmurs
+
+    def __init__(self, bg: "BackgroundAudioPlayer", session: AgentSession, lang: str) -> None:
+        self._bg = bg
+        self._session = session
+        self._lang = lang
+        self._frames: Optional[list] = None
+        self._synth_lock = asyncio.Lock()
+        self._last = 0.0
+        self._tasks: set = set()
+
+    async def _ensure_frames(self) -> None:
+        if self._frames is not None:
+            return
+        async with self._synth_lock:
+            if self._frames is not None:
+                return
+            tts = BulbulV3TTS(
+                api_key=os.getenv("SARVAM_API_KEY", ""),
+                target_language_code=self._lang,
+                speaker="priya",
+            )
+            raw: list = []
+            stream = tts.synthesize(self._TOKEN)
+            try:
+                async for ev in stream:
+                    raw.append(ev.frame)
+            finally:
+                await stream.aclose()
+            # Bulbul renders at 24k mono; the background mixer track is 48k mono,
+            # so resample once at cache time and replay the 48k frames thereafter.
+            res = rtc.AudioResampler(24000, 48000, num_channels=1)
+            out: list = []
+            for f in raw:
+                out.extend(res.push(f))
+            out.extend(res.flush())
+            self._frames = out
+
+    def on_user_state(self, ev) -> None:
+        if getattr(ev, "new_state", "") != "speaking":
+            return
+        t = asyncio.create_task(self._maybe())
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
+    async def _maybe(self) -> None:
+        await asyncio.sleep(self._DELAY)
+        loop = asyncio.get_running_loop()
+        if self._session.user_state != "speaking":
+            return
+        if self._session.agent_state == "speaking":
+            return
+        if loop.time() - self._last < self._COOLDOWN:
+            return
+        try:
+            await self._ensure_frames()
+            if not self._frames:
+                return
+            self._last = loop.time()
+            self._bg.play(AudioConfig(source=self._frame_iter(), volume=0.7))
+        except Exception:
+            pass
+
+    async def _frame_iter(self):
+        for f in self._frames or []:
+            yield f
+
+
 # ==============================================================================
 # Agent entrypoint
 # ==============================================================================
@@ -999,6 +1081,10 @@ async def entrypoint(ctx: JobContext) -> None:
             thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5),
         )
         await bg.start(room=ctx.room, agent_session=session)
+        # Live backchannel: murmur "ഉം" on the same ambience track while the
+        # caller is still talking, so Arya feels present, not dead-air listening.
+        bc = _Backchannel(bg, session, "ml-IN")
+        session.on("user_state_changed", bc.on_user_state)
     except Exception as bg_exc:
         print(f"[arteq] background ambience disabled: {bg_exc}", file=sys.stderr)
 
