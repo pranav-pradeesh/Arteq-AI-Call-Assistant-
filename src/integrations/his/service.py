@@ -68,6 +68,14 @@ def invalidate_his_cache(hospital_id: str) -> None:
 
 def _build_adapter(cfg: dict) -> Optional[HISAdapter]:
     adapter_type = cfg.get("type", "generic_rest")
+    # "auto": detect FHIR vs generic REST so an integrator need not know the
+    # taxonomy — a FHIR base URL or an explicit fhir flag selects the FHIR
+    # adapter (covers ABDM/ABHA, Epic, Cerner), everything else is generic REST.
+    if adapter_type in ("", "auto"):
+        if cfg.get("fhir") or "fhir" in cfg.get("base_url", "").lower():
+            adapter_type = "fhir"
+        else:
+            adapter_type = "generic_rest"
     try:
         if adapter_type == "fhir":
             from src.integrations.his.fhir import FHIRAdapter

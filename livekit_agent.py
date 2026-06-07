@@ -36,7 +36,6 @@ import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
-from livekit.agents import AudioConfig, BackgroundAudioPlayer, BuiltinAudioClip
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import openai, sarvam, silero
@@ -511,7 +510,7 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
             hosp_block = _build_hospital_summary(hospital_ctx)
         except Exception:
             hosp_block = f"Hospital: {hospital_ctx.name}"
-        hosp_name = hospital_ctx.name_ml or hospital_ctx.name
+        hosp_name = hospital_ctx.name
         dow = (now.weekday() + 1) % 7
         hours = hospital_ctx.hours_for_day(dow)
         if hours:
@@ -561,34 +560,21 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
                 "Ask how they are feeling and if they need anything.\n"
             )
 
-    return f"""You are {agent_name}, the warm AI voice receptionist for {hosp_name}.
+    return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
 
-STYLE: Reply in the caller's language (Malayalam default; also Hindi/Tamil/Kannada/Telugu/English/Manglish). Max 2 SHORT sentences, end with ONE question. Warm, human, not robotic.
+LANGUAGE: Reply in the same language the caller speaks. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
-NATURAL SPEECH: Write full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — because the voice uses it for breathing and intonation. NEVER repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase. Vary your openings (don't start every reply with the same word).
-
-HUMAN WARMTH: Open most replies with a brief, varied acknowledgment in the caller's language — "ശരി," / "മനസ്സിലായി," / "തീർച്ചയായും," / "അതെ," / "Sure," — then answer. Rotate them; never use the same one twice in a row. When you book/confirm/help, react like a person ("നന്നായി!" / "Great!"). One or two words only.
-
-NO FILLERS: NEVER use hesitation or thinking sounds — no "ഉം", "umm", "ee", "aaa", "hmm", "ആ", "എന്നുവച്ചാൽ", "ഒരു". Do not stall. If you have the answer, say it; if you need one detail, ask for it directly. Every word must carry meaning.
-
-SCRIPT: Keep EVERY English and medical word in plain English letters — Yes, No, OK, ICU, OPD, scanning, copy, SMS, appointment, cardiology, Doctor. Always write the word "Doctor" (or "Dr.") in English — NEVER "ഡോ"/"ഡോക്ടർ". NEVER transliterate an English word into Malayalam script: say "Yes"/"No"/"OK", never "ഇയെസ്"/"ഇയേസ്"/"നോ"/"ഓകെ"; never "കാപ്പി", never "ഫങ്ഷൻ". Malayalam words stay in Malayalam script.
-
-NATIVE MALAYALAM (sound like a Kerala person, not a translation):
-- Never translate English phrasing word-for-word. Use natural native phrasing: say "എങ്ങനെ സഹായിക്കണം?" or "എന്താ വേണ്ടത്?" — never the stiff "നിങ്ങൾക്ക് എങ്ങനെ സഹായിക്കാം?". Say "പറഞ്ഞത് മനസ്സിലായി" — never "ഞാൻ ഇത് മനസ്സിലാക്കുന്നു".
-- Verbs carry NO gender/person suffix (പുരുഷഭേദനിരാസം): "അവൾ വന്നു" / "അവൻ വന്നു" — NEVER "വന്നാൾ"/"പാടിനാൾ". The verb stays neutral to the subject.
-- Use natural spoken contractions: "എന്താ", "വന്നിട്ടുണ്ട്", "വേണോ" — not the over-formal "എന്താണ്", "വന്നിട്ട് ഉണ്ട്". Polite, Central-Kerala standard, conversational.
-- Drop the trailing "ഉ" naturally on word ends ("വെളുപ്പ്" not "വെളുപ്പു"). Correct sandhi when words join.
-- Clean punctuation always: commas for pauses, full stop to end, question mark on questions. One thought per sentence.
+PUNCTUATION: Use full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — the voice uses it for intonation. Do NOT repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase.
 
 ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" — for: whether a department exists, its floor/location, operating hours, open/closed, doctor names and their department, emergency numbers, address, phone, and anything in the HANDBOOK. You already know these; just say the answer.
 
 USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency, end_call (hang up when the caller is done). Before booking, repeat name, doctor, date and time back to confirm.
 
-DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow"/"നാളെ" = today + 1, "day after"/"മറ്റന്നാള്" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "രാവിലെ 10 മണി" → 10:00, "3 pm" → 15:00). NEVER speak the conversion or the current clock time back to the caller (do NOT say "ഇപ്പോൾ 12:55 ആണ്, 4 PM എന്നാൽ 16:00") — just use it. If you can't tell the day or time, ask for it in one short question — never guess.
+DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). NEVER speak the conversion or the current clock time back to the caller — just use it. If you can't tell the day or time, ask for it in one short question — never guess.
 
-ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye", "ശരി നന്ദി", "മതി", "അത്രയേ ഉള്ളൂ" — do NOT ask another question and do NOT re-offer help. Say ONE short warm farewell and call end_call. Only keep the conversation going if they actually raise a new request.
+ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request.
 
 NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor, NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in that department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
@@ -596,9 +582,9 @@ NEVER say a department or doctor listed in the HOSPITAL section is unavailable o
 
 NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
 
-CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "collecting information", "gathering information" or anything similar. Speak ONLY the final answer.
+CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
 
-If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → patient may be in pain/frightened: speak very gently, reassure first.
+If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → the caller may be in pain or frightened: speak gently, reassure first.
 
 EMERGENCY (chest pain, severe bleeding, unconscious, can't breathe, stroke, poisoning): call alert_emergency FIRST, say "Connecting you to emergency — please stay on the line."
 
@@ -614,7 +600,10 @@ TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
                     returning_name: str = "") -> str:
-    hosp_name = (hospital_ctx.name_ml or hospital_ctx.name) if hospital_ctx else "the hospital"
+    # Fixed text per call type. Inbound is one constant string so the synthesized
+    # audio is identical every call → first call warms the TTS cache, every call
+    # after is an instant cache hit (no Bulbul round-trip before the caller hears it).
+    hosp_name = (hospital_ctx.name if hospital_ctx else "the hospital")
 
     if outbound_context:
         call_type = outbound_context.get("call_type", "")
@@ -624,39 +613,25 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
         ttime = outbound_context.get("appointment_time", "")
         if call_type == "confirmation":
             return (
-                f"Namaste {pname}, ഞാൻ {agent_name} — {hosp_name}-ൽ നിന്നും. "
-                f"Dr. {dname}-ന്റെ appointment {date} {ttime}-ന് confirm ചെയ്യാൻ "
-                f"വിളിക്കുകയാണ്. ഈ appointment attend ചെയ്യാൻ കഴിയുമോ?"
+                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
+                "Can you attend?"
             )
         elif call_type == "reminder":
             return (
-                f"Namaste {pname}, {agent_name} speaking from {hosp_name}. "
-                f"Dr. {dname}-ന്റെ appointment {date}-ന് ഉണ്ടെന്ന് ഓർമ്മിപ്പിക്കാൻ വിളിച്ചതാണ്. "
-                "എന്തെങ്കിലും ചോദ്യങ്ങൾ ഉണ്ടോ?"
+                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"This is a reminder of your appointment with Dr. {dname} on {date}. "
+                "Do you have any questions?"
             )
         elif call_type == "callback":
-            return f"Namaste {pname}, {agent_name} speaking — {hosp_name}. How can I help you today?"
+            return f"Hello {pname}, this is {agent_name} from {hosp_name}. How can I help you today?"
         elif call_type == "followup":
             return (
-                f"Namaste {pname}, {agent_name} here from {hosp_name}. "
-                f"Dr. {dname}-ൽ നിന്നുള്ള visit കഴിഞ്ഞ് എങ്ങനെ feel ചെയ്യുന്നു?"
+                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"How are you feeling after your visit with Dr. {dname}?"
             )
 
-    try:
-        import pytz
-        hour = datetime.now(pytz.timezone("Asia/Kolkata")).hour
-        from src.ai.groq_brain import build_greeting_text
-        from src.config.settings import settings
-        base = build_greeting_text(hosp_name, settings.AGENT_NAME, hour)
-    except Exception:
-        base = f"Namaste! {hosp_name}-ലേക്ക് സ്വാഗതം. ഞാൻ {agent_name}. എന്താ വേണ്ടത്?"
-
-    # Returning caller recognised by phone → greet by name in the very first line
-    # (something a menu-tree IVR can never do).
-    if returning_name:
-        first = returning_name.split()[0]
-        return f"Namaste {first}! {base}"
-    return base
+    return f"Thank you for calling {hosp_name}. This is {agent_name}. How can I help you?"
 
 
 # ==============================================================================
@@ -714,11 +689,13 @@ class HospitalVoiceAgent(Agent):
         self._call_started_at = call_started_at
 
     async def on_enter(self) -> None:
-        """Speak the opening greeting when the call connects.
+        """Speak the opening greeting the instant the call connects.
 
-        Uses session.say() so the greeting is sent straight to TTS without an
-        LLM round-trip — guarantees the exact Malayalam phrase plays back, and
-        is the pattern Sarvam docs recommend for fixed openings.
+        session.say() sends the fixed greeting straight to TTS (no LLM round-trip).
+        The greeting text is constant per call, so after the first call its audio
+        is served from the TTS cache — the caller hears it with no synth delay. The
+        entrypoint also pre-warms that cache concurrently with session start, so
+        even the first call on a cold worker is near-instant.
         """
         await self.session.say(self._greeting, allow_interruptions=True)
 
@@ -899,144 +876,31 @@ class _LatencyMeter:
         return round(total_s * 1000)
 
 
-class _Backchannel:
-    """Murmurs a short "ഉം" on the background-audio track while the caller is
-    still talking — the "mm-hm" a human receptionist makes to show they're
-    listening. It plays on the separate ambience track, so it never reaches the
-    STT input or the agent's own turn detection: a purely outbound human-feel cue
-    with no effect on the speech pipeline.
-
-    Fires at most once per speaking-onset, only after the caller has clearly been
-    talking for a beat, never while Arya is speaking, and behind a cooldown — so
-    it acknowledges without ever talking over or nagging the caller.
-    """
-
-    # Natural listening sounds per language. These ARE the "mm / aa / oo"
-    # backchannels the human ear expects — written in native script so the TTS
-    # voices them correctly (spelling "uhh"/"ooo" in Latin makes Bulbul
-    # mispronounce them). Mix of continuers and light assessments for variety.
-    # The set is chosen per-call from the caller's detected language so a Hindi
-    # caller never hears a Malayalam "ഉം".
-    _TOKEN_SETS = {
-        "ml-IN": ["ഉം,", "ഉം ഉം,", "ആ,", "ഓ,", "ശരി,", "അതെ,"],
-        "hi-IN": ["हम्म,", "हाँ,", "अच्छा,", "जी,", "ओह,"],
-        "ta-IN": ["ம்ம்,", "ஆமா,", "சரி,", "ஆ,"],
-        "te-IN": ["హా,", "సరే,", "అవును,", "ఆ,"],
-        "kn-IN": ["ಹೌದು,", "ಸರಿ,", "ಹಾ,"],
-        "en-IN": ["mm,", "uh huh,", "right,", "okay,", "oh,"],
-    }
-    _DELAY = 1.8      # how long the caller must keep talking before we murmur
-    _COOLDOWN = 6.0   # min gap between murmurs while listening (re-arm period)
-
-    def __init__(self, bg: "BackgroundAudioPlayer", session: AgentSession, lang: str) -> None:
-        self._bg = bg
-        self._session = session
-        self._default_lang = lang
-        # lazy per-language cache: lang -> list of resampled frame-lists (one per token)
-        self._clips_by_lang: dict = {}
-        self._synth_lock = asyncio.Lock()
-        self._last = 0.0
-        self._prev_idx = -1
-        self._loop_task: Optional[asyncio.Task] = None
-
-    def _lang(self) -> str:
-        lang = self._session.userdata.get("caller_lang", self._default_lang)
-        return lang if lang in self._TOKEN_SETS else self._default_lang
-
-    async def _ensure_clips(self, lang: str) -> list:
-        cached = self._clips_by_lang.get(lang)
-        if cached is not None:
-            return cached
-        async with self._synth_lock:
-            cached = self._clips_by_lang.get(lang)
-            if cached is not None:
-                return cached
-            tts = BulbulV3TTS(
-                api_key=os.getenv("SARVAM_API_KEY", ""),
-                target_language_code=lang,
-                speaker="priya",
-            )
-            clips: list = []
-            for token in self._TOKEN_SETS.get(lang, self._TOKEN_SETS["ml-IN"]):
-                raw: list = []
-                stream = tts.synthesize(token)
-                try:
-                    async for ev in stream:
-                        raw.append(ev.frame)
-                finally:
-                    await stream.aclose()
-                # Bulbul renders at 24k mono; the background mixer track is 48k
-                # mono, so resample once at cache time and replay 48k thereafter.
-                res = rtc.AudioResampler(24000, 48000, num_channels=1)
-                out: list = []
-                for f in raw:
-                    out.extend(res.push(f))
-                out.extend(res.flush())
-                if out:
-                    clips.append(out)
-            self._clips_by_lang[lang] = clips
-            return clips
-
-    def on_user_state(self, ev) -> None:
-        new_state = getattr(ev, "new_state", "")
-        if new_state == "speaking":
-            # Re-arm: one loop per speaking-onset that keeps murmuring while the
-            # caller talks. Guard against stacking loops if events double-fire.
-            if self._loop_task is None or self._loop_task.done():
-                self._loop_task = asyncio.create_task(self._loop())
-        elif new_state == "listening" and self._loop_task is not None:
-            # Caller stopped — stop nagging immediately.
-            self._loop_task.cancel()
-            self._loop_task = None
-
-    async def _loop(self) -> None:
-        # Initial beat: only murmur once the caller has clearly kept talking.
-        await asyncio.sleep(self._DELAY)
-        while self._session.user_state == "speaking":
-            try:
-                await self._maybe()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                pass
-            await asyncio.sleep(self._COOLDOWN)
-
-    async def _maybe(self) -> None:
-        loop = asyncio.get_running_loop()
-        if self._session.user_state != "speaking":
-            return
-        if self._session.agent_state == "speaking":
-            return
-        if loop.time() - self._last < self._COOLDOWN:
-            return
-        lang = self._lang()
-        clips = await self._ensure_clips(lang)
-        if not clips:
-            return
-        self._last = loop.time()
-        idx = self._pick_idx(clips)
-        self._bg.play(AudioConfig(source=self._frame_iter(clips, idx), volume=0.7))
-
-    def _pick_idx(self, clips: list) -> int:
-        # Random choice, but never the same sound twice in a row.
-        n = len(clips)
-        if n <= 1:
-            self._prev_idx = 0
-            return 0
-        idx = random.randrange(n)
-        if idx == self._prev_idx:
-            idx = (idx + 1) % n
-        self._prev_idx = idx
-        return idx
-
-    async def _frame_iter(self, clips: list, idx: int):
-        for f in clips[idx]:
-            yield f
-
 
 # ==============================================================================
 # Agent entrypoint
 # ==============================================================================
+
+async def _prewarm_greeting_audio(text: str, lang: str) -> None:
+    """Synthesize the greeting once up front so its audio is in the TTS cache
+    before the call's on_enter fires — removes the first-call Bulbul round-trip
+    from what the caller hears. Best-effort: any failure just means on_enter
+    synthesizes the greeting live, exactly as before."""
+    try:
+        tts = BulbulV3TTS(
+            api_key=os.getenv("SARVAM_API_KEY", ""),
+            target_language_code=lang,
+            speaker="priya",
+        )
+        stream = tts.synthesize(text)
+        try:
+            async for _ in stream:
+                pass
+        finally:
+            await stream.aclose()
+    except Exception:
+        pass
+
 
 async def entrypoint(ctx: JobContext) -> None:
     """One LiveKit room = one call. Called by the WorkerOptions dispatcher."""
@@ -1129,7 +993,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "room_name":           room_name,
         "transfer_requested":  False,
         "transfer_destination": "",
-        "caller_lang":         "ml-IN",
+        "caller_lang":         "en-IN",
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1248,29 +1112,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
 
+    # Pre-warm the greeting audio into the TTS cache concurrently with session
+    # start, so the first thing the caller hears (on_enter's say) is a cache hit
+    # with no synth delay.
+    asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
+
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
     await session.start(agent=agent, room=ctx.room, record=False)
-
-    # Reception ambience: a low office hum under the whole call so the caller
-    # feels they reached a real front desk, not a dead line; plus a soft keyboard
-    # clatter while Arya "looks things up" (thinking_sound plays only during LLM
-    # turns), masking processing latency the way a human receptionist's typing
-    # does. Volumes kept well under the voice so speech stays clear. Best-effort —
-    # a failure here must never drop the call.
-    try:
-        bg = BackgroundAudioPlayer(
-            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.35),
-            thinking_sound=AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.5),
-        )
-        await bg.start(room=ctx.room, agent_session=session)
-        # Live backchannel: murmur "ഉം" on the same ambience track while the
-        # caller is still talking, so Arya feels present, not dead-air listening.
-        bc = _Backchannel(bg, session, "ml-IN")
-        session.on("user_state_changed", bc.on_user_state)
-    except Exception as bg_exc:
-        print(f"[arteq] background ambience disabled: {bg_exc}", file=sys.stderr)
 
 
 def prewarm(proc) -> None:

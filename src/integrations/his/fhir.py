@@ -42,18 +42,57 @@ class FHIRAdapter(HISAdapter):
         self._base = config["base_url"].rstrip("/")
         self._timeout = config.get("timeout_seconds", 8)
         self._practitioner_map: dict[str, str] = config.get("practitioner_map", {})
-        auth = config.get("auth", {})
-        token = auth.get("value", "")
-        self._headers = {
-            "Authorization": f"Bearer {token}",
+        self._auth = config.get("auth", {})
+        self._token: str = ""
+        self._token_exp: float = 0.0
+
+    async def _oauth_token(self) -> str:
+        """OAuth2 client-credentials token (Epic, Cerner/Oracle Health, secured
+        ABDM gateways). Cached until ~30s before expiry. Empty if not configured."""
+        import time
+        if self._token and time.time() < self._token_exp - 30:
+            return self._token
+        token_url = self._auth.get("token_url", "")
+        if not token_url:
+            return ""
+        data = {
+            "grant_type": self._auth.get("grant_type", "client_credentials"),
+            "client_id": self._auth.get("client_id", ""),
+            "client_secret": self._auth.get("client_secret", ""),
+        }
+        if self._auth.get("scope"):
+            data["scope"] = self._auth["scope"]
+        try:
+            async with httpx.AsyncClient(timeout=self._timeout) as c:
+                r = await c.post(token_url, data=data)
+                r.raise_for_status()
+                j = r.json()
+            self._token = str(j.get("access_token", ""))
+            self._token_exp = time.time() + float(j.get("expires_in", 3600))
+            return self._token
+        except Exception as exc:
+            logger.warning("fhir_oauth_failed", url=token_url, error=str(exc))
+            return ""
+
+    async def _hdrs(self) -> dict:
+        headers = {
             "Accept": "application/fhir+json",
             "Content-Type": "application/fhir+json",
         }
+        headers.update(self._auth.get("headers", {}) or {})
+        if self._auth.get("type") == "oauth2":
+            token = await self._oauth_token()
+        else:
+            token = self._auth.get("value", "")
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        return headers
 
     async def _get(self, path: str, params: dict | None = None) -> Optional[dict]:
         try:
+            headers = await self._hdrs()
             async with httpx.AsyncClient(timeout=self._timeout) as c:
-                r = await c.get(f"{self._base}/{path}", headers=self._headers, params=params or {})
+                r = await c.get(f"{self._base}/{path}", headers=headers, params=params or {})
                 r.raise_for_status()
                 return r.json()
         except Exception as exc:
@@ -62,8 +101,9 @@ class FHIRAdapter(HISAdapter):
 
     async def _post(self, path: str, body: dict) -> Optional[dict]:
         try:
+            headers = await self._hdrs()
             async with httpx.AsyncClient(timeout=self._timeout) as c:
-                r = await c.post(f"{self._base}/{path}", headers=self._headers, json=body)
+                r = await c.post(f"{self._base}/{path}", headers=headers, json=body)
                 r.raise_for_status()
                 return r.json()
         except Exception as exc:
@@ -72,8 +112,9 @@ class FHIRAdapter(HISAdapter):
 
     async def _patch(self, path: str, body: dict) -> Optional[dict]:
         try:
+            headers = await self._hdrs()
             async with httpx.AsyncClient(timeout=self._timeout) as c:
-                r = await c.patch(f"{self._base}/{path}", headers=self._headers, json=body)
+                r = await c.patch(f"{self._base}/{path}", headers=headers, json=body)
                 r.raise_for_status()
                 return r.json()
         except Exception as exc:
