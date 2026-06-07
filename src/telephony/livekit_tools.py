@@ -137,13 +137,42 @@ def _ud(context, key: str, default=None):
             return default
 
 
+# Honorifics callers prefix to a doctor's name, in English + Malayalam. Stripped
+# before matching so "Doctor Anil" / "ഡോക്ടർ അനില്" resolve to "Anil".
+_HONORIFICS = (
+    "doctor", "dr.", "dr", "ഡോക്ടർ", "ഡോക്ടര്‍", "ഡോക്റ്റർ", "ഡോ.", "ഡോ",
+)
+
+
+def _strip_honorifics(s: str) -> str:
+    s = (s or "").strip().lower()
+    for h in _HONORIFICS:
+        if s.startswith(h):
+            s = s[len(h):].lstrip(" .‌")
+            break
+    return s.strip(" .")
+
+
 def _fuzzy_find_doctor(hospital_ctx, name: str):
-    """Case-insensitive partial match on doctor name. Returns (doctor_id, dept_id, full_name)."""
-    name_l = name.lower()
+    """Honorific-tolerant, bidirectional name match. Returns (doctor_id, dept_id, full_name).
+
+    Handles "Doctor Anil", "ഡോക്ടർ അനില്", a bare first name, or a fuller name than
+    is stored — matches if either string contains the other, or any name token
+    overlaps. A bare department word ("cardiology") deliberately does NOT match a
+    doctor here; the caller's tools fall back to department resolution instead.
+    """
+    q = _strip_honorifics(name)
+    if not q:
+        return None, None, name
+    q_tokens = {t for t in q.split() if len(t) > 1}
     for doc in (hospital_ctx.doctors if hospital_ctx else []):
-        if name_l in doc.name.lower() or (doc.name_ml and name_l in doc.name_ml.lower()):
-            dept_id = getattr(doc, 'dept_id', None)
-            return str(doc.id), str(dept_id) if dept_id else None, doc.name
+        for cand in (doc.name, getattr(doc, "name_ml", "") or ""):
+            c = _strip_honorifics(cand)
+            if not c:
+                continue
+            if q in c or c in q or (q_tokens & {t for t in c.split() if len(t) > 1}):
+                dept_id = getattr(doc, "dept_id", None)
+                return str(doc.id), str(dept_id) if dept_id else None, doc.name
     return None, None, name
 
 
@@ -635,6 +664,25 @@ try:
         hospital_ctx = _ud(context, "hospital_ctx")
 
         doctor_id, _dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
+
+        # Caller named a department/specialty ("cardiology") rather than a doctor:
+        # pick the least-loaded doctor who consults that day instead of failing.
+        if not doctor_id and hospital_ctx:
+            dept = hospital_ctx.find_dept(doctor_name)
+            if dept:
+                d = _parse_date(date)
+                if d:
+                    try:
+                        from src.db.queries import get_least_loaded_doctor
+                        chosen = await get_least_loaded_doctor(
+                            hospital_id, dept.id, d.isoformat()
+                        )
+                        if chosen:
+                            doctor_id = chosen["id"]
+                            resolved_name = chosen["name"]
+                    except Exception as exc:
+                        logger.warning("check_avail_dept_fallback_failed", error=str(exc))
+
         if not doctor_id:
             return f"Could not find Dr. {doctor_name}. Please confirm the doctor's name."
 
