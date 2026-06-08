@@ -964,6 +964,9 @@ async def entrypoint(ctx: JobContext) -> None:
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
     greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name)
+    # Start synthesizing the greeting immediately so it is in the TTS cache
+    # before on_enter fires. Runs in parallel with all remaining setup work.
+    _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
 
     # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
@@ -1118,10 +1121,12 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
 
-    # Pre-warm the greeting audio into the TTS cache concurrently with session
-    # start, so the first thing the caller hears (on_enter's say) is a cache hit
-    # with no synth delay.
-    asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
+    # Guarantee the greeting audio is cached before on_enter fires.
+    # _prewarm_task was created right after the greeting text was built, so it
+    # has been running in parallel with all the setup above. Awaiting here
+    # ensures a cache hit on the very first call — no live Bulbul round-trip
+    # between the caller connecting and hearing Arya's voice.
+    await _prewarm_task
 
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
