@@ -668,8 +668,14 @@ class HospitalVoiceAgent(Agent):
             # Silero model load is off the per-call critical path. Fall back to a
             # fresh load if prewarm was skipped. 0.2s end-of-speech silence →
             # Arya starts replying sooner; still long enough not to cut a caller
-            # in a natural mid-sentence pause.
-            vad=vad or silero.VAD.load(min_silence_duration=0.2),
+            # in a natural mid-sentence pause. activation_threshold=0.85 prevents
+            # clinic background noise (footsteps, chatter, equipment) from being
+            # mistaken for speech. min_speech_duration=0.1 filters sub-100ms bursts.
+            vad=vad or silero.VAD.load(
+                min_silence_duration=0.2,
+                activation_threshold=0.85,
+                min_speech_duration=0.1,
+            ),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
@@ -1129,7 +1135,11 @@ def prewarm(proc) -> None:
     Silero load is the heaviest per-call setup step; doing it here keeps it off
     the critical path so the first turn responds sooner.
     """
-    proc.userdata["vad"] = silero.VAD.load(min_silence_duration=0.2)
+    proc.userdata["vad"] = silero.VAD.load(
+        min_silence_duration=0.2,
+        activation_threshold=0.85,
+        min_speech_duration=0.1,
+    )
 
 
 if __name__ == "__main__":
