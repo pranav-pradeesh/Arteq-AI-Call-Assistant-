@@ -341,9 +341,10 @@ try:
 except Exception:
     pass
   # ── Dashboard additions (analytics, QA, live monitoring, users/RBAC) ──
-   try:
-       from additions.wiring import register_additions
-       register_additions(app)
-       logger.info("additions_mounted")
-   except Exception as e:
-       logger.error("additions_mount_failed", error=str(e))
+try:
+    from additions.wiring import register_additions
+    register_additions(app)
+    logger.info("additions_mounted")
+except Exception as e:
+    logger.error("additions_mount_failed", error=str(e))
+  
