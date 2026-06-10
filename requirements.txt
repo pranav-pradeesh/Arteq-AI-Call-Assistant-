@@ -56,3 +56,6 @@ livekit-plugins-silero==1.1.7
 pytest==8.2.0
 pytest-asyncio==0.23.6
 ruff==0.15.15
+bcrypt>=4.0.0
+email-validator>=2.1.0
+redis>=5.0.0

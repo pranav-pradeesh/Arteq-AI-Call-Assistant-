@@ -1,0 +1,11 @@
+# Net-new dependencies for the dashboard backend additions.
+# Append these to the project's requirements.txt, then: pip install -r requirements.txt
+#
+# Already present in the repo (do NOT re-add): fastapi, asyncpg, pydantic,
+# pydantic-settings, and python-jose[cryptography] (used here for JWT via
+# `from jose import jwt`).
+
+bcrypt>=4.0.0              # password hashing for users_api.py (matches the $2b$ seed in 006b)
+email-validator>=2.1.0     # required by pydantic EmailStr in users_api.py
+redis>=5.0.0               # optional: live-monitoring WebSocket pub/sub (live_events.py).
+                           # Omit to use the in-process fallback (stream mode only).
