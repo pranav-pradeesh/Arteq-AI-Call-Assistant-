@@ -41,12 +41,33 @@ _LANG_NAMES = {
     "hi-IN": "Hindi",
     "kn-IN": "Kannada",
     "te-IN": "Telugu",
+    "bn-IN": "Bengali",
+    "gu-IN": "Gujarati",
+    "pa-IN": "Punjabi",
+    "od-IN": "Odia",
+    "mr-IN": "Marathi",
     "manglish": "Manglish (Malayalam written in English/Latin script)",
 }
 
 
-def build_greeting_text(hosp_name: str, agent_name: str, hour: int) -> str:
-    """Time-of-day Malayalam greeting. Pure function so it can be pre-warmed."""
+_GREETING_TEMPLATES = {
+    "hi-IN": "नमस्ते! {hosp_name} में आपका स्वागत है। मैं {agent_name} हूँ। बताइए, क्या चाहिए?",
+    "ta-IN": "வணக்கம்! {hosp_name}-க்கு வரவேற்கிறோம். நான் {agent_name}. என்ன உதவி வேண்டும்?",
+    "te-IN": "నమస్కారం! {hosp_name}కి స్వాగతం. నేను {agent_name}ని. మీకు ఏమి కావాలి?",
+    "kn-IN": "ನಮಸ್ಕಾರ! {hosp_name}ಗೆ ಸ್ವಾಗತ. ನಾನು {agent_name}. ನಿಮಗೆ ಏನು ಬೇಕು?",
+    "bn-IN": "নমস্কার! {hosp_name}-এ আপনাকে স্বাগতম। আমি {agent_name}। কীভাবে সাহায্য করতে পারি?",
+    "gu-IN": "નમસ્તે! {hosp_name}માં સ્વાગત છે. હું {agent_name} છું. શું સેવા કરી શકું?",
+    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! {hosp_name} ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ। ਮੈਂ {agent_name} ਹਾਂ। ਕੀ ਸੇਵਾ ਕਰਾਂ?",
+    "en-IN": "Hello! Welcome to {hosp_name}. I'm {agent_name}. How can I help you?",
+}
+
+
+def build_greeting_text(hosp_name: str, agent_name: str, hour: int, lang: str = "ml-IN") -> str:
+    """Language-appropriate greeting. Pure function so it can be pre-warmed."""
+    if lang in _GREETING_TEMPLATES:
+        return _GREETING_TEMPLATES[lang].format(hosp_name=hosp_name, agent_name=agent_name)
+    # Malayalam: time-of-day greeting (audio is identical per hour-bucket so it
+    # warms the TTS cache; every subsequent call in that hour is an instant hit).
     if 5 <= hour < 12:
         opener = "Good morning!"
     elif 12 <= hour < 17:
@@ -111,6 +132,12 @@ _FALLBACK_MESSAGES = {
     "en-IN": "I'm sorry, there was a technical issue. Could you please repeat that?",
     "hi-IN": "क्षमा करें, तकनीकी समस्या आई। कृपया दोबारा बोलें।",
     "ta-IN": "மன்னிக்கவும், தொழில்நுட்ப சிக்கல். மீண்டும் சொல்லுங்கள்.",
+    "te-IN": "క్షమించండి, సాంకేతిక సమస్య వచ్చింది. దయచేసి మళ్ళీ చెప్పండి.",
+    "kn-IN": "ಕ್ಷಮಿಸಿ, ತಾಂತ್ರಿಕ ಸಮಸ್ಯೆ ಆಯಿತು. ದಯವಿಟ್ಟು ಮತ್ತೊಮ್ಮೆ ಹೇಳಿ.",
+    "bn-IN": "দুঃখিত, প্রযুক্তিগত সমস্যা হয়েছে। একটু আবার বলুন।",
+    "gu-IN": "માફ કરશો, તકનીકી સમસ્યા આવી. ફરીથી કહો.",
+    "pa-IN": "ਮਾਫ਼ ਕਰਨਾ, ਤਕਨੀਕੀ ਸਮੱਸਿਆ ਆਈ। ਕਿਰਪਾ ਕਰਕੇ ਦੁਬਾਰਾ ਬੋਲੋ।",
+    "od-IN": "ଦୟାକରି ପୁଣି ବୋଲନ୍ତୁ। ଏକ ବୈଷୟିକ ସମସ୍ୟା ହୋଇଛି।",
     "manglish": "Sorry, oru technical problem aayi. Onnu koodi paranjalo?",
 }
 
@@ -307,7 +334,7 @@ BILL INQUIRY: Give estimated cost from CONSULTATION FEES; offer to transfer to b
 VISITING HOURS / INSURANCE / BLOOD BANK / PARKING: Answer from HOSPITAL HANDBOOK.
 DIRECTIONS: Send maps SMS (sms_type="maps").
 
-LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in English script, e.g. "njan doctor-nte time ariyaanam"). Never switch to English unless the caller spoke English. If the caller speaks Malayalam, reply in Malayalam script; if Manglish, reply in Manglish. Malayalam/Manglish should be warm and conversational, not formal.
+LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in English script). Never switch to English unless the caller spoke English. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi script, Odia → Odia script. Malayalam/Manglish should be warm and conversational, not formal.
 
 VOICE (your text becomes speech): max 2 SHORT sentences. Sound human and vary your openings. English openers: "Sure,", "Of course,", "Let me check…". Malayalam openers: "ശരി,", "തീർച്ചയായും,", "ഒന്ന് നോക്കട്ടെ,", "അതെ,". NEVER use hesitation/filler sounds — no "ഉം", "ങ്ഹാ", "umm", "hmm", "ആ", "ee". For emergencies, speak urgently but calmly.
 
@@ -325,7 +352,7 @@ EMERGENCY (route to emergency, is_emergency=true): chest pain, heart attack, bre
 SMS: offer maps SMS for directions/location; offer appointment SMS for confirmations.
 
 ALWAYS respond with valid JSON only — no extra text, no markdown:
-{{"text":"1-2 natural sentences","language":"ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|manglish","action":"continue|transfer|end_call|send_sms","action_type":"","transfer_destination":null,"transfer_doctor":null,"sms_type":null,"sms_data":{{}},"appointment_data":{{}},"callback_data":{{}},"is_emergency":false,"call_note":"5-word log note"}}
+{{"text":"1-2 natural sentences","language":"ml-IN|en-IN|hi-IN|ta-IN|kn-IN|te-IN|bn-IN|gu-IN|pa-IN|od-IN|manglish","action":"continue|transfer|end_call|send_sms","action_type":"","transfer_destination":null,"transfer_doctor":null,"sms_type":null,"sms_data":{{}},"appointment_data":{{}},"callback_data":{{}},"is_emergency":false,"call_note":"5-word log note"}}
 
 action_type values:
   "book_appointment"       — appointment_data has all booking fields; will be written to DB

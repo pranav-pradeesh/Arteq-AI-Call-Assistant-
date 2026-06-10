@@ -51,6 +51,7 @@ livekit-agents==1.5.16
 livekit-plugins-openai==1.1.7
 livekit-plugins-sarvam==1.1.7
 livekit-plugins-silero==1.1.7
+livekit-plugins-noise-cancellation==0.2.5
 
 # ── Dev / test ─────────────────────────────────────────────────────────────────
 pytest==8.2.0

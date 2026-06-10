@@ -38,7 +38,7 @@ from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
-from livekit.plugins import openai, sarvam, silero
+from livekit.plugins import noise_cancellation, openai, sarvam, silero
 from openai import AsyncClient as _AsyncOpenAI  # raw SDK, for custom-header Sarvam client
 
 load_dotenv()
@@ -562,7 +562,7 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
 
     return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
 
-LANGUAGE: Reply in the same language the caller speaks. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
@@ -599,10 +599,10 @@ TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
 def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
-                    returning_name: str = "") -> str:
-    # Fixed text per call type. Inbound is one constant string so the synthesized
-    # audio is identical every call → first call warms the TTS cache, every call
-    # after is an instant cache hit (no Bulbul round-trip before the caller hears it).
+                    returning_name: str = "", agent_language: str = "ml-IN") -> str:
+    # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
+    # audio is identical per hour-bucket → first call of each bucket warms the TTS
+    # cache, every subsequent call is an instant cache hit.
     hosp_name = (hospital_ctx.name if hospital_ctx else "the hospital")
 
     if outbound_context:
@@ -631,7 +631,12 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
                 f"How are you feeling after your visit with Dr. {dname}?"
             )
 
-    return f"Thank you for calling {hosp_name}. This is {agent_name}. How can I help you?"
+    # Inbound: language-appropriate greeting, time-of-day for Malayalam.
+    import pytz as _pytz
+    _IST = _pytz.timezone("Asia/Kolkata")
+    hour = datetime.now(_IST).hour
+    from src.ai.groq_brain import build_greeting_text
+    return build_greeting_text(hosp_name, agent_name, hour, lang=agent_language)
 
 
 # ==============================================================================
@@ -668,13 +673,15 @@ class HospitalVoiceAgent(Agent):
             # Silero model load is off the per-call critical path. Fall back to a
             # fresh load if prewarm was skipped. 0.2s end-of-speech silence →
             # Arya starts replying sooner; still long enough not to cut a caller
-            # in a natural mid-sentence pause. activation_threshold=0.85 prevents
-            # clinic background noise (footsteps, chatter, equipment) from being
-            # mistaken for speech. min_speech_duration=0.1 filters sub-100ms bursts.
+            # in a natural mid-sentence pause. activation_threshold=0.5 is the
+            # Silero default — phone/SIP audio is 8kHz compressed and scores lower
+            # than clean mic audio, so raising this threshold blocks real speech
+            # from reaching STT. min_speech_duration=0.1 filters sub-100ms noise
+            # bursts without affecting speech detection.
             vad=vad or silero.VAD.load(
                 min_silence_duration=0.2,
-                activation_threshold=0.90,
-                min_speech_duration=0.1,
+                activation_threshold=0.5,
+                min_speech_duration=0.3,
             ),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
@@ -693,6 +700,7 @@ class HospitalVoiceAgent(Agent):
         self._call_id = call_id
         self._hospital_name = hospital_name
         self._call_started_at = call_started_at
+        self._agent_language = agent_language
 
     async def on_enter(self) -> None:
         """Speak the opening greeting the instant the call connects.
@@ -736,7 +744,7 @@ class HospitalVoiceAgent(Agent):
         # language mid-call, so the previous turn's detection is a safe predictor.
         if stripped:
             try:
-                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, "ml-IN")
+                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, self._agent_language)
             except Exception:
                 pass
 
@@ -963,7 +971,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name)
+    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name, agent_language)
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
@@ -1002,7 +1010,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "room_name":           room_name,
         "transfer_requested":  False,
         "transfer_destination": "",
-        "caller_lang":         "en-IN",
+        "caller_lang":         "ml-IN",
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1027,6 +1035,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
+        # Strip clinic background noise (chatter, equipment, footsteps) from the
+        # audio stream before it reaches VAD or STT. BVC runs on the raw PCM so
+        # the caller's voice is the only signal Silero and Sarvam ever see.
+        input_audio_noise_cancellation=noise_cancellation.BVC(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
@@ -1121,13 +1133,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
 
-    # Guarantee the greeting audio is cached before on_enter fires.
-    # _prewarm_task was created right after the greeting text was built, so it
-    # has been running in parallel with all the setup above. Awaiting here
-    # ensures a cache hit on the very first call — no live Bulbul round-trip
-    # between the caller connecting and hearing Arya's voice.
-    await _prewarm_task
-
+    # Start the session immediately — caller is already waiting in silence.
+    # The prewarm task runs in the background; if it finishes before on_enter
+    # fires the greeting is served from cache (zero TTS latency). If not, on_enter
+    # synthesizes the greeting live. Either way the caller hears Arya as soon as
+    # the session is ready, without an extra blocking wait here.
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
@@ -1142,8 +1152,8 @@ def prewarm(proc) -> None:
     """
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=0.2,
-        activation_threshold=0.90,
-        min_speech_duration=0.1,
+        activation_threshold=0.5,
+        min_speech_duration=0.3,
     )
 
 
