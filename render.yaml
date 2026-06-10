@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: standard   # handles webhook traffic + dashboard for 25+ tenants
     region: singapore
-    branch: claude/hospital-voice-agent-ml-XCG0G
+    branch: main
     buildCommand: pip install -r requirements.txt
     startCommand: uvicorn src.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
@@ -134,7 +134,7 @@ services:
     runtime: python
     plan: standard   # starter has 512MB RAM which is tight under concurrent calls
     region: singapore
-    branch: claude/hospital-voice-agent-ml-XCG0G
+    branch: main
     numInstances: 2
     buildCommand: pip install -r requirements.txt
     startCommand: python livekit_agent.py start
