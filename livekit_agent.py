@@ -1151,6 +1151,34 @@ async def entrypoint(ctx: JobContext) -> None:
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
     await session.start(agent=agent, room=ctx.room, record=False)
 
+    # ── Cost guardrail: cap call duration ──────────────────────────────────────
+    # STT is billed per audio minute, so a phone left off-hook (or a caller who
+    # never hangs up) burns money indefinitely. Politely wrap up and drop the
+    # room after MAX_CALL_DURATION_S (default 10 min — far above a normal
+    # booking call's 2-4 min). Same hangup path as the end_call tool.
+    max_call_s = float(os.getenv("MAX_CALL_DURATION_S", "600"))
+
+    async def _duration_watchdog() -> None:
+        await asyncio.sleep(max_call_s)
+        _log.info("max call duration reached room=%s", room_name)
+        try:
+            await session.say(
+                "Sorry, we've reached the maximum call time. Please call back "
+                "if you need anything else. Thank you, goodbye!",
+                allow_interruptions=False,
+            )
+            await asyncio.sleep(8.0)
+        except Exception:
+            pass
+        try:
+            from src.services.livekit_sip import delete_room
+            await delete_room(room_name)
+        except Exception as exc:
+            _log.warning("watchdog hangup failed room=%s err=%s", room_name, exc)
+
+    _watchdog = asyncio.create_task(_duration_watchdog())
+    session.on("close", lambda e=None: _watchdog.cancel())
+
 
 def prewarm(proc) -> None:
     """Load the Silero VAD model once per worker process, before any call.
