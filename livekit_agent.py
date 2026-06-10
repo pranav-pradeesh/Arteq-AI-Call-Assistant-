@@ -678,7 +678,7 @@ class HospitalVoiceAgent(Agent):
             # mistaken for speech. min_speech_duration=0.1 filters sub-100ms bursts.
             vad=vad or silero.VAD.load(
                 min_silence_duration=0.2,
-                activation_threshold=0.90,
+                activation_threshold=0.75,
                 min_speech_duration=0.1,
             ),
             llm=_build_llm(premium=premium_llm),
@@ -1145,7 +1145,7 @@ def prewarm(proc) -> None:
     """
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=0.2,
-        activation_threshold=0.90,
+        activation_threshold=0.75,
         min_speech_duration=0.1,
     )
 
