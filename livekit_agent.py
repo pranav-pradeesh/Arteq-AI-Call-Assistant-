@@ -739,6 +739,13 @@ class HospitalVoiceAgent(Agent):
 
         stripped = text.strip()
 
+        # Drop sub-threshold transcripts. VAD's min_speech_duration=0.3s already
+        # filters most noise bursts, but occasional artefacts still produce a
+        # 1-character STT output (a stray vowel, a click). A real utterance is
+        # always ≥2 chars. Skip silently — no LLM call, no reply.
+        if stripped and len(stripped) < 2 and stripped not in _DTMF:
+            return
+
         # Remember the caller's language (script-detected) so the live backchannel
         # murmurs in their language, not always Malayalam. Callers rarely switch
         # language mid-call, so the previous turn's detection is a safe predictor.
@@ -1035,10 +1042,11 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        # Strip clinic background noise (chatter, equipment, footsteps) from the
-        # audio stream before it reaches VAD or STT. BVC runs on the raw PCM so
-        # the caller's voice is the only signal Silero and Sarvam ever see.
-        input_audio_noise_cancellation=noise_cancellation.BVC(),
+        # Strip clinic background noise from the audio stream before it reaches
+        # VAD or STT. BVCTelephony is the telephony-optimised variant — trained
+        # specifically on inbound SIP/PSTN audio so it performs better than the
+        # generic BVC on compressed 8kHz phone-call streams.
+        input_audio_noise_cancellation=noise_cancellation.BVCTelephony(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
