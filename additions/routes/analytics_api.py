@@ -62,7 +62,7 @@ class AnalyticsPoint(BaseModel):
 class OutcomeBreakdown(BaseModel):
     """Map of outcome label → call count."""
 
-    __root__: Dict[str, int]
+    data: Dict[str, int]
 
     class Config:
         # Allow arbitrary dict root
