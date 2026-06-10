@@ -681,7 +681,7 @@ class HospitalVoiceAgent(Agent):
             vad=vad or silero.VAD.load(
                 min_silence_duration=0.2,
                 activation_threshold=0.5,
-                min_speech_duration=0.1,
+                min_speech_duration=0.3,
             ),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
@@ -1148,7 +1148,7 @@ def prewarm(proc) -> None:
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=0.2,
         activation_threshold=0.5,
-        min_speech_duration=0.1,
+        min_speech_duration=0.3,
     )
 
 
