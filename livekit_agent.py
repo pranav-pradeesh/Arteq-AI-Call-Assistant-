@@ -38,7 +38,7 @@ from livekit import rtc
 from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
-from livekit.plugins import openai, sarvam, silero
+from livekit.plugins import noise_cancellation, openai, sarvam, silero
 from openai import AsyncClient as _AsyncOpenAI  # raw SDK, for custom-header Sarvam client
 
 load_dotenv()
@@ -1034,6 +1034,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
+        # Strip clinic background noise (chatter, equipment, footsteps) from the
+        # audio stream before it reaches VAD or STT. BVC runs on the raw PCM so
+        # the caller's voice is the only signal Silero and Sarvam ever see.
+        input_audio_noise_cancellation=noise_cancellation.BVC(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
