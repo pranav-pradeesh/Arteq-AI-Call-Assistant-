@@ -673,12 +673,14 @@ class HospitalVoiceAgent(Agent):
             # Silero model load is off the per-call critical path. Fall back to a
             # fresh load if prewarm was skipped. 0.2s end-of-speech silence →
             # Arya starts replying sooner; still long enough not to cut a caller
-            # in a natural mid-sentence pause. activation_threshold=0.85 prevents
-            # clinic background noise (footsteps, chatter, equipment) from being
-            # mistaken for speech. min_speech_duration=0.1 filters sub-100ms bursts.
+            # in a natural mid-sentence pause. activation_threshold=0.5 is the
+            # Silero default — phone/SIP audio is 8kHz compressed and scores lower
+            # than clean mic audio, so raising this threshold blocks real speech
+            # from reaching STT. min_speech_duration=0.1 filters sub-100ms noise
+            # bursts without affecting speech detection.
             vad=vad or silero.VAD.load(
                 min_silence_duration=0.2,
-                activation_threshold=0.75,
+                activation_threshold=0.5,
                 min_speech_duration=0.1,
             ),
             llm=_build_llm(premium=premium_llm),
@@ -1145,7 +1147,7 @@ def prewarm(proc) -> None:
     """
     proc.userdata["vad"] = silero.VAD.load(
         min_silence_duration=0.2,
-        activation_threshold=0.75,
+        activation_threshold=0.5,
         min_speech_duration=0.1,
     )
 
