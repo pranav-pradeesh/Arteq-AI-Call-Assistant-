@@ -562,7 +562,7 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
 
     return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
 
-LANGUAGE: Reply in the same language the caller speaks. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+LANGUAGE: Default to Malayalam. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
@@ -600,9 +600,9 @@ TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
                     returning_name: str = "") -> str:
-    # Fixed text per call type. Inbound is one constant string so the synthesized
-    # audio is identical every call → first call warms the TTS cache, every call
-    # after is an instant cache hit (no Bulbul round-trip before the caller hears it).
+    # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
+    # audio is identical per hour-bucket → first call of each bucket warms the TTS
+    # cache, every subsequent call is an instant cache hit.
     hosp_name = (hospital_ctx.name if hospital_ctx else "the hospital")
 
     if outbound_context:
@@ -631,7 +631,12 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
                 f"How are you feeling after your visit with Dr. {dname}?"
             )
 
-    return f"Thank you for calling {hosp_name}. This is {agent_name}. How can I help you?"
+    # Inbound: Malayalam time-of-day greeting (default language for Kerala hospitals).
+    import pytz as _pytz
+    _IST = _pytz.timezone("Asia/Kolkata")
+    hour = datetime.now(_IST).hour
+    from src.ai.groq_brain import build_greeting_text
+    return build_greeting_text(hosp_name, agent_name, hour)
 
 
 # ==============================================================================
@@ -1002,7 +1007,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "room_name":           room_name,
         "transfer_requested":  False,
         "transfer_destination": "",
-        "caller_lang":         "en-IN",
+        "caller_lang":         "ml-IN",
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1121,13 +1126,11 @@ async def entrypoint(ctx: JobContext) -> None:
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
 
-    # Guarantee the greeting audio is cached before on_enter fires.
-    # _prewarm_task was created right after the greeting text was built, so it
-    # has been running in parallel with all the setup above. Awaiting here
-    # ensures a cache hit on the very first call — no live Bulbul round-trip
-    # between the caller connecting and hearing Arya's voice.
-    await _prewarm_task
-
+    # Start the session immediately — caller is already waiting in silence.
+    # The prewarm task runs in the background; if it finishes before on_enter
+    # fires the greeting is served from cache (zero TTS latency). If not, on_enter
+    # synthesizes the greeting live. Either way the caller hears Arya as soon as
+    # the session is ready, without an extra blocking wait here.
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
