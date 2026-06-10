@@ -562,7 +562,7 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
 
     return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
 
-LANGUAGE: Default to Malayalam. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
@@ -599,7 +599,7 @@ TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
 def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
-                    returning_name: str = "") -> str:
+                    returning_name: str = "", agent_language: str = "ml-IN") -> str:
     # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
     # cache, every subsequent call is an instant cache hit.
@@ -631,12 +631,12 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
                 f"How are you feeling after your visit with Dr. {dname}?"
             )
 
-    # Inbound: Malayalam time-of-day greeting (default language for Kerala hospitals).
+    # Inbound: language-appropriate greeting, time-of-day for Malayalam.
     import pytz as _pytz
     _IST = _pytz.timezone("Asia/Kolkata")
     hour = datetime.now(_IST).hour
     from src.ai.groq_brain import build_greeting_text
-    return build_greeting_text(hosp_name, agent_name, hour)
+    return build_greeting_text(hosp_name, agent_name, hour, lang=agent_language)
 
 
 # ==============================================================================
@@ -700,6 +700,7 @@ class HospitalVoiceAgent(Agent):
         self._call_id = call_id
         self._hospital_name = hospital_name
         self._call_started_at = call_started_at
+        self._agent_language = agent_language
 
     async def on_enter(self) -> None:
         """Speak the opening greeting the instant the call connects.
@@ -743,7 +744,7 @@ class HospitalVoiceAgent(Agent):
         # language mid-call, so the previous turn's detection is a safe predictor.
         if stripped:
             try:
-                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, "ml-IN")
+                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, self._agent_language)
             except Exception:
                 pass
 
@@ -970,7 +971,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name)
+    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name, agent_language)
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
