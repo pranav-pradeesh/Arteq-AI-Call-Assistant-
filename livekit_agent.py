@@ -739,6 +739,13 @@ class HospitalVoiceAgent(Agent):
 
         stripped = text.strip()
 
+        # Drop sub-threshold transcripts. VAD's min_speech_duration=0.3s already
+        # filters most noise bursts, but occasional artefacts still produce a
+        # 1-character STT output (a stray vowel, a click). A real utterance is
+        # always ≥2 chars. Skip silently — no LLM call, no reply.
+        if stripped and len(stripped) < 2 and stripped not in _DTMF:
+            return
+
         # Remember the caller's language (script-detected) so the live backchannel
         # murmurs in their language, not always Malayalam. Callers rarely switch
         # language mid-call, so the previous turn's detection is a safe predictor.
@@ -1035,10 +1042,11 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        # Strip clinic background noise (chatter, equipment, footsteps) from the
-        # audio stream before it reaches VAD or STT. BVC runs on the raw PCM so
-        # the caller's voice is the only signal Silero and Sarvam ever see.
-        input_audio_noise_cancellation=noise_cancellation.BVC(),
+        # Strip clinic background noise from the audio stream before it reaches
+        # VAD or STT. BVCTelephony is the telephony-optimised variant — trained
+        # specifically on inbound SIP/PSTN audio so it performs better than the
+        # generic BVC on compressed 8kHz phone-call streams.
+        input_audio_noise_cancellation=noise_cancellation.BVCTelephony(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
@@ -1142,6 +1150,34 @@ async def entrypoint(ctx: JobContext) -> None:
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
     await session.start(agent=agent, room=ctx.room, record=False)
+
+    # ── Cost guardrail: cap call duration ──────────────────────────────────────
+    # STT is billed per audio minute, so a phone left off-hook (or a caller who
+    # never hangs up) burns money indefinitely. Politely wrap up and drop the
+    # room after MAX_CALL_DURATION_S (default 10 min — far above a normal
+    # booking call's 2-4 min). Same hangup path as the end_call tool.
+    max_call_s = float(os.getenv("MAX_CALL_DURATION_S", "600"))
+
+    async def _duration_watchdog() -> None:
+        await asyncio.sleep(max_call_s)
+        _log.info("max call duration reached room=%s", room_name)
+        try:
+            await session.say(
+                "Sorry, we've reached the maximum call time. Please call back "
+                "if you need anything else. Thank you, goodbye!",
+                allow_interruptions=False,
+            )
+            await asyncio.sleep(8.0)
+        except Exception:
+            pass
+        try:
+            from src.services.livekit_sip import delete_room
+            await delete_room(room_name)
+        except Exception as exc:
+            _log.warning("watchdog hangup failed room=%s err=%s", room_name, exc)
+
+    _watchdog = asyncio.create_task(_duration_watchdog())
+    session.on("close", lambda e=None: _watchdog.cancel())
 
 
 def prewarm(proc) -> None:

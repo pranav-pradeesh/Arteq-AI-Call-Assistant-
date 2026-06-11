@@ -57,6 +57,6 @@ livekit-plugins-noise-cancellation==0.2.5
 pytest==8.2.0
 pytest-asyncio==0.23.6
 ruff==0.15.15
-bcrypt>=4.0.0
-email-validator>=2.1.0
-redis>=5.0.0
+bcrypt==4.2.1
+email-validator==2.2.0
+redis==5.0.8

@@ -13,6 +13,7 @@ Routes:
 """
 from __future__ import annotations
 
+import os
 import sys
 from contextlib import asynccontextmanager
 
@@ -66,6 +67,31 @@ async def lifespan(app: FastAPI):
             logger.info("db_migrations_applied")
         except Exception as me:
             logger.warning("db_migration_warning", error=str(me))
+
+        # Upsert the superadmin account using the LIVE env password so the
+        # credentials always match regardless of what hash is in 006b.sql.
+        # Only runs when the users table exists (after migration 006).
+        try:
+            import bcrypt as _bcrypt
+            _admin_email = os.environ.get("SUPERADMIN_EMAIL", "admin@arteqai.com")
+            _admin_pw    = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "")
+            if _admin_pw:
+                _hash = _bcrypt.hashpw(_admin_pw.encode()[:72], _bcrypt.gensalt(rounds=12)).decode()
+                async with pool.acquire() as conn:
+                    await conn.execute(
+                        """
+                        INSERT INTO users (email, password_hash, role, active)
+                        VALUES ($1, $2, 'super_admin', true)
+                        ON CONFLICT (email) DO UPDATE
+                            SET password_hash = EXCLUDED.password_hash,
+                                role          = 'super_admin',
+                                active        = true
+                        """,
+                        _admin_email, _hash,
+                    )
+                logger.info("superadmin_upserted", email=_admin_email)
+        except Exception as _se:
+            logger.warning("superadmin_upsert_skipped", reason=str(_se))
     except asyncio.TimeoutError:
         logger.error("db_connection_timeout", hint="Check DATABASE_URL / network")
     except Exception as e:
