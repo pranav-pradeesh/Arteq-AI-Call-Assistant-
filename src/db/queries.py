@@ -451,6 +451,7 @@ async def write_call_log(
     transcript: list,
     intents: list,
     outcome: str,
+    emotional_state: str = "",
 ) -> None:
     """Write call log row asynchronously. Non-blocking — called as background task."""
     try:
@@ -459,14 +460,15 @@ async def write_call_log(
             await conn.execute(
                 """INSERT INTO call_logs
                    (hospital_id, call_id, caller, started_at, ended_at,
-                    total_turns, latency_avg_ms, cost_paise, transcript, intents, outcome)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+                    total_turns, latency_avg_ms, cost_paise, transcript, intents,
+                    outcome, emotional_state)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                    ON CONFLICT (call_id) DO NOTHING""",
                 hospital_id, call_id, caller, started_at, ended_at,
                 total_turns, latency_avg_ms, cost_paise,
                 __import__("json").dumps(transcript, ensure_ascii=False),
                 __import__("json").dumps(intents, ensure_ascii=False),
-                outcome,
+                outcome, emotional_state or "",
             )
     except Exception as e:
         import logging
@@ -495,6 +497,7 @@ async def create_appointment(
     call_id: str,
     his_appointment_id: Optional[str] = None,
     priority: int = 0,
+    his_sync_status: Optional[str] = None,
 ) -> dict:
     """Insert a new appointment; returns {"id", "confirmation_code"}.
 
@@ -527,8 +530,9 @@ async def create_appointment(
                 """INSERT INTO appointments
                    (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
                     slot_time, notes, call_id, status, reminder_sent,
-                    his_appointment_id, confirmation_code, priority, payment_status)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9,$10,$11,'unpaid')
+                    his_appointment_id, confirmation_code, priority, payment_status,
+                    his_sync_status)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9,$10,$11,'unpaid',$12)
                    RETURNING id""",
                 hospital_id,
                 patient_name,
@@ -541,6 +545,7 @@ async def create_appointment(
                 his_appointment_id,
                 code,
                 priority,
+                his_sync_status,
             )
         except asyncpg.UniqueViolationError as exc:
             # Lost the race for this slot (ix_appt_no_double_book).
@@ -935,6 +940,7 @@ async def get_pending_followups(db_pool, days_after: int = 3) -> list[dict]:
         LEFT JOIN hospitals h ON h.id = a.hospital_id
         WHERE
             a.followup_sent = false
+            AND a.followup_attempts < 3
             AND a.status IN ('booked','confirmed','requested')
             AND a.slot_time BETWEEN now() - ($1 || ' days')::interval - interval '12 hours'
                                  AND now() - ($1 || ' days')::interval + interval '12 hours'
@@ -967,6 +973,7 @@ async def get_pending_confirmations(db_pool, days_min: int = 5, days_max: int = 
         LEFT JOIN hospitals h ON h.id = a.hospital_id
         WHERE
             a.confirmation_sent = false
+            AND a.confirmation_attempts < 3
             AND a.status IN ('booked', 'confirmed', 'requested')
             AND a.slot_time BETWEEN now() + ($1 || ' days')::interval
                                  AND now() + ($2 || ' days')::interval
@@ -989,6 +996,49 @@ async def mark_confirmation_sent(appointment_id: str) -> None:
             "UPDATE appointments SET confirmation_sent = true WHERE id = $1",
             _uuid_mod.UUID(appointment_id),
         )
+
+
+async def set_his_sync_status(appointment_id: str, status: str) -> None:
+    """Record whether an appointment change reached the hospital's HIS.
+
+    'failed' rows are the manual-reconciliation queue: the booking exists
+    locally but the HIS write did not go through.
+    """
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            await conn.execute(
+                "UPDATE appointments SET his_sync_status = $2 WHERE id = $1",
+                _uuid_mod.UUID(appointment_id), status,
+            )
+    except Exception as e:
+        import logging
+        logging.error(f"set_his_sync_status failed: {e}")
+
+
+async def increment_outbound_attempts(db_pool, appointment_id, kind: str) -> None:
+    """Bump the dial-attempt counter for an outbound call type.
+
+    kind ∈ {reminder, confirmation, followup}. Called on every dial attempt so
+    a number that never connects is given up after 3 tries (see the
+    *_attempts < 3 filters in the pending queries).
+    """
+    column = {
+        "reminder": "reminder_attempts",
+        "confirmation": "confirmation_attempts",
+        "followup": "followup_attempts",
+    }.get(kind)
+    if column is None:
+        return
+    try:
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                f"UPDATE appointments SET {column} = {column} + 1 WHERE id = $1",
+                appointment_id,
+            )
+    except Exception as e:
+        import logging
+        logging.debug(f"increment_outbound_attempts skipped: {e}")
 
 
 async def increment_campaign_calls_answered(campaign_id: str) -> None:

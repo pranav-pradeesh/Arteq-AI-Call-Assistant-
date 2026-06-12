@@ -764,12 +764,18 @@ class HospitalVoiceAgent(Agent):
             self._sensory.reset()
             return
 
-        # Inject acoustic metadata when noteworthy
+        # Inject acoustic metadata when noteworthy, and keep it for the call
+        # log (emotional_state) — computed-but-discarded sensory data made
+        # distressed calls impossible to find afterwards.
         meta = self._sensory.metadata()
         self._sensory.reset()
         if meta and text:
             try:
                 new_message.content = [f"{meta}\n{text}"]
+            except Exception:
+                pass
+            try:
+                self.session.userdata.setdefault("sensory_events", []).append(meta)
             except Exception:
                 pass
 
@@ -1018,6 +1024,8 @@ async def entrypoint(ctx: JobContext) -> None:
         "transfer_requested":  False,
         "transfer_destination": "",
         "caller_lang":         "ml-IN",
+        "intents":             [],   # appended by tools via _mark_intent
+        "sensory_events":      [],   # acoustic [SENSORY:...] tags per turn
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1084,6 +1092,13 @@ async def entrypoint(ctx: JobContext) -> None:
             if transfer_dest:
                 print(f"[arteq] call ended — transfer to {transfer_dest}")
 
+            # What actually happened on the call (tools mark these via
+            # _mark_intent) and how the caller sounded (acoustic tags).
+            intents = list(ud.get("intents", []) or [])
+            emotional_state = "; ".join(
+                dict.fromkeys(ud.get("sensory_events", []) or [])
+            )[:500]
+
             try:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
@@ -1099,11 +1114,19 @@ async def entrypoint(ctx: JobContext) -> None:
                     latency_avg_ms=meter.avg_ms(),
                     cost_paise=cost_paise,
                     transcript=transcript,
-                    intents=[],
+                    intents=intents,
                     outcome=outcome,
+                    emotional_state=emotional_state,
                 )
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
+
+            # Tell live-monitoring subscribers the call is over.
+            try:
+                from additions.live_events import emit_call_ended
+                await emit_call_ended(hospital_id, call_id)
+            except Exception:
+                pass
 
             # Increment campaign answered counter if this was an outbound campaign call
             campaign_id = (outbound_context or {}).get("campaign_id", "")
@@ -1158,6 +1181,24 @@ async def entrypoint(ctx: JobContext) -> None:
             noise_cancellation=noise_cancellation.BVCTelephony(),
         ),
     )
+
+    # ── Live monitoring: announce the call to dashboard subscribers ───────────
+    # (additions/routes/live_ws.py forwards these over the /admin/ws/live
+    # socket; with REDIS_URL set the event crosses from this worker process to
+    # the web server. Best-effort — monitoring must never break a call.)
+    try:
+        from additions.live_events import emit_call_started
+        await emit_call_started(hospital_id, {
+            "call_id": call_id,
+            "hospital_id": hospital_id,
+            "caller": caller_phone or "unknown",
+            "started_at": call_started_at.isoformat(),
+            "ended_at": None,
+            "outcome": None,
+            "intents": [],
+        })
+    except Exception as exc:
+        _log.debug("live event emit failed: %s", exc)
 
     # ── Cost guardrail: cap call duration ──────────────────────────────────────
     # STT is billed per audio minute, so a phone left off-hook (or a caller who

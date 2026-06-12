@@ -153,6 +153,17 @@ async def launch_campaign(
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
+            # Reject unknown hospitals up front (404) instead of surfacing the
+            # FK violation as a 500 — and so a typo can't dial 500 patients on
+            # behalf of a hospital that doesn't exist.
+            known = await conn.fetchval(
+                "SELECT 1 FROM hospitals WHERE id = $1", hospital_id
+            )
+            if not known:
+                raise HTTPException(
+                    status_code=status.HTTP_404_NOT_FOUND,
+                    detail=f"Unknown hospital_id {hospital_id}",
+                )
             await conn.execute(
                 _INSERT_CAMPAIGN,
                 campaign_id,
@@ -167,6 +178,8 @@ async def launch_campaign(
             )
         logger.info("campaign_created", campaign_id=campaign_id,
                     total=len(request.phones), type=request.campaign_type)
+    except HTTPException:
+        raise
     except Exception as exc:
         logger.error("campaign_create_failed", error=str(exc))
         raise HTTPException(

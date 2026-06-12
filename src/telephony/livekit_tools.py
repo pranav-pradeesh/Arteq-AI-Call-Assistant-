@@ -137,6 +137,24 @@ def _ud(context, key: str, default=None):
             return default
 
 
+def _mark_intent(context, intent: str) -> None:
+    """Record that a tool ran this call, so the call log's `intents` column
+    reflects what actually happened (booked / cancelled / emergency / …)."""
+    try:
+        ud = context.userdata
+    except AttributeError:
+        try:
+            ud = context.session.userdata
+        except AttributeError:
+            return
+    try:
+        intents = ud.setdefault("intents", [])
+        if intent not in intents:
+            intents.append(intent)
+    except Exception:
+        pass
+
+
 # Honorifics callers prefix to a doctor's name, in English + Malayalam. Stripped
 # before matching so "Doctor Anil" / "ഡോക്ടർ അനില്" resolve to "Anil".
 _HONORIFICS = (
@@ -195,6 +213,7 @@ try:
         the patient's name, preferred doctor (or department), date (YYYY-MM-DD), and
         time (HH:MM 24-hour). Returns confirmation text to speak to the caller.
         """
+        _mark_intent(context, "book_appointment")
         hospital_id  = _ud(context, "hospital_id", "")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", str(uuid.uuid4()))
@@ -232,8 +251,11 @@ try:
         from src.services.priority import compute_priority, extract_age
         priority = compute_priority(age=extract_age(notes), notes=notes)
 
-        # Try HIS first (if configured). Failure falls through to local DB only.
+        # Try HIS first (if configured). Failure falls through to local DB, but
+        # is recorded as his_sync_status='failed' so staff can reconcile — a
+        # silent fallback left the HIS and Arteq permanently out of sync.
         his_appt_id: Optional[str] = None
+        his_sync_status: Optional[str] = None
         try:
             from src.integrations.his.service import get_his_adapter
             his = await get_his_adapter(hospital_id)
@@ -249,9 +271,11 @@ try:
                     appointment_time=appointment_time,
                     notes=notes,
                 )
+                his_sync_status = "synced" if his_appt_id else "failed"
                 logger.info("his_appointment_created", his_appt_id=his_appt_id)
         except Exception as exc:
-            logger.warning("his_book_failed_fallback_to_db", error=str(exc))
+            his_sync_status = "failed"
+            logger.error("his_book_failed_fallback_to_db", error=str(exc))
 
         try:
             from src.db.queries import create_appointment
@@ -266,6 +290,7 @@ try:
                 call_id=call_id,
                 his_appointment_id=his_appt_id,
                 priority=priority,
+                his_sync_status=his_sync_status,
             )
             appt_id = result["id"]
             confirmation_code = result["confirmation_code"]
@@ -332,6 +357,7 @@ try:
         Cancel an existing appointment for the caller. Provide patient_name and
         optionally doctor_name or appointment_date to identify which appointment.
         """
+        _mark_intent(context, "cancel_appointment")
         hospital_id  = _ud(context, "hospital_id", "")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", "")
@@ -351,17 +377,23 @@ try:
                         target = a
                         break
 
-            # Cancel in HIS if appointment was synced there
+            # Cancel in HIS if appointment was synced there; a failed HIS
+            # cancel is flagged for manual reconciliation, not swallowed.
             his_appt_id = target.get("his_appointment_id")
             if his_appt_id:
                 try:
                     from src.integrations.his.service import get_his_adapter
                     his = await get_his_adapter(hospital_id)
                     if his:
-                        await his.cancel_appointment(his_appt_id)
-                        logger.info("his_appointment_cancelled", his_appt_id=his_appt_id)
+                        cancelled = await his.cancel_appointment(his_appt_id)
+                        if cancelled:
+                            logger.info("his_appointment_cancelled", his_appt_id=his_appt_id)
+                        else:
+                            raise RuntimeError("HIS returned failure")
                 except Exception as exc:
-                    logger.warning("his_cancel_failed", error=str(exc))
+                    logger.error("his_cancel_failed", error=str(exc))
+                    from src.db.queries import set_his_sync_status
+                    await set_his_sync_status(str(target["id"]), "failed")
 
             ok = await cancel_appointment_by_id(str(target["id"]), hospital_id)
             if not ok:
@@ -411,6 +443,7 @@ try:
         to be called back later. Collect patient_name, reason, and optionally
         preferred_time (e.g. 'tomorrow morning', '3pm').
         """
+        _mark_intent(context, "request_callback")
         hospital_id  = _ud(context, "hospital_id", "")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", "")
@@ -549,6 +582,7 @@ try:
         poisoning, or any life-threatening situation. Do NOT ask follow-up
         questions first — alert immediately, then reassure the caller.
         """
+        _mark_intent(context, "emergency")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", "")
         hospital_ctx = _ud(context, "hospital_ctx")
@@ -599,6 +633,7 @@ try:
         Transfer the call to a hospital department or staff member.
         Use for: reception, billing, pharmacy, lab, OPD, specific doctors.
         """
+        _mark_intent(context, "transfer")
         hospital_ctx = _ud(context, "hospital_ctx")
         room_name    = _ud(context, "room_name", "")
 
@@ -644,8 +679,25 @@ try:
             except Exception as exc:
                 logger.warning("tool_transfer_sip_failed", error=str(exc))
 
-        logger.info("tool_transfer_signal_only", department=department)
-        return f"Transferring you to {department}. Please hold."
+        # No live bridge happened — don't promise one. Hand the caller a real
+        # next step (the department's number when we have one) instead of
+        # leaving them on hold with nobody coming.
+        logger.warning("tool_transfer_signal_only", department=department)
+        ext = ""
+        if hospital_ctx:
+            dept = hospital_ctx.find_dept(department)
+            if dept and dept.phone_ext:
+                ext = dept.phone_ext.strip()
+        if ext:
+            return (
+                f"I couldn't connect you to {department} directly. "
+                f"You can reach them at {ext} — I've noted your request for them."
+            )
+        return (
+            f"I couldn't connect you to {department} directly. "
+            "I've noted your request — they will get back to you. "
+            "Is there anything else I can help with?"
+        )
 
 
     @function_tool
@@ -660,6 +712,7 @@ try:
         right before book_appointment to offer real open times.
         date must be YYYY-MM-DD.
         """
+        _mark_intent(context, "check_availability")
         hospital_id  = _ud(context, "hospital_id", "")
         hospital_ctx = _ud(context, "hospital_ctx")
 
@@ -727,6 +780,7 @@ try:
         (YYYY-MM-DD) and time (HH:MM 24-hour); doctor_name helps pick which
         appointment if the caller has more than one.
         """
+        _mark_intent(context, "reschedule_appointment")
         hospital_id  = _ud(context, "hospital_id", "")
         caller_phone = _ud(context, "caller_phone", "")
         call_id      = _ud(context, "call_id", "")
@@ -752,17 +806,25 @@ try:
                         target = a
                         break
 
-            # Reschedule in HIS if this appointment was synced there.
+            # Reschedule in HIS if this appointment was synced there. The base
+            # adapter's default returns False (reschedule unsupported) — treat
+            # that the same as an error and flag the row for reconciliation so
+            # the HIS and the local DB can't silently diverge.
             his_appt_id = target.get("his_appointment_id")
             if his_appt_id:
                 try:
                     from src.integrations.his.service import get_his_adapter
                     his = await get_his_adapter(hospital_id)
                     if his:
-                        await his.reschedule_appointment(his_appt_id, new_date, new_time)
-                        logger.info("his_appointment_rescheduled", his_appt_id=his_appt_id)
+                        moved = await his.reschedule_appointment(his_appt_id, new_date, new_time)
+                        if moved:
+                            logger.info("his_appointment_rescheduled", his_appt_id=his_appt_id)
+                        else:
+                            raise RuntimeError("HIS reschedule unsupported or failed")
                 except Exception as exc:
-                    logger.warning("his_reschedule_failed", error=str(exc))
+                    logger.error("his_reschedule_failed", error=str(exc))
+                    from src.db.queries import set_his_sync_status
+                    await set_his_sync_status(str(target["id"]), "failed")
 
             ok = await reschedule_appointment_by_id(str(target["id"]), new_slot, hospital_id)
             if not ok:

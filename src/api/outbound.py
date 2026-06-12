@@ -4,10 +4,10 @@ Outbound Call API — endpoints for scheduling reminder calls and checking statu
 from __future__ import annotations
 
 import structlog
-from fastapi import APIRouter, Depends, Form, Response
+from fastapi import APIRouter, Depends, Request, Response
 from pydantic import BaseModel
 
-from src.api.security import rate_limit, require_api_key
+from src.api.security import plivo_webhook_authentic, rate_limit, require_api_key
 from src.config.settings import settings
 from src.services.outbound_calls import OutboundCallService
 
@@ -19,7 +19,8 @@ router = APIRouter(
     dependencies=[Depends(require_api_key), Depends(rate_limit(30))],
 )
 
-# Separate router for Plivo callbacks (no auth — Plivo posts from its own IPs)
+# Separate router for Plivo callbacks — authenticated by Plivo's webhook
+# signature (when PLIVO_AUTH_TOKEN is set) rather than the internal API key.
 callback_router = APIRouter(tags=["outbound"])
 
 _outbound_service = OutboundCallService()
@@ -60,19 +61,25 @@ async def health_check():
 
 
 @callback_router.post("/api/v1/call/status")
-async def call_status_callback(
-    CallUUID: str = Form(default=""),
-    RequestUUID: str = Form(default=""),
-    Status: str = Form(default=""),
-    Duration: str = Form(default="0"),
-    From: str = Form(default=""),
-    To: str = Form(default=""),
-):
-    """Plivo hangup callback — called when a call ends."""
+async def call_status_callback(request: Request):
+    """Plivo hangup callback — called when a call ends.
+
+    Signature-verified when PLIVO_AUTH_TOKEN is configured (fail closed), so
+    call-status updates can't be forged by anyone who knows the URL.
+    """
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+
+    full_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/status"
+    if not plivo_webhook_authentic(request, full_url, params):
+        logger.warning("call_status_signature_rejected")
+        return Response(status_code=403)
+
+    call_uuid = params.get("CallUUID", "")
     logger.info(
         "call_status_callback",
-        call_uuid=CallUUID[-8:] if CallUUID else "?",
-        status=Status,
-        duration=Duration,
+        call_uuid=call_uuid[-8:] if call_uuid else "?",
+        status=params.get("Status", ""),
+        duration=params.get("Duration", "0"),
     )
     return Response(status_code=200)
