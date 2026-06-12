@@ -1,0 +1,26 @@
+{
+  "greeting": {
+    "intent": "greeting",
+    "response": "Good morning! Kairali Multi-Speciality Hospital-ലേക്ക് സ്വാഗതം. ഞാൻ {{agent_name}} ആണ്. എങ്ങിനെ സഹായിക്കാം?"
+  },
+  "ask_department": {
+    "intent": "ask_department",
+    "response": "ഏത് department-ലാണ് appointment വേണം എന്ന് പറയാമോ? (e.g., Cardiology)"
+  },
+  "check_availability": {
+    "intent": "check_availability",
+    "response": "Dr. {{doctor_name}}-ന് {{date}} available slot നോക്കാം — ഒരു നിമിഷം."
+  },
+  "offer_alternatives": {
+    "intent": "offer_alternatives",
+    "response": "Dr. {{doctor_name}}-ന് ആ സമയത്ത് available ഇല്ല. വേറെ date അല്ലെങ്കിൽ മറ്റൊരു doctor വേണോ? Available: {{alt_list}}."
+  },
+  "request_details": {
+    "intent": "request_details",
+    "response": "Booking-ക്കായി patient name, phone number, preferred date & time കൊടുക്കുമോ? ഞാന്‍ register ചെയ്ത് confirmation number അയക്കാം."
+  },
+  "confirm": {
+    "intent": "confirm",
+    "response": "Appointment confirmed: Dr. {{doctor_name}}, {{date}}, {{time}}. Confirmation no: {{conf_no}}. SMS/Email ആവശ്യമുണ്ടോ?"
+  }
+}
