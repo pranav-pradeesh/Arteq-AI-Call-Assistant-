@@ -189,6 +189,82 @@ def test_decode_token_accepts_both_shapes_rejects_garbage():
             assert e.status_code == 401
 
 
+def test_suffix_logic_dative():
+    from utils.suffix_logic import choose_suffix, format_doctor
+    assert choose_suffix("Lakshmi") == "-യ്ക്ക്"     # ends in 'i' → vowel
+    assert choose_suffix("Ranjith") == "-ന്"           # ends in 'h' → consonant
+    assert choose_suffix("Anita") == "-യ്ക്ക്"        # ends in 'a' → vowel
+    assert choose_suffix("Suresh Kumar") == "-ന്"      # ends in 'r' → consonant
+    assert format_doctor("Lakshmi").startswith("Dr. Lakshmi")
+    assert "-യ്ക്ക്" in format_doctor("Lakshmi")
+
+
+def test_suffix_logic_possessive():
+    from utils.suffix_logic import choose_possessive, format_doctor_possessive
+    assert choose_possessive("Lakshmi") == "-യുടെ"
+    assert choose_possessive("Menon") == "-ന്റെ"
+    assert "-യുടെ" in format_doctor_possessive("Anitha")
+    assert "-ന്റെ" in format_doctor_possessive("Ranjith Menon")
+
+
+def test_detect_tts_lang_scripts():
+    from src.tts_normalize import detect_tts_lang
+    ml_text = "ഞാൻ doctor appointment വേണം"
+    assert detect_tts_lang(ml_text, "ml-IN") == "ml-IN"
+
+    ta_text = "நான் டாக்டரை பார்க்க வேண்டும்"
+    assert detect_tts_lang(ta_text, "ml-IN") == "ta-IN"
+
+    hi_text = "मुझे डॉक्टर से मिलना है"
+    assert detect_tts_lang(hi_text, "ml-IN") == "hi-IN"
+
+
+def test_detect_tts_lang_manglish_uses_fallback():
+    from src.tts_normalize import detect_tts_lang
+    manglish = "Doctor appointment veenam paranjalo"
+    assert detect_tts_lang(manglish, "ml-IN") == "ml-IN"
+    assert detect_tts_lang(manglish, "en-IN") == "en-IN"
+
+
+def test_normalize_for_tts_exact_match():
+    from src.tts_normalize import normalize_for_tts
+    result = normalize_for_tts("ഡോക്ടർ ഉണ്ട്")
+    assert "Doctor" in result
+    assert "ഡോക്ടർ" not in result
+
+    result = normalize_for_tts("appointment ബുക്ക് ചെയ്യണം")
+    assert "appointment" in result
+
+
+def test_normalize_for_tts_stem_absorption():
+    from src.tts_normalize import normalize_for_tts
+    # "അപ്പോയിന്റ്മെന്റിന്" = "appointment" + dative suffix
+    result = normalize_for_tts("അപ്പോയിന്റ്മെന്റിന് time എന്ത്?")
+    assert "appointment" in result
+
+
+def test_greeting_language_matrix():
+    from src.ai.groq_brain import build_greeting_text, _GREETING_TEMPLATES
+    hosp = "Test Hospital"
+    agent = "Arya"
+    hour = 10
+
+    # All explicitly templated languages must produce non-empty greetings
+    for lang in _GREETING_TEMPLATES:
+        text = build_greeting_text(hosp, agent, hour, lang=lang)
+        assert hosp in text, f"hosp name missing for lang={lang}"
+        assert agent in text, f"agent name missing for lang={lang}"
+
+    # New additions: od-IN, mr-IN, manglish
+    for lang in ("od-IN", "mr-IN", "manglish"):
+        text = build_greeting_text(hosp, agent, hour, lang=lang)
+        assert agent in text, f"agent name missing for lang={lang}"
+
+    # Malayalam fallback: uses time-of-day opener
+    ml = build_greeting_text(hosp, agent, 9, lang="ml-IN")
+    assert "Good morning" in ml or "Good" in ml
+
+
 def test_mark_intent_dedupes():
     from src.telephony.livekit_tools import _mark_intent
 

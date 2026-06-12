@@ -81,27 +81,8 @@ _SCRIPT_RANGES = [
 
 
 def _detect_tts_lang(text: str, fallback: str) -> str:
-    """Pick target_language_code from the dominant Indic script in `text`.
-
-    Counts characters per script; the script with the most chars wins. Pure
-    Latin (no Indic chars) → en-IN. Empty/unknown → the configured fallback.
-    """
-    counts: dict[str, int] = {}
-    latin = 0
-    for ch in text:
-        cp = ord(ch)
-        if 0x41 <= cp <= 0x7A and ch.isalpha():
-            latin += 1
-            continue
-        for code, lo, hi in _SCRIPT_RANGES:
-            if lo <= cp <= hi:
-                counts[code] = counts.get(code, 0) + 1
-                break
-    if counts:
-        return max(counts, key=counts.get)
-    if latin:
-        return "en-IN"
-    return fallback
+    from src.tts_normalize import detect_tts_lang
+    return detect_tts_lang(text, fallback)
 
 
 # Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
@@ -149,12 +130,8 @@ def _stem_repl(m: "re.Match") -> str:
 
 
 def _normalize_for_tts(text: str) -> str:
-    # Inflected long roots first (absorbs glued suffixes), then exact short forms.
-    out = _TTS_EN_STEM_RE.sub(_stem_repl, text)
-    out = _TTS_EN_RE.sub(lambda m: " " + _TTS_EN_MAP[m.group(0)] + " ", out)
-    out = re.sub(r"\s{2,}", " ", out)
-    out = re.sub(r"\s+([,.?!।])", r"\1", out)  # drop space before punctuation
-    return out.strip()
+    from src.tts_normalize import normalize_for_tts
+    return normalize_for_tts(text)
 
 
 def _tts_cache_key(opts, text: str, lang: str) -> str:
@@ -296,6 +273,20 @@ class BulbulV3TTS(_SarvamTTS):
 # what the caller already said. The per-turn cost is dominated by the large
 # system prompt re-sent every turn, so a few short history messages are cheap.
 _MAX_CTX = 12
+
+_WATCHDOG_FAREWELLS = {
+    "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
+    "hi-IN":      "क्षमा करें, कॉल का अधिकतम समय समाप्त हो गया। ज़रूरत हो तो दोबारा कॉल करें। धन्यवाद, अलविदा!",
+    "ta-IN":      "மன்னிக்கவும், அழைப்பின் அதிகபட்ச நேரம் முடிந்தது. தேவையெனில் திரும்ப அழைக்கவும். நன்றி!",
+    "te-IN":      "క్షమించండి, గరిష్ట కాల్ సమయం ముగిసింది. అవసరమైతే తిరిగి కాల్ చేయండి. ధన్యవాదాలు!",
+    "kn-IN":      "ಕ್ಷಮಿಸಿ, ಗರಿಷ್ಠ ಕರೆ ಸಮಯ ಮುಗಿದಿದೆ. ಇನ್ನಷ್ಟು ಸಹಾಯ ಬೇಕಾದರೆ ಮತ್ತೆ ಕರೆ ಮಾಡಿ. ಧನ್ಯವಾದ!",
+    "bn-IN":      "দুঃখিত, সর্বোচ্চ কল সময় শেষ হয়েছে। প্রয়োজন হলে আবার কল করুন। ধন্যবাদ!",
+    "gu-IN":      "માફ કરશો, મહત્તમ કૉલ સમય પૂરો થયો. ફરીથી ફોન કરો. આભાર!",
+    "pa-IN":      "ਮਾਫ਼ ਕਰਨਾ, ਵੱਧ ਤੋਂ ਵੱਧ ਕਾਲ ਸਮਾਂ ਖਤਮ ਹੋ ਗਿਆ। ਲੋੜ ਹੋਵੇ ਤਾਂ ਦੁਬਾਰਾ ਕਾਲ ਕਰੋ। ਧੰਨਵਾਦ!",
+    "od-IN":      "କ୍ଷମା କରନ୍ତୁ, ସର୍ବାଧିକ call ସମୟ ଶେଷ ହୋଇଛି। ଆବଶ୍ୟକ ହେଲେ ପୁଣି call କରନ୍ତୁ। ଧନ୍ୟବାଦ!",
+    "mr-IN":      "क्षमस्व, कमाल कॉल वेळ संपली. गरज असल्यास पुन्हा कॉल करा. धन्यवाद!",
+    "en-IN":      "Sorry, we've reached the maximum call time. Please call back if you need anything else. Thank you, goodbye!",
+}
 
 _DTMF = {
     "1": "OPD timing please",
@@ -563,6 +554,10 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
     return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
 
 LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+
+SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
+
+MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?". Verbs take no gender suffix: "വന്നു" not "വന്നാൾ". Speak times as: "രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി" — never "10 AM" or "10:00 AM". For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
@@ -1142,7 +1137,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await SMSService().send_call_summary(
                     phone=caller_phone,
                     hospital_name=hospital_name,
-                    summary="Thank you for calling. Arya was happy to help.",
+                    summary=f"Thank you for calling {hospital_name}. {agent_name} was happy to help.",
                 )
 
             from src.services.staff_alert import StaffAlertService
@@ -1211,11 +1206,9 @@ async def entrypoint(ctx: JobContext) -> None:
         await asyncio.sleep(max_call_s)
         _log.info("max call duration reached room=%s", room_name)
         try:
-            await session.say(
-                "Sorry, we've reached the maximum call time. Please call back "
-                "if you need anything else. Thank you, goodbye!",
-                allow_interruptions=False,
-            )
+            caller_lang = session_data.get("caller_lang", agent_language)
+            farewell = _WATCHDOG_FAREWELLS.get(caller_lang, _WATCHDOG_FAREWELLS["en-IN"])
+            await session.say(farewell, allow_interruptions=False)
             await asyncio.sleep(8.0)
         except Exception:
             pass

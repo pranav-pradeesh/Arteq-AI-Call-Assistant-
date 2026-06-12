@@ -58,7 +58,10 @@ _GREETING_TEMPLATES = {
     "bn-IN": "নমস্কার! {hosp_name}-এ আপনাকে স্বাগতম। আমি {agent_name}। কীভাবে সাহায্য করতে পারি?",
     "gu-IN": "નમસ્તે! {hosp_name}માં સ્વાગત છે. હું {agent_name} છું. શું સેવા કરી શકું?",
     "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! {hosp_name} ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ। ਮੈਂ {agent_name} ਹਾਂ। ਕੀ ਸੇਵਾ ਕਰਾਂ?",
-    "en-IN": "Hello! Welcome to {hosp_name}. I'm {agent_name}. How can I help you?",
+    "en-IN":      "Hello! Welcome to {hosp_name}. I'm {agent_name}. How can I help you?",
+    "od-IN":      "ନମସ୍କାର! {hosp_name}-ରେ ଆପଣଙ୍କୁ ସ୍ୱାଗତ। ମୁଁ {agent_name}। ଆପଣ କ'ଣ ଚାଉଁ?",
+    "mr-IN":      "नमस्कार! {hosp_name}मध्ये आपले स्वागत आहे. मी {agent_name} आहे. काय मदत करू?",
+    "manglish":   "Hello! {hosp_name}-lekku svagatham. Njan {agent_name}. Enthaanu veenam?",
 }
 
 
@@ -124,9 +127,17 @@ _EMERGENCY_KEYWORDS = (
     "emergency", "ambulance", "chest pain", "unconscious", "breathing",
     "bleeding", "accident", "stroke", "seizure", "fits", "heart attack",
     "critical", "dying", "collapsed",
-    # അടിയന്തരം is the standard spelling; അടിയന്തിരം is a common STT variant.
+    # Malayalam — standard + STT variants + additional terms
     "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം", "അടിയന്തരം", "അടിയന്തിരം", "ആംബുലൻസ്",
+    "ഹൃദയാഘാതം", "അപകടം", "രക്തസ്രാവം", "ചോര",
+    # Hindi
     "हार्ट", "दुर्घटना",
+    # Tamil
+    "மாரடைப்பு", "விபத்து", "இரத்தம்",
+    # Telugu
+    "గుండెపోటు", "ప్రమాదం", "రక్తస్రావం",
+    # Kannada
+    "ಹೃದಯಾಘಾತ", "ಅಪಘಾತ", "ರಕ್ತಸ್ರಾವ",
 )
 
 _FALLBACK_MESSAGES = {
