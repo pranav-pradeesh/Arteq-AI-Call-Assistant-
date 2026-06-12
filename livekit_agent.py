@@ -35,7 +35,7 @@ _log = logging.getLogger("livekit.agents")
 import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions, RoomInputOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import noise_cancellation, openai, sarvam, silero
@@ -1042,11 +1042,6 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        # Strip clinic background noise from the audio stream before it reaches
-        # VAD or STT. BVCTelephony is the telephony-optimised variant — trained
-        # specifically on inbound SIP/PSTN audio so it performs better than the
-        # generic BVC on compressed 8kHz phone-call streams.
-        input_audio_noise_cancellation=noise_cancellation.BVCTelephony(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
@@ -1149,7 +1144,20 @@ async def entrypoint(ctx: JobContext) -> None:
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
-    await session.start(agent=agent, room=ctx.room, record=False)
+    await session.start(
+        agent=agent,
+        room=ctx.room,
+        record=False,
+        # Strip clinic background noise from the inbound audio stream before it
+        # reaches VAD or STT. BVCTelephony is the telephony-optimised variant —
+        # trained on inbound SIP/PSTN audio so it performs better than the
+        # generic BVC on compressed 8kHz phone-call streams.
+        # NOTE: livekit-agents 1.x takes this here via RoomInputOptions, NOT as
+        # an AgentSession kwarg — passing it to AgentSession() raises TypeError.
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVCTelephony(),
+        ),
+    )
 
     # ── Cost guardrail: cap call duration ──────────────────────────────────────
     # STT is billed per audio minute, so a phone left off-hook (or a caller who
