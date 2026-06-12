@@ -1462,6 +1462,79 @@ async def sip_setup():
     }
 
 
+@router.post("/sip/exotel/setup", dependencies=[Depends(_require_super)])
+async def sip_exotel_setup():
+    """
+    One-time Exotel SIP trunk provisioning. Run after first deployment with Exotel.
+
+    Creates:
+    • One Exotel SIP outbound trunk in LiveKit (for reminder/confirmation calls)
+    • One SIP inbound trunk + dispatch rule per hospital with an Exotel number
+
+    Returns the outbound trunk ID. Set it as LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
+    in Render environment variables, then redeploy.
+
+    Requires LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+    EXOTEL_API_KEY, EXOTEL_API_TOKEN, EXOTEL_PHONE_NUMBER.
+    """
+    missing = [
+        k for k in (
+            "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+            "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOTEL_PHONE_NUMBER",
+        )
+        if not getattr(settings, k, "")
+    ]
+    if missing:
+        return {
+            "status": "not_configured",
+            "missing_env_vars": missing,
+            "message": "Set the listed environment variables, then call this endpoint again.",
+        }
+
+    try:
+        from src.services.livekit_sip import (
+            setup_sip_outbound_trunk_exotel,
+            setup_hospital_inbound_exotel,
+        )
+    except ImportError:
+        raise HTTPException(status_code=501, detail="livekit package not installed")
+
+    outbound_trunk_id = await setup_sip_outbound_trunk_exotel()
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hospitals = await conn.fetch(
+            "SELECT id, slug, exotel_number FROM hospitals "
+            "WHERE exotel_number IS NOT NULL AND exotel_number != '' "
+            "ORDER BY created_at"
+        )
+
+    inbound = []
+    for h in hospitals:
+        slug = h["slug"] or str(h["id"])
+        trunk_id, rule_id = await setup_hospital_inbound_exotel(slug, h["exotel_number"])
+        inbound.append({
+            "hospital_id": str(h["id"]),
+            "slug": slug,
+            "exotel_number": h["exotel_number"],
+            "sip_trunk_id": trunk_id,
+            "dispatch_rule_id": rule_id,
+            "ok": bool(trunk_id),
+        })
+
+    return {
+        "outbound_trunk_id": outbound_trunk_id,
+        "inbound_trunks": inbound,
+        "sip_host": settings.LIVEKIT_SIP_HOST or "(set LIVEKIT_SIP_HOST from LiveKit dashboard)",
+        "next_steps": [
+            f"1. Set LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID={outbound_trunk_id} in Render env vars",
+            "2. Configure each hospital's ExoPhone VoiceUrl to:",
+            f"   POST {settings.PUBLIC_BASE_URL}/api/v1/call/inbound/exotel/<EXOTEL_WEBHOOK_TOKEN>/<slug>",
+            "3. Redeploy both arteq-voice-agent and arteq-livekit-agent",
+        ],
+    }
+
+
 # ── HIS Integration ──────────────────────────────────────────────────────────
 
 class HisConfigBody(BaseModel):

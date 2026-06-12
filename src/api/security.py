@@ -223,10 +223,29 @@ def plivo_webhook_authentic(
     return False
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Exotel webhook token verification
+# ─────────────────────────────────────────────────────────────────────────────
+
+def exotel_webhook_authentic(request: Request, url_token: str) -> bool:
+    """Verify an Exotel inbound webhook.
+
+    Exotel does not send a cryptographic signature header. Security relies on
+    the webhook URL itself being a secret — `url_token` is a random token
+    embedded in the URL path that only Exotel (who was given the configured URL)
+    knows. If EXOTEL_WEBHOOK_TOKEN is blank the check is skipped (dev/test only).
+    """
+    expected = getattr(settings, "EXOTEL_WEBHOOK_TOKEN", "") or ""
+    if not expected:
+        return True
+    return hmac.compare_digest(url_token, expected)
+
+
 __all__ = [
     "require_api_key",
     "rate_limit",
     "plivo_webhook_authentic",
+    "exotel_webhook_authentic",
     "verify_plivo_signature_v1",
     "verify_plivo_signature_v2",
 ]

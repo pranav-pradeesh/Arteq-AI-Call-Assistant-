@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     PLIVO_AUTH_TOKEN: str = ""
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
+    # Exotel — Indian cloud telephony (alternative to Plivo)
+    EXOTEL_API_KEY: str = ""          # Account SID (shown in Exotel dashboard)
+    EXOTEL_API_TOKEN: str = ""        # API token
+    EXOTEL_PHONE_NUMBER: str = ""     # Virtual Number / ExoPhone, E.164 +91XXXXXXXXXX
+    EXOTEL_SUBDOMAIN: str = "api.exotel.com"  # or api.in.exotel.com for India region
+    # Embed in webhook URL so only Exotel (who was given the URL) can trigger it.
+    # Leave blank to skip token check (not recommended in production).
+    EXOTEL_WEBHOOK_TOKEN: str = ""
+    LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID: str = ""  # set after POST /admin/sip/exotel/setup
+
     # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
     # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
     WHATSAPP_ENABLED: bool = True

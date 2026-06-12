@@ -45,6 +45,15 @@ _PLIVO_SIP_CIDRS = [
     "52.66.40.0/24",
 ]
 
+# Exotel SIP CIDRs (India region). Update if Exotel adds ranges.
+_EXOTEL_SIP_CIDRS = [
+    "52.74.56.0/24",
+    "13.251.52.0/24",
+    "139.59.48.0/20",
+    "13.127.0.0/16",
+    "52.66.0.0/16",
+]
+
 
 def _lk():
     """Return a LiveKit API client. Raises if livekit package not installed."""
@@ -79,6 +88,84 @@ async def delete_room(room_name: str) -> bool:
 
 
 # ── One-time provisioning ──────────────────────────────────────────────────────
+
+async def setup_sip_outbound_trunk_exotel() -> str:
+    """
+    Create Exotel SIP outbound trunk in LiveKit.
+    Returns the trunk ID — set it as LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID in env.
+
+    Exotel SIP hostname: sip.exotel.com (or region-specific; check Exotel dashboard).
+    Credentials: use EXOTEL_API_KEY + EXOTEL_API_TOKEN as SIP auth.
+    """
+    try:
+        from livekit import api as lk_api
+        lk = _lk()
+        trunk = await lk.sip.create_sip_outbound_trunk(
+            lk_api.CreateSIPOutboundTrunkRequest(
+                trunk=lk_api.SIPOutboundTrunkInfo(
+                    name="Exotel Outbound",
+                    address="sip.exotel.com",
+                    numbers=[settings.EXOTEL_PHONE_NUMBER],
+                    auth_username=settings.EXOTEL_API_KEY,
+                    auth_password=settings.EXOTEL_API_TOKEN,
+                    transport=lk_api.SIPTransport.SIP_TRANSPORT_TLS,
+                )
+            )
+        )
+        await lk.aclose()
+        logger.info("sip_exotel_outbound_trunk_created", trunk_id=trunk.sip_trunk_id)
+        return trunk.sip_trunk_id
+    except Exception as exc:
+        logger.error("sip_exotel_outbound_trunk_failed", error=str(exc))
+        return ""
+
+
+async def setup_hospital_inbound_exotel(
+    hospital_slug: str,
+    did_number: str,
+) -> tuple[str, str]:
+    """
+    Create a SIP inbound trunk + dispatch rule for one Exotel ExoPhone.
+    Returns (trunk_id, dispatch_rule_id) — store in the hospitals table.
+    """
+    if not hospital_slug or not did_number:
+        return "", ""
+    try:
+        from livekit import api as lk_api
+        lk = _lk()
+        trunk = await lk.sip.create_sip_inbound_trunk(
+            lk_api.CreateSIPInboundTrunkRequest(
+                trunk=lk_api.SIPInboundTrunkInfo(
+                    name=f"{hospital_slug} inbound (exotel)",
+                    numbers=[did_number],
+                    allowed_addresses=_EXOTEL_SIP_CIDRS,
+                    krisp_enabled=True,
+                )
+            )
+        )
+        rule = await lk.sip.create_sip_dispatch_rule(
+            lk_api.CreateSIPDispatchRuleRequest(
+                trunk_ids=[trunk.sip_trunk_id],
+                rule=lk_api.SIPDispatchRule(
+                    dispatch_rule_individual=lk_api.SIPDispatchRuleIndividual(
+                        room_prefix=f"{hospital_slug}-call-",
+                    )
+                ),
+            )
+        )
+        await lk.aclose()
+        logger.info(
+            "sip_exotel_inbound_configured",
+            slug=hospital_slug,
+            did=did_number[-4:],
+            trunk_id=trunk.sip_trunk_id,
+            rule_id=rule.sip_dispatch_rule_id,
+        )
+        return trunk.sip_trunk_id, rule.sip_dispatch_rule_id
+    except Exception as exc:
+        logger.error("sip_exotel_inbound_setup_failed", slug=hospital_slug, error=str(exc))
+        return "", ""
+
 
 async def setup_sip_outbound_trunk() -> str:
     """
@@ -163,17 +250,36 @@ async def dial_outbound(
     patient_phone: str,
     hospital_slug: str,
     context: dict[str, Any],
+    carrier: str = "auto",
 ) -> str:
     """
-    Create a LiveKit room (with outbound context as metadata), then instruct
-    LiveKit to dial the patient via the Plivo SIP outbound trunk.
-    The agent worker auto-dispatches to this room when the patient answers.
+    Create a LiveKit room then dial the patient via SIP.
+
+    carrier: "plivo" | "exotel" | "auto" (auto picks Exotel if its trunk is set,
+    falls back to Plivo).
     Returns the room name on success, "" on failure.
     """
-    if not settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID:
+    exotel_trunk = settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
+    plivo_trunk = settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID
+
+    if carrier == "exotel":
+        trunk_id = exotel_trunk
+        sip_proxy = "sip.exotel.com"
+    elif carrier == "plivo":
+        trunk_id = plivo_trunk
+        sip_proxy = "sip.plivo.com"
+    else:  # auto
+        if exotel_trunk:
+            trunk_id = exotel_trunk
+            sip_proxy = "sip.exotel.com"
+        else:
+            trunk_id = plivo_trunk
+            sip_proxy = "sip.plivo.com"
+
+    if not trunk_id:
         logger.error(
             "livekit_sip_outbound_not_configured",
-            hint="Run POST /admin/sip/setup then set LIVEKIT_SIP_OUTBOUND_TRUNK_ID",
+            hint="Run POST /admin/sip/setup (Plivo) or /admin/sip/exotel/setup, then set the trunk ID env var",
         )
         return ""
 
@@ -198,18 +304,16 @@ async def dial_outbound(
             )
         )
 
-        # LiveKit dials the patient via Plivo SIP
-        # Plivo expects E.164 format (+91XXXXXXXXXX)
         phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
-                sip_trunk_id=settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID,
-                sip_url=f"sip:{phone}@sip.plivo.com",
+                sip_trunk_id=trunk_id,
+                sip_url=f"sip:{phone}@{sip_proxy}",
                 room_name=room_name,
                 participant_identity=f"patient-{phone[-4:]}",
                 participant_name="Patient",
                 play_ringtone=True,
-                wait_until_answered=False,  # non-blocking — agent joins while ringing
+                wait_until_answered=False,
             )
         )
 
@@ -217,6 +321,7 @@ async def dial_outbound(
             "outbound_sip_dialed",
             patient=phone[-4:],
             room=room_name,
+            carrier=sip_proxy.split(".")[1],
             call_type=context.get("call_type"),
         )
         return room_name
@@ -242,10 +347,19 @@ async def transfer_call_in_room(
     should then say goodbye and stop speaking.
     Returns True on success.
     """
-    if not settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID:
+    trunk_id = (
+        settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
+        or settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID
+    )
+    sip_proxy = (
+        "sip.exotel.com"
+        if settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
+        else "sip.plivo.com"
+    )
+    if not trunk_id:
         logger.warning(
             "sip_transfer_skipped",
-            reason="LIVEKIT_SIP_OUTBOUND_TRUNK_ID not set — update env after running SIP setup",
+            reason="No SIP outbound trunk configured — run /admin/sip/setup or /admin/sip/exotel/setup",
         )
         return False
 
@@ -261,8 +375,8 @@ async def transfer_call_in_room(
         lk = _lk()
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
-                sip_trunk_id=settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID,
-                sip_url=f"sip:{phone}@sip.plivo.com",
+                sip_trunk_id=trunk_id,
+                sip_url=f"sip:{phone}@{sip_proxy}",
                 room_name=room_name,
                 participant_identity=f"transfer-{phone[-4:]}",
                 participant_name=participant_name,
@@ -278,6 +392,39 @@ async def transfer_call_in_room(
     finally:
         if lk is not None:
             await lk.aclose()
+
+
+# ── Runtime: inbound ExoML (Exotel) ──────────────────────────────────────────
+
+def get_inbound_exoml(to_number: str = "") -> str:
+    """
+    Returns Exotel ExoML that SIP-forwards an inbound call to LiveKit.
+    ExoML is structurally identical to Plivo PCML for the Dial+Sip use case.
+    The Exotel dispatch rule (matched by `to_number`) creates the agent room.
+    """
+    sip_host = settings.LIVEKIT_SIP_HOST
+    if not sip_host:
+        logger.warning(
+            "livekit_sip_host_not_set",
+            hint="Set LIVEKIT_SIP_HOST to your LiveKit SIP endpoint hostname",
+        )
+        return (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            "<Response><Say>We are experiencing technical difficulties. "
+            "Please call back in a few minutes. Thank you.</Say></Response>"
+        )
+
+    did = to_number or settings.EXOTEL_PHONE_NUMBER
+    sip_uri = f"sip:{did}@{sip_host};transport=tls"
+
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        "  <Dial>\n"
+        f"    <Sip>{sip_uri}</Sip>\n"
+        "  </Dial>\n"
+        "</Response>"
+    )
 
 
 # ── Runtime: inbound PCML ─────────────────────────────────────────────────────

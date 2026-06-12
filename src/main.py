@@ -324,6 +324,33 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     return Response(content=xml, media_type="text/xml")
 
 
+# ── Exotel inbound webhook ────────────────────────────────────────────────────
+
+@app.post("/api/v1/call/inbound/exotel/{token}/{tenant_slug}")
+async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request):
+    """
+    Exotel calls this webhook for every answered inbound call.
+    Returns ExoML that SIP-forwards the call to LiveKit.
+
+    The `token` path segment is compared against EXOTEL_WEBHOOK_TOKEN — embedding
+    a secret in the URL is Exotel's recommended webhook security mechanism since
+    they do not send a cryptographic signature header.
+    """
+    from fastapi.responses import Response
+    from src.api.security import exotel_webhook_authentic
+    from src.services.livekit_sip import get_inbound_exoml
+
+    if not exotel_webhook_authentic(request, token):
+        logger.warning("exotel_token_rejected", tenant=tenant_slug)
+        return Response(status_code=403)
+
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    to_number = params.get("To", settings.EXOTEL_PHONE_NUMBER)
+    xml = get_inbound_exoml(to_number=to_number)
+    return Response(content=xml, media_type="text/xml")
+
+
 # ── Outbound calls & SMS ──────────────────────────────────────────────────────
 
 try:
