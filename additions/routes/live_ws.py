@@ -22,18 +22,17 @@ shipping/operating this endpoint is optional but recommended.
 from __future__ import annotations
 
 import asyncio
-import os
 from typing import Any, List, Optional
 
 import asyncpg
 from jose import jwt, JWTError
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect, status
 
+from ..deps import JWT_SECRET
 from ..live_events import subscribe_call_events
 
 router = APIRouter(prefix="/admin", tags=["live"])
 
-JWT_SECRET: str = os.environ.get("DASHBOARD_JWT_SECRET", "changeme")
 JWT_ALGORITHM: str = "HS256"
 
 _SNAPSHOT_SQL = """
@@ -48,12 +47,29 @@ _SNAPSHOT_SQL = """
 """
 
 
-def _valid_token(token: str) -> bool:
+def _decode(token: str) -> Optional[dict]:
     try:
-        jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
-        return True
+        return jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
     except JWTError:
+        return None
+
+
+async def _hospital_allowed(pool: Optional[asyncpg.Pool], payload: dict, hospital_id: str) -> bool:
+    """super_admin (and the legacy single-password admin) may watch any
+    hospital; tenant_admin / viewer only hospitals assigned in user_tenants."""
+    if payload.get("sub") == "admin" or payload.get("role") == "super_admin":
+        return True
+    if pool is None:
         return False
+    async with pool.acquire() as conn:
+        return bool(await conn.fetchval(
+            """SELECT 1 FROM user_tenants ut
+               JOIN users u ON u.id = ut.user_id
+               JOIN hospitals h ON h.slug = ut.tenant_slug
+               WHERE u.email = $1 AND h.id = $2 AND u.active
+               LIMIT 1""",
+            payload.get("sub", ""), hospital_id,
+        ))
 
 
 async def _snapshot(pool: asyncpg.Pool, hospital_id: str) -> List[dict[str, Any]]:
@@ -78,14 +94,28 @@ async def ws_live(
     hospital_id: str = Query(..., description="Hospital UUID"),
     token: str = Query(..., description="Session JWT (sub + role claims)"),
 ) -> None:
-    if not _valid_token(token):
+    payload = _decode(token)
+    if payload is None:
+        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
+        return
+
+    pool: Optional[asyncpg.Pool] = getattr(websocket.app.state, "pool", None)
+    if pool is None:
+        try:
+            from src.db.queries import get_control_pool
+            pool = await get_control_pool()
+        except Exception:
+            pool = None
+
+    # Per-hospital scoping: a valid token alone is not enough to watch a
+    # hospital's live calls.
+    if not await _hospital_allowed(pool, payload, hospital_id):
         await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
         return
 
     await websocket.accept()
 
     # Initial snapshot of in-progress calls (best-effort).
-    pool: Optional[asyncpg.Pool] = getattr(websocket.app.state, "pool", None)
     if pool is not None:
         try:
             await websocket.send_json({"type": "snapshot", "calls": await _snapshot(pool, hospital_id)})

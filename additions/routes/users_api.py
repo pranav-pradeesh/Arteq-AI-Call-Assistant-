@@ -73,7 +73,8 @@ def verify_password(plain: str, hashed: str) -> bool:
 # JWT settings (must match deps.py and existing auth.py)
 # ---------------------------------------------------------------------------
 
-JWT_SECRET: str = os.environ.get("DASHBOARD_JWT_SECRET", "changeme")
+from ..deps import JWT_SECRET  # same secret the rest of the dashboard verifies with
+
 JWT_ALGORITHM: str = "HS256"
 JWT_EXPIRE_MINUTES: int = int(os.environ.get("DASHBOARD_JWT_EXPIRE_MINUTES", "720"))
 

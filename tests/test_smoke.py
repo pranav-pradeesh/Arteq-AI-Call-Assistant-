@@ -114,3 +114,89 @@ def test_features_normalize_over_tier():
     # Explicit override wins over tier default.
     overridden = feat.normalize({"campaigns": False}, "hospital")
     assert overridden["campaigns"] is False
+
+
+def test_plivo_signature_v1_and_v2():
+    """Both Plivo signature schemes verify correctly and reject tampering."""
+    import base64
+    import hashlib
+    import hmac
+    from src.api.security import verify_plivo_signature_v1, verify_plivo_signature_v2
+
+    token = "test-auth-token"
+    url = "https://example.com/api/v1/call/inbound/demo"
+
+    params = {"From": "+919999999999", "To": "+918888888888"}
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+    sig_v1 = base64.b64encode(
+        hmac.new(token.encode(), (url + sorted_str).encode(), hashlib.sha1).digest()
+    ).decode()
+    assert verify_plivo_signature_v1(token, url, params, sig_v1) is True
+    assert verify_plivo_signature_v1(token, url, params, "forged") is False
+    assert verify_plivo_signature_v1("wrong-token", url, params, sig_v1) is False
+
+    nonce = "12345"
+    sig_v2 = base64.b64encode(
+        hmac.new(token.encode(), (url + nonce).encode(), hashlib.sha256).digest()
+    ).decode()
+    assert verify_plivo_signature_v2(token, url, nonce, sig_v2) is True
+    assert verify_plivo_signature_v2(token, url, "other-nonce", sig_v2) is False
+
+
+def test_admin_token_carries_super_admin_role():
+    """Legacy single-password tokens carry role=super_admin so RBAC-aware
+    routes (additions/*) authorise them coherently."""
+    from jose import jwt
+    from src.config.settings import settings
+    from dashboard.routes.admin_api import _create_token, _is_super
+
+    payload = jwt.decode(
+        _create_token(), settings.DASHBOARD_JWT_SECRET, algorithms=["HS256"]
+    )
+    assert payload["sub"] == "admin"
+    assert payload["role"] == "super_admin"
+    assert _is_super(payload) is True
+    assert _is_super({"sub": "viewer@x.com", "role": "viewer"}) is False
+
+
+def test_decode_token_accepts_both_shapes_rejects_garbage():
+    from datetime import datetime, timedelta, timezone
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+    from jose import jwt
+    from src.config.settings import settings
+    from dashboard.routes.admin_api import _decode_token
+
+    def creds(token):
+        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    exp = datetime.now(timezone.utc) + timedelta(minutes=5)
+    rbac = jwt.encode(
+        {"sub": "staff@hosp.com", "role": "tenant_admin", "exp": exp},
+        settings.DASHBOARD_JWT_SECRET, algorithm="HS256",
+    )
+    assert _decode_token(creds(rbac))["role"] == "tenant_admin"
+
+    # Valid signature but neither legacy sub nor a known role -> 401
+    rogue = jwt.encode(
+        {"sub": "nobody", "exp": exp}, settings.DASHBOARD_JWT_SECRET, algorithm="HS256"
+    )
+    for bad in (rogue, "not-a-jwt"):
+        try:
+            _decode_token(creds(bad))
+            assert False, "expected HTTPException"
+        except HTTPException as e:
+            assert e.status_code == 401
+
+
+def test_mark_intent_dedupes():
+    from src.telephony.livekit_tools import _mark_intent
+
+    class Ctx:
+        userdata = {}
+
+    ctx = Ctx()
+    _mark_intent(ctx, "book_appointment")
+    _mark_intent(ctx, "book_appointment")
+    _mark_intent(ctx, "emergency")
+    assert ctx.userdata["intents"] == ["book_appointment", "emergency"]

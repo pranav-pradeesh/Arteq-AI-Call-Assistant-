@@ -195,6 +195,7 @@ class OutboundCallService:
             LEFT JOIN hospitals h ON h.id = a.hospital_id
             WHERE
                 a.reminder_sent = false
+                AND a.reminder_attempts < 3
                 AND a.status IN ('booked', 'confirmed')
                 AND a.slot_time BETWEEN now() AND now() + interval '24 hours'
             ORDER BY a.slot_time

@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     FOLLOWUP_LOOP_INTERVAL_SECONDS: int = 3600
     FOLLOWUP_DAYS_AFTER: int = 3         # call patient this many days after appointment
 
+    # Resume campaigns stranded by a restart (recipients left 'pending')
+    CAMPAIGN_RESUME_ENABLED: bool = True
+    CAMPAIGN_RESUME_INTERVAL_SECONDS: int = 600
+
     # Patient recognition
     PATIENT_RECOGNITION_ENABLED: bool = True
 
@@ -153,6 +157,8 @@ class Settings(BaseSettings):
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"
     DASHBOARD_JWT_EXPIRE_MINUTES: int = 720
+    # Email the startup superadmin upsert uses (password = DASHBOARD_ADMIN_PASSWORD).
+    SUPERADMIN_EMAIL: str = "admin@arteqai.com"
 
     @model_validator(mode="after")
     def _reject_weak_secrets_in_production(self) -> "Settings":

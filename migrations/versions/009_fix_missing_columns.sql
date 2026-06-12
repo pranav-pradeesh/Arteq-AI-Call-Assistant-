@@ -5,7 +5,7 @@
 ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS active       BOOLEAN NOT NULL DEFAULT true;
 ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS plivo_number TEXT;
 ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS knowledge_base TEXT;
-ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS tier         TEXT NOT NULL DEFAULT 'basic';
+ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS tier         TEXT NOT NULL DEFAULT 'hospital';
 
 -- departments
 ALTER TABLE departments ADD COLUMN IF NOT EXISTS active      BOOLEAN NOT NULL DEFAULT true;

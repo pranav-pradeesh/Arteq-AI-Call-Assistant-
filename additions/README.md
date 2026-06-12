@@ -12,8 +12,9 @@ Nothing in the existing codebase is modified; these files are dropped in and wir
 pip install -r backend-additions/requirements-additions.txt   # bcrypt, email-validator, redis (JWT uses the repo's python-jose)
 
 # 2. copy the package into the app, e.g. as src/additions/, then run migrations:
-psql "$DATABASE_URL" -f backend-additions/migrations/006_users_rbac.sql
-psql "$DATABASE_URL" -f backend-additions/migrations/006b_seed_superadmin.sql   # bootstrap super-admin
+psql "$DATABASE_URL" -f migrations/versions/006_users_rbac.sql
+psql "$DATABASE_URL" -f migrations/versions/006b_seed_superadmin.sql   # bootstrap super-admin
+# (both also run automatically on app startup — see src/main.py)
 ```
 
 ```python
