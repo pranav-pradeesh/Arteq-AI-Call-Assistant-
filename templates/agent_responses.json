@@ -1,26 +1,42 @@
 {
   "greeting": {
     "intent": "greeting",
-    "response": "Good morning! Kairali Multi-Speciality Hospital-ലേക്ക് സ്വാഗതം. ഞാൻ {{agent_name}} ആണ്. എങ്ങിനെ സഹായിക്കാം?"
+    "response": "Good morning! Kairali Multi-Speciality Hospital-ലേക്ക് സ്വാഗതം. ഞാൻ {{agent_name}}. എങ്ങനെ സഹായിക്കാം?"
   },
   "ask_department": {
     "intent": "ask_department",
-    "response": "ഏത് department-ലാണ് appointment വേണം എന്ന് പറയാമോ? (e.g., Cardiology)"
+    "response": "എനിക്ക് Cardiology (or {{department}}) വിഭാഗത്തിലെ ഏതെങ്കിലും ഡോക്ടറെ കാണാൻ appointment വേണമോ?"
   },
   "check_availability": {
     "intent": "check_availability",
     "response": "Dr. {{doctor_name}}-ന് {{date}} available slot നോക്കാം — ഒരു നിമിഷം."
   },
-  "offer_alternatives": {
-    "intent": "offer_alternatives",
-    "response": "Dr. {{doctor_name}}-ന് ആ സമയത്ത് available ഇല്ല. വേറെ date അല്ലെങ്കിൽ മറ്റൊരു doctor വേണോ? Available: {{alt_list}}."
+  "doctor_unavailable": {
+    "intent": "doctor_unavailable",
+    "response": "Dr. {{doctor_name}}-ന് ഇന്ന് ലഭ്യമല്ല."
+  },
+  "doctor_unavailable_formal": {
+    "intent": "doctor_unavailable_formal",
+    "response": "Dr. {{doctor_name}}യുടെ ഇന്ന് എല്ലാ അപ്പോയിന്റ്മെന്റുകളും ബുക്ക് ആയിട്ടുണ്ട്."
+  },
+  "ask_alternative": {
+    "intent": "ask_alternative",
+    "response": "മറ്റൊരു ഡോക്ടറെ കാണാൻ താൽപര്യമുണ്ടോ, അല്ലെങ്കിൽ വേറെ ദിവസത്തേക്കോ?"
+  },
+  "ask_available_doctors": {
+    "intent": "ask_available_doctors",
+    "response": "വേറെ ഏത് ഡോക്ടർമാരാണ് ലഭ്യമായിരിക്കുന്നത്?"
+  },
+  "offer_times": {
+    "intent": "offer_times",
+    "response": "Dr. {{doctor_name}}യ്ക്ക് available slots: {{slots}}. Dr. {{doctor_name}}യെ കാണാൻ ഏത് സമയമാണ് സൗകര്യം?"
   },
   "request_details": {
     "intent": "request_details",
-    "response": "Booking-ക്കായി patient name, phone number, preferred date & time കൊടുക്കുമോ? ഞാന്‍ register ചെയ്ത് confirmation number അയക്കാം."
+    "response": "Patient name, phone number, preferred date & time നൽകുമോ? ഞാൻ appointment register ചെയ്ത് confirmation number അയക്കാം."
   },
   "confirm": {
     "intent": "confirm",
-    "response": "Appointment confirmed: Dr. {{doctor_name}}, {{date}}, {{time}}. Confirmation no: {{conf_no}}. SMS/Email ആവശ്യമുണ്ടോ?"
+    "response": "Appointment confirmed: Dr. {{doctor_name}}, {{date}}, {{time}}. Confirmation no: {{conf_no}}. SMS/Email വേണമോ?"
   }
 }
