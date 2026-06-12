@@ -80,10 +80,17 @@ JWT_EXPIRE_MINUTES: int = int(os.environ.get("DASHBOARD_JWT_EXPIRE_MINUTES", "72
 
 
 def _issue_token(email: str, role: str) -> str:
-    """Issue a signed JWT with sub and role claims."""
+    """Issue a signed JWT with sub (email) and role claims.
+
+    sub MUST stay the user's email: tenant scoping (user_tenants lookups in
+    admin_api / live_ws) and the legacy-admin check (`sub == "admin"` means
+    the single-password super admin) both key off it. RBAC tokens are accepted
+    by the main admin API via their `role` claim — no sub spoofing needed.
+    The duplicate `email` claim is kept for clients that read it directly.
+    """
     now = datetime.now(tz=timezone.utc)
     payload = {
-        "sub": "admin",
+        "sub": email,
         "email": email,
         "role": role,
         "iat": now,
@@ -496,7 +503,6 @@ async def update_user(
 
 @router.delete(
     "/users/{user_id}",
-    
     summary="Delete a user (super_admin only)",
     dependencies=[_super_admin_dep],
 )
