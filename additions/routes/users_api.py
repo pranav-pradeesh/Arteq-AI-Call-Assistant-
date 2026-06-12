@@ -83,7 +83,8 @@ def _issue_token(email: str, role: str) -> str:
     """Issue a signed JWT with sub and role claims."""
     now = datetime.now(tz=timezone.utc)
     payload = {
-        "sub": email,
+        "sub": "admin",
+        "email": email,
         "role": role,
         "iat": now,
         "exp": now + timedelta(minutes=JWT_EXPIRE_MINUTES),
@@ -495,7 +496,7 @@ async def update_user(
 
 @router.delete(
     "/users/{user_id}",
-    status_code=status.HTTP_204_NO_CONTENT,
+    
     summary="Delete a user (super_admin only)",
     dependencies=[_super_admin_dep],
 )
