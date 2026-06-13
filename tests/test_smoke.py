@@ -14,12 +14,12 @@ def test_settings_import():
 
 def test_build_greeting_text():
     from src.ai.groq_brain import build_greeting_text
-    morning = build_greeting_text("Kairali Hospital", "Arya", 9)
-    assert "Arya" in morning
+    morning = build_greeting_text("Kairali Hospital", 9)
     assert "Kairali Hospital" in morning
+    assert "Arya" not in morning  # agent identifies by hospital, not a name
 
-    evening = build_greeting_text("Kairali Hospital", "Arya", 19)
-    assert "Arya" in evening
+    evening = build_greeting_text("Kairali Hospital", 19)
+    assert "Kairali Hospital" in evening
 
 
 def test_parse_slot_valid():
@@ -246,23 +246,29 @@ def test_normalize_for_tts_stem_absorption():
 def test_greeting_language_matrix():
     from src.ai.groq_brain import build_greeting_text, _GREETING_TEMPLATES
     hosp = "Test Hospital"
-    agent = "Arya"
     hour = 10
 
-    # All explicitly templated languages must produce non-empty greetings
-    for lang in _GREETING_TEMPLATES:
-        text = build_greeting_text(hosp, agent, hour, lang=lang)
+    # Every templated language names the hospital and never a personal agent name.
+    for lang in list(_GREETING_TEMPLATES) + ["od-IN", "mr-IN", "manglish"]:
+        text = build_greeting_text(hosp, hour, lang=lang)
         assert hosp in text, f"hosp name missing for lang={lang}"
-        assert agent in text, f"agent name missing for lang={lang}"
+        assert "Arya" not in text, f"agent name leaked for lang={lang}"
 
-    # New additions: od-IN, mr-IN, manglish
-    for lang in ("od-IN", "mr-IN", "manglish"):
-        text = build_greeting_text(hosp, agent, hour, lang=lang)
-        assert agent in text, f"agent name missing for lang={lang}"
-
-    # Malayalam fallback: uses time-of-day opener
-    ml = build_greeting_text(hosp, agent, 9, lang="ml-IN")
+    # Malayalam fallback: uses time-of-day opener, hospital only
+    ml = build_greeting_text(hosp, 9, lang="ml-IN")
     assert "Good morning" in ml or "Good" in ml
+    assert hosp in ml
+
+
+def test_voice_for_lang_maps_to_real_v3_speakers():
+    from src.tts_normalize import voice_for_lang, LANG_VOICE, BULBUL_V3_SPEAKERS
+    # Known languages get a dedicated native-fit voice; unknown falls back.
+    assert voice_for_lang("ml-IN", "priya") == "kavitha"
+    assert voice_for_lang("ta-IN", "priya") == "shruti"
+    assert voice_for_lang("zz-ZZ", "priya") == "priya"
+    # Every mapped voice must be a real Bulbul v3 speaker (else Sarvam 400s).
+    for code, voice in LANG_VOICE.items():
+        assert voice in BULBUL_V3_SPEAKERS, f"{voice} ({code}) not a v3 speaker"
 
 
 def test_mark_intent_dedupes():

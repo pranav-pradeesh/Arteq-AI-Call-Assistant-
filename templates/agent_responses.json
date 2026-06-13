@@ -1,7 +1,7 @@
 {
   "greeting": {
     "intent": "greeting",
-    "response": "Good morning! {{hospital_name}}-ലേക്ക് സ്വാഗതം. ഞാൻ {{agent_name}}. എങ്ങനെ സഹായിക്കാം?"
+    "response": "Good morning! {{hospital_name}}-ലേക്ക് സ്വാഗതം. എങ്ങനെ സഹായിക്കാം?"
   },
   "ask_department": {
     "intent": "ask_department",
