@@ -85,38 +85,8 @@ class Settings(BaseSettings):
     # Sarvam AI — STT (Saarika v2) + TTS (Bulbul v3)
     SARVAM_API_KEY: str = ""
 
-    # ── LLM providers — resilient multi-provider fallback chain ──────────────
-    # The agent tries each host in LLM_PROVIDER_ORDER that has an API key set, in
-    # order, falling back on error/rate-limit; Sarvam is always the last resort.
-    # All are OpenAI-compatible — add a key for any host and it joins the chain,
-    # so no single-vendor outage (e.g. Groq's dev plan) can take the agent down.
-    # Default models are llama-3.3-70b-class (the quality floor for Malayalam);
-    # override per host to trade cost for quality. See COST_MODEL.md for ₹/min.
-    # Provider preference order. Groq is primary (as before) and auto-leads the
-    # moment its key works; Gemini (free, no card) is the runnable fallback while
-    # Groq access is unavailable; Sarvam is always the last resort. A host is only
-    # used if its key is set. Card-required hosts (Fireworks/Cerebras/OpenAI) stay
-    # listed but dormant — add a key to enable. Together was removed by request.
-    LLM_PROVIDER_ORDER: str = "groq,gemini,fireworks,cerebras,openai"
-    LLM_TEMPERATURE: float = 0.5
-    LLM_MAX_TOKENS: int = 512
-
-    # Groq AI — LLaMA brain (primary)
+    # Groq AI — LLaMA brain
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
-
-    # Gemini — OpenAI-compatible; FREE tier needs only a Google account, no card.
-    # Get a key at https://aistudio.google.com — the card-free way to run today.
-    GEMINI_API_KEY: str = ""
-    GEMINI_MODEL: str = "gemini-2.5-flash"
-
-    # Additional OpenAI-compatible LLM hosts (all optional; key presence = enabled)
-    CEREBRAS_API_KEY: str = ""
-    CEREBRAS_MODEL: str = "llama-3.3-70b"
-    FIREWORKS_API_KEY: str = ""
-    FIREWORKS_MODEL: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"
-    OPENAI_API_KEY: str = ""
-    OPENAI_MODEL: str = "gpt-4o-mini"
 
     # Database
     DATABASE_URL: str = ""
