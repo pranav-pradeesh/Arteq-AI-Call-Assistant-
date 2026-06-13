@@ -21,7 +21,8 @@ Indian vendors (Sarvam, Plivo); ~21% (≈3% forex + 18% GST) on USD vendors
 | **Sarvam TTS (Bulbul v3)** | ₹15–30 / 10k chars | ~₹0.0015–0.003 / char |
 | **Groq LLM — llama-3.3-70b** | $0.59 / 1M in, $0.79 / 1M out | Premium quality. Free dev tier was pulled — assume paid. |
 | **Groq LLM — llama-3.1-8b** | $0.05 / 1M in, $0.08 / 1M out | ~12× cheaper, but too weak at Malayalam — fallback only |
-| **Together / Fireworks — llama-3.3-70b** | ~$0.88–0.90 / 1M flat | Drop-in 70b when Groq is unavailable |
+| **Fireworks — llama-3.3-70b** | ~$0.90 / 1M flat | Drop-in 70b (card required) |
+| **Google Gemini Flash** | Free tier (no card) | Card-free runnable option; A/B test Malayalam |
 | **OpenAI — gpt-4o-mini** | $0.15 / 1M in, $0.60 / 1M out | Budget; Malayalam quality must be A/B tested |
 | **OpenAI — gpt-5 / 4.1 (full)** | $1.25+ / 1M in | Keeps quality; ~₹1.5/min, breaks ₹2 on phone |
 | **LiveKit Cloud — agent session** | **$0.01/min ≈ ₹1.03/min** (tax-in) | **One per call — the dominant cost.** Free: 1,000 min/mo (Build), 5,000 (Ship $50/mo), 50,000 (Scale $500/mo) |

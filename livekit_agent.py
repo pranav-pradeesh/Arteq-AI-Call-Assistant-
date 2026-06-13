@@ -332,8 +332,16 @@ _LLM_HOSTS = {
     "cerebras":  "https://api.cerebras.ai/v1",
     "together":  "https://api.together.xyz/v1",
     "fireworks": "https://api.fireworks.ai/inference/v1",
+    # Gemini exposes an OpenAI-compatible endpoint. Free tier needs only a Google
+    # account (no card) — the card-free way to run when paid hosts are unavailable.
+    "gemini":    "https://generativelanguage.googleapis.com/v1beta/openai/",
     "openai":    "https://api.openai.com/v1",
 }
+
+# Hosts whose OpenAI-compat layer may reject frequency/presence_penalty. Build
+# them as plain legs so an unsupported param can't 400 every turn (Gemini's compat
+# endpoint is stricter than the Bearer llama hosts).
+_PLAIN_LLM_HOSTS = {"gemini"}
 
 
 def _build_llm(premium: bool = True):
@@ -358,6 +366,7 @@ def _build_llm(premium: bool = True):
         "cerebras":  settings.CEREBRAS_MODEL,
         "together":  settings.TOGETHER_MODEL,
         "fireworks": settings.FIREWORKS_MODEL,
+        "gemini":    settings.GEMINI_MODEL,
         "openai":    settings.OPENAI_MODEL,
     }
     _keys = {
@@ -365,6 +374,7 @@ def _build_llm(premium: bool = True):
         "cerebras":  settings.CEREBRAS_API_KEY,
         "together":  settings.TOGETHER_API_KEY,
         "fireworks": settings.FIREWORKS_API_KEY,
+        "gemini":    settings.GEMINI_API_KEY,
         "openai":    settings.OPENAI_API_KEY,
     }
 
@@ -375,7 +385,10 @@ def _build_llm(premium: bool = True):
         if pid in seen or pid not in _LLM_HOSTS or not _keys.get(pid):
             continue
         seen.add(pid)
-        chain.append(_PenalizedLLM(
+        # Plain leg for hosts that may reject the penalty params; penalized leg
+        # (anti-repetition) for the standard Bearer llama hosts.
+        _LLMClass = openai.LLM if pid in _PLAIN_LLM_HOSTS else _PenalizedLLM
+        chain.append(_LLMClass(
             base_url=_LLM_HOSTS[pid],
             api_key=_keys[pid],
             model=_models[pid],

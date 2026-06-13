@@ -92,24 +92,27 @@ class Settings(BaseSettings):
     # so no single-vendor outage (e.g. Groq's dev plan) can take the agent down.
     # Default models are llama-3.3-70b-class (the quality floor for Malayalam);
     # override per host to trade cost for quality. See COST_MODEL.md for ₹/min.
-    # Preference order, cheapest-quality-first: Groq 70b (₹0.47, cheapest+fastest
-    # when its plan is up) → Together/Fireworks 70b (₹0.70, the drop-in 70b hosts
-    # available now) → Cerebras 70b (fast, custom pricing) → OpenAI gpt-4o-mini
-    # (₹0.15 cheap safety net, lower Malayalam quality) → Sarvam (always last).
-    # A host is only used if its key is set, so leave Groq blank while it's down.
-    LLM_PROVIDER_ORDER: str = "groq,together,fireworks,cerebras,openai"
+    # Provider preference order. Groq is primary (as before) and auto-leads the
+    # moment its key works; Gemini (free, no card) is the runnable fallback while
+    # Groq access is unavailable; Sarvam is always the last resort. A host is only
+    # used if its key is set. Card-required hosts (Fireworks/Cerebras/OpenAI) stay
+    # listed but dormant — add a key to enable. Together was removed by request.
+    LLM_PROVIDER_ORDER: str = "groq,gemini,fireworks,cerebras,openai"
     LLM_TEMPERATURE: float = 0.5
     LLM_MAX_TOKENS: int = 512
 
-    # Groq AI — LLaMA brain
+    # Groq AI — LLaMA brain (primary)
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
+
+    # Gemini — OpenAI-compatible; FREE tier needs only a Google account, no card.
+    # Get a key at https://aistudio.google.com — the card-free way to run today.
+    GEMINI_API_KEY: str = ""
+    GEMINI_MODEL: str = "gemini-2.5-flash"
 
     # Additional OpenAI-compatible LLM hosts (all optional; key presence = enabled)
     CEREBRAS_API_KEY: str = ""
     CEREBRAS_MODEL: str = "llama-3.3-70b"
-    TOGETHER_API_KEY: str = ""
-    TOGETHER_MODEL: str = "meta-llama/Llama-3.3-70B-Instruct-Turbo"
     FIREWORKS_API_KEY: str = ""
     FIREWORKS_MODEL: str = "accounts/fireworks/models/llama-v3p3-70b-instruct"
     OPENAI_API_KEY: str = ""
