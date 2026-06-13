@@ -147,36 +147,101 @@ def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
 
 class _BulbulV3ChunkedStream(_SarvamChunkedStream):
     async def _run(self, output_emitter) -> None:
-        # Audio cache: identical text+voice → identical audio. The greeting is
-        # synthesized on every call, so caching it (O(1) lookup) removes a full
-        # Bulbul round-trip from the first thing the caller hears. LRU + 24h TTL
-        # keep the hottest phrases (greeting, confirmations) warm; dynamic
-        # replies churn out harmlessly at the cold end.
+        import hashlib
         from src.cache.store import tts_cache, TTS_CACHE_TTL
-        # Detect reply language per-utterance so one agent speaks every caller's
-        # language (the LLM replies in their language; we match the voice to it).
+
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)
-        # Pick the most native-sounding v3 voice for the detected language so each
-        # language is spoken by its best-fit speaker (falls back to the configured
-        # default). Speaker is part of the cache key so voices don't cross-pollute.
         speaker = _voice_for_lang(lang, self._opts.speaker)
-        cache_key = _tts_cache_key(self._opts, text, lang, speaker)
-        cached = tts_cache.get(cache_key)
-        if cached is not None:
+
+        # Two separate cache namespaces: WebSocket streaming produces MP3 chunks;
+        # REST produces WAV. Mixing them would require tracking format per-entry,
+        # so they use distinct key prefixes. WS cache value: {"mime":…, "chunks":[…]}.
+        # REST cache value: [wav_bytes, …] (legacy list format).
+        ws_key = "tts:ws:" + hashlib.md5(
+            f"bulbul:v3|{lang}|{speaker}|{text}".encode("utf-8")
+        ).hexdigest()
+        rest_key = _tts_cache_key(self._opts, text, lang, speaker)
+
+        ws_cached = tts_cache.get(ws_key)
+        if ws_cached is not None:
+            output_emitter.initialize(
+                request_id="cache",
+                sample_rate=self._tts.sample_rate,
+                num_channels=self._tts.num_channels,
+                mime_type=ws_cached["mime"],
+            )
+            for chunk in ws_cached["chunks"]:
+                output_emitter.push(chunk)
+            return
+
+        rest_cached = tts_cache.get(rest_key)
+        if rest_cached is not None:
             output_emitter.initialize(
                 request_id="cache",
                 sample_rate=self._tts.sample_rate,
                 num_channels=self._tts.num_channels,
                 mime_type="audio/wav",
             )
-            for chunk in cached:
+            for chunk in rest_cached:
                 output_emitter.push(chunk)
             return
 
-        # v3-only payload: pitch, loudness and enable_preprocessing are all
-        # rejected by bulbul:v3, so none are sent. pace + speech_sample_rate are
-        # the only voice knobs v3 accepts here.
+        try:
+            await self._run_ws(output_emitter, text, lang, speaker, ws_key)
+        except Exception as exc:
+            _sarvam_log.warning("TTS WebSocket failed (%s), falling back to REST", exc)
+            await self._run_rest(output_emitter, text, lang, speaker, rest_key)
+
+    async def _run_ws(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """WebSocket streaming TTS — first audio chunk plays while Bulbul generates the rest."""
+        from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        if self._tts._ws_client is None:
+            self._tts._ws_client = AsyncSarvamAI(api_subscription_key=self._opts.api_key)
+
+        chunks: list[bytes] = []
+        initialized = False
+        mime = "audio/mpeg"
+
+        async with self._tts._ws_client.text_to_speech_streaming.connect(
+            model="bulbul:v3",
+            send_completion_event=True,
+        ) as ws:
+            await ws.configure(target_language_code=lang, speaker=speaker)
+            await ws.convert(text)
+            await ws.flush()
+
+            async for message in ws:
+                if isinstance(message, AudioOutput):
+                    chunk = _b64.b64decode(message.data.audio)
+                    if not initialized:
+                        output_emitter.initialize(
+                            request_id="ws-stream",
+                            sample_rate=self._tts.sample_rate,
+                            num_channels=self._tts.num_channels,
+                            mime_type=mime,
+                        )
+                        initialized = True
+                    output_emitter.push(chunk)
+                    chunks.append(chunk)
+                elif isinstance(message, EventResponse):
+                    if getattr(message.data, "event_type", "") == "final":
+                        break
+
+        if not initialized:
+            raise RuntimeError("WebSocket TTS: no audio chunks received")
+        tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
+
+    async def _run_rest(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """REST TTS fallback — waits for full synthesis before any audio plays."""
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
         payload = {
             "target_language_code": lang,
             "text": text,
@@ -201,7 +266,7 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             ) as res:
                 if res.status != 200:
                     error_text = await res.text()
-                    _sarvam_log.error(f"Sarvam TTS API error: {res.status} - {error_text}")
+                    _sarvam_log.error("Sarvam TTS REST error: %s - %s", res.status, error_text)
                     raise _APIStatusErr(
                         message=f"Sarvam TTS API Error: {error_text}", status_code=res.status
                     )
@@ -267,6 +332,7 @@ class BulbulV3TTS(_SarvamTTS):
             speech_sample_rate=speech_sample_rate,
             **kwargs,
         )
+        self._ws_client = None  # AsyncSarvamAI, lazily created on first WS TTS request
 
     def synthesize(self, text: str, *, conn_options=None):
         from livekit.agents import DEFAULT_API_CONNECT_OPTIONS

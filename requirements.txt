@@ -50,6 +50,7 @@ livekit-api==1.1.0
 livekit-agents==1.5.16
 livekit-plugins-openai==1.1.7
 livekit-plugins-sarvam==1.1.7
+sarvamai==0.1.28
 livekit-plugins-silero==1.1.7
 livekit-plugins-noise-cancellation==0.2.5
 
