@@ -23,59 +23,39 @@ _SCRIPT_RANGES = [
 
 
 def split_mixed_script(text: str, fallback: str) -> list:
-    """Split text into [(segment, lang_code)] pairs at script boundaries.
+    """Split text at the first native-script character boundary only.
 
-    Neutral chars (ASCII, punctuation, spaces) before the first native-script
-    char are tagged 'en-IN'; those after a native block stay with that block.
-    Single-script or pure-Latin text returns a single-item list.
+    Returns [(latin_prefix, 'en-IN'), (rest, fallback)] when a Latin prefix
+    precedes native-script content, e.g. "Good morning! Welcome to <ML name>,
+    <ML question>". Returns a single-item list otherwise.
 
-    Use this to synthesize each segment with the correct TTS language so that
-    English words in an otherwise-Indic utterance are pronounced in English.
+    `fallback` must be the language already chosen by detect_tts_lang() for
+    the full text — this keeps the native portion in sync with the lang that
+    name_for_lang() used at prompt-build time and avoids double-detection.
     """
     if not text:
         return []
 
-    # Per-char: detected native lang or None (Latin/punctuation)
-    char_langs: list = []
-    for ch in text:
+    first_native_idx = None
+    for i, ch in enumerate(text):
         cp = ord(ch)
-        detected = None
         for code, lo, hi in _SCRIPT_RANGES:
             if lo <= cp <= hi:
-                detected = code
+                first_native_idx = i
                 break
-        char_langs.append(detected)
+        if first_native_idx is not None:
+            break
 
-    # If no native chars found → pure Latin → single en-IN segment
-    if not any(l is not None for l in char_langs):
+    if first_native_idx is None:
+        # Pure Latin — no split needed
         return [(text, "en-IN")]
 
-    # Resolve each position: leading neutral → en-IN; neutral after native → that native lang
-    resolved: list = []
-    last_native = None
-    for lc in char_langs:
-        if lc is not None:
-            last_native = lc
-        resolved.append(last_native if last_native else "en-IN")
+    english_prefix = text[:first_native_idx].rstrip()
+    if not english_prefix:
+        # Starts with native script — no Latin prefix to separate
+        return [(text, fallback)]
 
-    # Group into maximal same-lang runs
-    segments: list = []
-    seg_chars: list = [text[0]]
-    seg_lang: str = resolved[0]
-    for i in range(1, len(text)):
-        if resolved[i] == seg_lang:
-            seg_chars.append(text[i])
-        else:
-            seg_text = "".join(seg_chars).strip()
-            if seg_text:
-                segments.append((seg_text, seg_lang))
-            seg_chars = [text[i]]
-            seg_lang = resolved[i]
-    seg_text = "".join(seg_chars).strip()
-    if seg_text:
-        segments.append((seg_text, seg_lang))
-
-    return segments or [(text, fallback)]
+    return [(english_prefix, "en-IN"), (text[first_native_idx:], fallback)]
 
 
 def detect_tts_lang(text: str, fallback: str) -> str:
