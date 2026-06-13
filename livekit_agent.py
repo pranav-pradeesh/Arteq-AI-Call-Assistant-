@@ -297,6 +297,25 @@ _WATCHDOG_FAREWELLS = {
     "en-IN":      "Sorry, we've reached the maximum call time. Please call back if you need anything else. Thank you, goodbye!",
 }
 
+# ── Ambient background audio ──────────────────────────────────────────────────
+# Published as a second LocalAudioTrack from the agent participant. LiveKit's
+# SIP gateway mixes all tracks from a participant before forwarding to PSTN,
+# so the caller hears a constant low-level ambient noise that makes the AI feel
+# like a real hospital reception rather than a silent VoIP line.
+_AMBIENT_SAMPLE_RATE = 16000
+_AMBIENT_FRAME_SAMPLES = 320  # 20 ms at 16 kHz — standard WebRTC frame size
+
+# Pre-generate 5 s of softened white noise (fixed seed → deterministic across
+# worker restarts). A 7-sample boxcar smooths out the harshest high-frequency
+# content so it sounds closer to HVAC ventilation than raw hiss.
+# Amplitude 0.06 (6 % of int16 max) keeps it well below conversational speech.
+_rng = np.random.default_rng(seed=0)
+_raw = _rng.standard_normal(5 * _AMBIENT_SAMPLE_RATE + 7).astype(np.float64)
+_raw = np.convolve(_raw, np.ones(7) / 7, mode="valid")
+_raw /= np.abs(_raw).max()
+_AMBIENT_BUF = (_raw * 0.06 * 32767).astype(np.int16)
+del _raw, _rng
+
 _DTMF = {
     "1": "OPD timing please",
     "2": "emergency help needed",
@@ -355,7 +374,7 @@ def _build_llm(premium: bool = True):
             # sound human without letting llama-3.3 drift into emitting its
             # <function=...> tool syntax as spoken text.
             model=model,
-            max_completion_tokens=512,
+            max_completion_tokens=200,
             temperature=0.5,
         )
 
@@ -922,6 +941,66 @@ class _LatencyMeter:
 # Agent entrypoint
 # ==============================================================================
 
+async def _run_ambient_audio(room: rtc.Room) -> None:
+    """Publish low-level background noise as a second audio track for the call.
+
+    The LiveKit SIP gateway mixes all tracks from a participant before sending
+    to PSTN, so this ambient sound is heard by the caller throughout. Task
+    cancellation is the shutdown signal — finally block unpublishes cleanly.
+    """
+    source = rtc.AudioSource(_AMBIENT_SAMPLE_RATE, 1)
+    track = rtc.LocalAudioTrack.create_audio_track("arteq-ambient", source)
+    await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
+
+    buf, n, pos = _AMBIENT_BUF, len(_AMBIENT_BUF), 0
+    frame_s = _AMBIENT_FRAME_SAMPLES / _AMBIENT_SAMPLE_RATE
+    try:
+        while True:
+            end = pos + _AMBIENT_FRAME_SAMPLES
+            chunk = buf[pos:end] if end <= n else np.concatenate([buf[pos:], buf[: end - n]])
+            pos = end % n
+            await source.capture_frame(rtc.AudioFrame(
+                data=chunk.tobytes(),
+                sample_rate=_AMBIENT_SAMPLE_RATE,
+                num_channels=1,
+                samples_per_channel=_AMBIENT_FRAME_SAMPLES,
+            ))
+            await asyncio.sleep(frame_s)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        try:
+            await room.local_participant.unpublish_track(track.sid)
+        except Exception:
+            pass
+
+
+async def _prewarm_static_phrases(lang: str) -> None:
+    """Cache TTS audio for deterministic per-language strings that will be spoken.
+
+    LLM replies are too variable to cache. Only hardcoded strings (watchdog
+    farewell, fallback error message) reliably match their cache key at runtime.
+    """
+    from src.ai.groq_brain import _FALLBACK_MESSAGES
+    phrases = [
+        _WATCHDOG_FAREWELLS.get(lang, _WATCHDOG_FAREWELLS["en-IN"]),
+        _FALLBACK_MESSAGES.get(lang, _FALLBACK_MESSAGES["en-IN"]),
+    ]
+    tts = BulbulV3TTS(
+        api_key=os.getenv("SARVAM_API_KEY", ""),
+        target_language_code=lang,
+        speaker="priya",
+    )
+    for phrase in phrases:
+        try:
+            stream = tts.synthesize(phrase)
+            async for _ in stream:
+                pass
+            await stream.aclose()
+        except Exception:
+            pass
+
+
 async def _prewarm_greeting_audio(text: str, lang: str) -> None:
     """Synthesize the greeting once up front so its audio is in the TTS cache
     before the call's on_enter fires — removes the first-call Bulbul round-trip
@@ -1002,6 +1081,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
+    asyncio.create_task(_prewarm_static_phrases(agent_language))
 
     # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
@@ -1084,7 +1164,11 @@ async def entrypoint(ctx: JobContext) -> None:
     session.on("metrics_collected", meter.on_metrics)
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
+    _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
+
     async def _on_end_async(_event=None):
+        if _ambient_task:
+            _ambient_task.cancel()
         try:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0
@@ -1195,6 +1279,11 @@ async def entrypoint(ctx: JobContext) -> None:
             noise_cancellation=noise_cancellation.BVCTelephony(),
         ),
     )
+
+    # Start ambient background noise loop — must be after session.start so the
+    # local_participant is fully connected. _on_end_async reads this variable
+    # by name from the enclosing scope (Python late-binding) and cancels it.
+    _ambient_task = asyncio.create_task(_run_ambient_audio(ctx.room))
 
     # ── Live monitoring: announce the call to dashboard subscribers ───────────
     # (additions/routes/live_ws.py forwards these over the /admin/ws/live
