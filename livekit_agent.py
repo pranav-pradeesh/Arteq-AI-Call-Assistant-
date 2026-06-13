@@ -85,6 +85,11 @@ def _detect_tts_lang(text: str, fallback: str) -> str:
     return detect_tts_lang(text, fallback)
 
 
+def _voice_for_lang(lang: str, default: str) -> str:
+    from src.tts_normalize import voice_for_lang
+    return voice_for_lang(lang, default)
+
+
 # Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
 # text correctly *when the English word is in Latin script*, so the only job here
 # is to undo the cases where a weaker LLM transliterated a common English term
@@ -134,9 +139,9 @@ def _normalize_for_tts(text: str) -> str:
     return normalize_for_tts(text)
 
 
-def _tts_cache_key(opts, text: str, lang: str) -> str:
+def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
     import hashlib
-    raw = f"{opts.model}|{lang}|{opts.speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
+    raw = f"{opts.model}|{lang}|{speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
     return "tts:" + hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -152,7 +157,11 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         # language (the LLM replies in their language; we match the voice to it).
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)
-        cache_key = _tts_cache_key(self._opts, text, lang)
+        # Pick the most native-sounding v3 voice for the detected language so each
+        # language is spoken by its best-fit speaker (falls back to the configured
+        # default). Speaker is part of the cache key so voices don't cross-pollute.
+        speaker = _voice_for_lang(lang, self._opts.speaker)
+        cache_key = _tts_cache_key(self._opts, text, lang, speaker)
         cached = tts_cache.get(cache_key)
         if cached is not None:
             output_emitter.initialize(
@@ -171,7 +180,7 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         payload = {
             "target_language_code": lang,
             "text": text,
-            "speaker": self._opts.speaker,
+            "speaker": speaker,
             "pace": self._opts.pace,
             "speech_sample_rate": self._opts.speech_sample_rate,
             "model": self._opts.model,
@@ -487,7 +496,7 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> Optional
 # System prompt builder
 # ==============================================================================
 
-def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict]) -> str:
+def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
     import pytz
     _IST = pytz.timezone("Asia/Kolkata")
     now = datetime.now(_IST)
@@ -551,7 +560,7 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
                 "Ask how they are feeling and if they need anything.\n"
             )
 
-    return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
+    return f"""You are the voice receptionist for {hosp_name}. You have NO personal name — never introduce yourself with one and never invent one. Identify only as {hosp_name}. If a caller asks who you are or your name, say you are the reception assistant at {hosp_name}.
 
 LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
@@ -593,7 +602,7 @@ HOSPITAL:
 TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
-def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
+def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
                     returning_name: str = "", agent_language: str = "ml-IN") -> str:
     # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
@@ -608,21 +617,21 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
         ttime = outbound_context.get("appointment_time", "")
         if call_type == "confirmation":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
                 "Can you attend?"
             )
         elif call_type == "reminder":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"This is a reminder of your appointment with Dr. {dname} on {date}. "
                 "Do you have any questions?"
             )
         elif call_type == "callback":
-            return f"Hello {pname}, this is {agent_name} from {hosp_name}. How can I help you today?"
+            return f"Hello {pname}, this is {hosp_name} calling. How can I help you today?"
         elif call_type == "followup":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"How are you feeling after your visit with Dr. {dname}?"
             )
 
@@ -631,7 +640,7 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
     _IST = _pytz.timezone("Asia/Kolkata")
     hour = datetime.now(_IST).hour
     from src.ai.groq_brain import build_greeting_text
-    return build_greeting_text(hosp_name, agent_name, hour, lang=agent_language)
+    return build_greeting_text(hosp_name, hour, lang=agent_language)
 
 
 # ==============================================================================
@@ -966,10 +975,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ── Build system prompt ───────────────────────────────────────────────────
     from src.config.settings import settings
-    # Per-hospital agent persona overrides the global env var default
-    agent_name     = (getattr(hospital_ctx, "agent_name", None) or settings.AGENT_NAME)
+    # Per-hospital language overrides the global env var default. The agent has no
+    # spoken name — it identifies only by the hospital — so no agent_name is used.
     agent_language = (getattr(hospital_ctx, "agent_language", None) or settings.AGENT_LANGUAGE)
-    system_prompt = _build_prompt(hospital_ctx, agent_name, outbound_context)
+    system_prompt = _build_prompt(hospital_ctx, outbound_context)
     if patient_profile:
         last = patient_profile["history"][0] if patient_profile["history"] else {}
         system_prompt += (
@@ -979,7 +988,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name, agent_language)
+    greeting = _build_greeting(hospital_ctx, outbound_context, returning_name, agent_language)
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
@@ -1137,7 +1146,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await SMSService().send_call_summary(
                     phone=caller_phone,
                     hospital_name=hospital_name,
-                    summary=f"Thank you for calling {hospital_name}. {agent_name} was happy to help.",
+                    summary=f"Thank you for calling {hospital_name}. We were happy to help.",
                 )
 
             from src.services.staff_alert import StaffAlertService

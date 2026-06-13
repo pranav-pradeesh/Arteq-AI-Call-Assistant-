@@ -42,6 +42,42 @@ def detect_tts_lang(text: str, fallback: str) -> str:
     return fallback
 
 
+# Bulbul v3 speaker roster (Sarvam). All speakers are multilingual, so any voice
+# can speak any of the 11 supported languages via the language code.
+BULBUL_V3_SPEAKERS = {
+    "shubh", "aditya", "ritu", "priya", "neha", "rahul", "pooja", "rohan",
+    "simran", "kavya", "amit", "dev", "ishita", "shreya", "ratan", "varun",
+    "manan", "sumit", "roopa", "kabir", "aayan", "ashutosh", "advait", "anand",
+    "tanya", "tarun", "sunny", "mani", "gokul", "vijay", "shruti", "suhani",
+    "mohit", "kavitha", "rehan", "soham", "rupali",
+}
+
+# Per-language voice selection. Bulbul v3 voices are multilingual, but matching a
+# voice whose timbre/accent best fits each language makes every reply feel native
+# instead of one voice straining across scripts. Sarvam publishes NO official
+# per-language quality matrix, so these are warm female receptionist voices chosen
+# by linguistic fit — this dict is the single place to audition and tune them.
+# Unmapped languages fall back to the constructor's default speaker.
+LANG_VOICE = {
+    "ml-IN": "kavitha",   # Malayalam
+    "ta-IN": "shruti",    # Tamil
+    "te-IN": "roopa",     # Telugu
+    "kn-IN": "kavya",     # Kannada
+    "hi-IN": "priya",     # Hindi
+    "mr-IN": "rupali",    # Marathi
+    "bn-IN": "ishita",    # Bengali
+    "gu-IN": "pooja",     # Gujarati
+    "pa-IN": "simran",    # Punjabi
+    "od-IN": "suhani",    # Odia
+    "en-IN": "tanya",     # English
+}
+
+
+def voice_for_lang(lang: str, default: str) -> str:
+    """Return the best-fit Bulbul v3 speaker for a language code, else `default`."""
+    return LANG_VOICE.get(lang, default)
+
+
 _TTS_EN_MAP = {
     "ഡോക്ടര്‍": "Doctor", "ഡോക്ടർ": "Doctor", "ഡോക്ടര്": "Doctor", "ഡോ.": "Doctor",
     "അപ്പോയിന്റ്മെന്റ്": "appointment", "അപ്പോയിന്റ്മെൻറ്": "appointment",
