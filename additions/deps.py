@@ -25,9 +25,20 @@ from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 # ---------------------------------------------------------------------------
-# JWT settings — must match the values in settings.py / the existing auth.py
+# JWT settings — sourced from the app settings so tokens are verified with the
+# SAME secret the dashboard signs with (settings reads .env; a bare
+# os.environ.get would silently fall back to a guessable default when the
+# secret lives only in the .env file).
 # ---------------------------------------------------------------------------
-JWT_SECRET: str = os.environ.get("DASHBOARD_JWT_SECRET", "changeme")
+def _jwt_secret() -> str:
+    try:
+        from src.config.settings import settings
+        return settings.DASHBOARD_JWT_SECRET
+    except Exception:
+        return os.environ.get("DASHBOARD_JWT_SECRET", "")
+
+
+JWT_SECRET: str = _jwt_secret()
 JWT_ALGORITHM: str = "HS256"
 
 _bearer_scheme = HTTPBearer(auto_error=False)

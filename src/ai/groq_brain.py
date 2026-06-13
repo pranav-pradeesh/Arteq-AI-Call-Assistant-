@@ -50,22 +50,28 @@ _LANG_NAMES = {
 }
 
 
+# Greetings identify the hospital only — the agent has no spoken name. Each is
+# written in natural, spoken (not literary) register for that language.
 _GREETING_TEMPLATES = {
-    "hi-IN": "नमस्ते! {hosp_name} में आपका स्वागत है। मैं {agent_name} हूँ। बताइए, क्या चाहिए?",
-    "ta-IN": "வணக்கம்! {hosp_name}-க்கு வரவேற்கிறோம். நான் {agent_name}. என்ன உதவி வேண்டும்?",
-    "te-IN": "నమస్కారం! {hosp_name}కి స్వాగతం. నేను {agent_name}ని. మీకు ఏమి కావాలి?",
-    "kn-IN": "ನಮಸ್ಕಾರ! {hosp_name}ಗೆ ಸ್ವಾಗತ. ನಾನು {agent_name}. ನಿಮಗೆ ಏನು ಬೇಕು?",
-    "bn-IN": "নমস্কার! {hosp_name}-এ আপনাকে স্বাগতম। আমি {agent_name}। কীভাবে সাহায্য করতে পারি?",
-    "gu-IN": "નમસ્તે! {hosp_name}માં સ્વાગત છે. હું {agent_name} છું. શું સેવા કરી શકું?",
-    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! {hosp_name} ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ। ਮੈਂ {agent_name} ਹਾਂ। ਕੀ ਸੇਵਾ ਕਰਾਂ?",
-    "en-IN": "Hello! Welcome to {hosp_name}. I'm {agent_name}. How can I help you?",
+    "hi-IN": "नमस्ते! {hosp_name} में आपका स्वागत है। बताइए, मैं क्या मदद करूँ?",
+    "ta-IN": "வணக்கம்! {hosp_name}-க்கு வரவேற்கிறோம். நான் என்ன உதவி செய்யட்டும்?",
+    "te-IN": "నమస్కారం! {hosp_name}కి స్వాగతం. నేను మీకు ఎలా సహాయం చేయగలను?",
+    "kn-IN": "ನಮಸ್ಕಾರ! {hosp_name}ಗೆ ಸ್ವಾಗತ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?",
+    "bn-IN": "নমস্কার! {hosp_name}-এ আপনাকে স্বাগতম। আমি কীভাবে সাহায্য করতে পারি?",
+    "gu-IN": "નમસ્તે! {hosp_name}માં આપનું સ્વાગત છે. હું શું મદદ કરી શકું?",
+    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! {hosp_name} ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ। ਮੈਂ ਕੀ ਮਦਦ ਕਰਾਂ?",
+    "en-IN":      "Hello! Welcome to {hosp_name}. How can I help you?",
+    "od-IN":      "ନମସ୍କାର! {hosp_name}-ରେ ଆପଣଙ୍କୁ ସ୍ୱାଗତ। ମୁଁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
+    "mr-IN":      "नमस्कार! {hosp_name}मध्ये आपले स्वागत आहे. मी आपली काय मदत करू?",
+    "manglish":   "Hello! {hosp_name}-lekku swagatham. Njan engane sahaayikkam?",
 }
 
 
-def build_greeting_text(hosp_name: str, agent_name: str, hour: int, lang: str = "ml-IN") -> str:
-    """Language-appropriate greeting. Pure function so it can be pre-warmed."""
+def build_greeting_text(hosp_name: str, hour: int, lang: str = "ml-IN") -> str:
+    """Language-appropriate greeting that identifies the hospital only (no agent
+    name). Pure function so it can be pre-warmed."""
     if lang in _GREETING_TEMPLATES:
-        return _GREETING_TEMPLATES[lang].format(hosp_name=hosp_name, agent_name=agent_name)
+        return _GREETING_TEMPLATES[lang].format(hosp_name=hosp_name)
     # Malayalam: time-of-day greeting (audio is identical per hour-bucket so it
     # warms the TTS cache; every subsequent call in that hour is an instant hit).
     if 5 <= hour < 12:
@@ -75,11 +81,9 @@ def build_greeting_text(hosp_name: str, agent_name: str, hour: int, lang: str = 
     elif 17 <= hour < 21:
         opener = "Good evening!"
     else:
-        opener = "Good night!"
-    return (
-        f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. "
-        f"ഞാൻ {agent_name}. എന്താ വേണ്ടത്?"
-    )
+        # 21:00–05:00 — "Good night!" is a farewell, not a call opener.
+        opener = "Hello!"
+    return f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. എങ്ങനെ സഹായിക്കാം?"
 
 _MODEL_SMART = "llama-3.3-70b-versatile"
 _MODEL_FAST = "llama-3.1-8b-instant"
@@ -123,8 +127,17 @@ _EMERGENCY_KEYWORDS = (
     "emergency", "ambulance", "chest pain", "unconscious", "breathing",
     "bleeding", "accident", "stroke", "seizure", "fits", "heart attack",
     "critical", "dying", "collapsed",
-    "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം", "അടിയന്തിരം", "ആംബുലൻസ്",
+    # Malayalam — standard + STT variants + additional terms
+    "നെഞ്ചുവേദന", "ശ്വാസ", "ബോധക്ഷയം", "അടിയന്തരം", "അടിയന്തിരം", "ആംബുലൻസ്",
+    "ഹൃദയാഘാതം", "അപകടം", "രക്തസ്രാവം", "ചോര",
+    # Hindi
     "हार्ट", "दुर्घटना",
+    # Tamil
+    "மாரடைப்பு", "விபத்து", "இரத்தம்",
+    # Telugu
+    "గుండెపోటు", "ప్రమాదం", "రక్తస్రావం",
+    # Kannada
+    "ಹೃದಯಾಘಾತ", "ಅಪಘಾತ", "ರಕ್ತಸ್ರಾವ",
 )
 
 _FALLBACK_MESSAGES = {
@@ -274,7 +287,7 @@ def _build_system_prompt(
         if block:
             patient_block = f"\n{block}\n"
 
-    return f"""You are {agent_name}, the warm AI voice receptionist for {ctx.name}. Patients should feel they're talking to a caring human.
+    return f"""You are the warm AI voice receptionist for {ctx.name}. You have no personal name — identify only as {ctx.name}, never with a personal name. Patients should feel they're talking to a caring human.
 
 TODAY: {today_name}, {current_time} IST
 {patient_block}
@@ -339,7 +352,7 @@ LANGUAGE (CRITICAL): Always reply in the SAME language and script as the caller'
 VOICE (your text becomes speech): max 2 SHORT sentences. Sound human and vary your openings. English openers: "Sure,", "Of course,", "Let me check…". Malayalam openers: "ശരി,", "തീർച്ചയായും,", "ഒന്ന് നോക്കട്ടെ,", "അതെ,". NEVER use hesitation/filler sounds — no "ഉം", "ങ്ഹാ", "umm", "hmm", "ആ", "ee". For emergencies, speak urgently but calmly.
 
 MALAYALAM STYLE (sound like a real Kerala hospital receptionist on the phone, NOT a news reader):
-- Use everyday SPOKEN Malayalam (സംസാരഭാഷ), warm and simple — never stiff, literary, or Sanskritised. Say "എന്താ വേണ്ടേ?" not "എന്ത് ആവശ്യമാണ്?".
+- Use everyday SPOKEN Malayalam (സംസാരഭാഷ), warm and simple — never stiff, literary, or Sanskritised. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?".
 - Keep common medical/English terms in English the way Keralites actually speak — doctor, appointment, OPD, token, casualty, lab, scan, report, booking, consultation, emergency, timing. Do NOT translate these into rare words (say "OPD timing", never "ബാഹ്യരോഗവിഭാഗ സമയം").
 - Be polite and warm: "ദയവായി", "പറയൂ", "സഹായിക്കാം", optional "സാർ"/"മാഡം". Avoid the stiff "താങ്കൾ"; a pronoun is often unnecessary.
 - Use natural connectors sparingly: "ശരി", "അതെ", "പിന്നെ". Never use filler/hesitation sounds like "ഉം".

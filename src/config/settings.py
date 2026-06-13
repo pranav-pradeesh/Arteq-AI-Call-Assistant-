@@ -29,6 +29,16 @@ class Settings(BaseSettings):
     PLIVO_AUTH_TOKEN: str = ""
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
+    # Exotel — Indian cloud telephony (alternative to Plivo)
+    EXOTEL_API_KEY: str = ""          # Account SID (shown in Exotel dashboard)
+    EXOTEL_API_TOKEN: str = ""        # API token
+    EXOTEL_PHONE_NUMBER: str = ""     # Virtual Number / ExoPhone, E.164 +91XXXXXXXXXX
+    EXOTEL_SUBDOMAIN: str = "api.exotel.com"  # or api.in.exotel.com for India region
+    # Embed in webhook URL so only Exotel (who was given the URL) can trigger it.
+    # Leave blank to skip token check (not recommended in production).
+    EXOTEL_WEBHOOK_TOKEN: str = ""
+    LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID: str = ""  # set after POST /admin/sip/exotel/setup
+
     # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
     # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
     WHATSAPP_ENABLED: bool = True
@@ -128,6 +138,10 @@ class Settings(BaseSettings):
     FOLLOWUP_LOOP_INTERVAL_SECONDS: int = 3600
     FOLLOWUP_DAYS_AFTER: int = 3         # call patient this many days after appointment
 
+    # Resume campaigns stranded by a restart (recipients left 'pending')
+    CAMPAIGN_RESUME_ENABLED: bool = True
+    CAMPAIGN_RESUME_INTERVAL_SECONDS: int = 600
+
     # Patient recognition
     PATIENT_RECOGNITION_ENABLED: bool = True
 
@@ -153,6 +167,8 @@ class Settings(BaseSettings):
     DASHBOARD_ADMIN_PASSWORD: str = "admin"
     DASHBOARD_JWT_SECRET: str = "change-me-in-production"
     DASHBOARD_JWT_EXPIRE_MINUTES: int = 720
+    # Email the startup superadmin upsert uses (password = DASHBOARD_ADMIN_PASSWORD).
+    SUPERADMIN_EMAIL: str = "admin@arteqai.com"
 
     @model_validator(mode="after")
     def _reject_weak_secrets_in_production(self) -> "Settings":

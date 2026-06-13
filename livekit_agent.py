@@ -35,7 +35,7 @@ _log = logging.getLogger("livekit.agents")
 import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions
+from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions, RoomInputOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import noise_cancellation, openai, sarvam, silero
@@ -81,27 +81,13 @@ _SCRIPT_RANGES = [
 
 
 def _detect_tts_lang(text: str, fallback: str) -> str:
-    """Pick target_language_code from the dominant Indic script in `text`.
+    from src.tts_normalize import detect_tts_lang
+    return detect_tts_lang(text, fallback)
 
-    Counts characters per script; the script with the most chars wins. Pure
-    Latin (no Indic chars) → en-IN. Empty/unknown → the configured fallback.
-    """
-    counts: dict[str, int] = {}
-    latin = 0
-    for ch in text:
-        cp = ord(ch)
-        if 0x41 <= cp <= 0x7A and ch.isalpha():
-            latin += 1
-            continue
-        for code, lo, hi in _SCRIPT_RANGES:
-            if lo <= cp <= hi:
-                counts[code] = counts.get(code, 0) + 1
-                break
-    if counts:
-        return max(counts, key=counts.get)
-    if latin:
-        return "en-IN"
-    return fallback
+
+def _voice_for_lang(lang: str, default: str) -> str:
+    from src.tts_normalize import voice_for_lang
+    return voice_for_lang(lang, default)
 
 
 # Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
@@ -149,17 +135,13 @@ def _stem_repl(m: "re.Match") -> str:
 
 
 def _normalize_for_tts(text: str) -> str:
-    # Inflected long roots first (absorbs glued suffixes), then exact short forms.
-    out = _TTS_EN_STEM_RE.sub(_stem_repl, text)
-    out = _TTS_EN_RE.sub(lambda m: " " + _TTS_EN_MAP[m.group(0)] + " ", out)
-    out = re.sub(r"\s{2,}", " ", out)
-    out = re.sub(r"\s+([,.?!।])", r"\1", out)  # drop space before punctuation
-    return out.strip()
+    from src.tts_normalize import normalize_for_tts
+    return normalize_for_tts(text)
 
 
-def _tts_cache_key(opts, text: str, lang: str) -> str:
+def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
     import hashlib
-    raw = f"{opts.model}|{lang}|{opts.speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
+    raw = f"{opts.model}|{lang}|{speaker}|{opts.pace}|{opts.speech_sample_rate}|{text}"
     return "tts:" + hashlib.md5(raw.encode("utf-8")).hexdigest()
 
 
@@ -175,7 +157,11 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         # language (the LLM replies in their language; we match the voice to it).
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)
-        cache_key = _tts_cache_key(self._opts, text, lang)
+        # Pick the most native-sounding v3 voice for the detected language so each
+        # language is spoken by its best-fit speaker (falls back to the configured
+        # default). Speaker is part of the cache key so voices don't cross-pollute.
+        speaker = _voice_for_lang(lang, self._opts.speaker)
+        cache_key = _tts_cache_key(self._opts, text, lang, speaker)
         cached = tts_cache.get(cache_key)
         if cached is not None:
             output_emitter.initialize(
@@ -194,7 +180,7 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         payload = {
             "target_language_code": lang,
             "text": text,
-            "speaker": self._opts.speaker,
+            "speaker": speaker,
             "pace": self._opts.pace,
             "speech_sample_rate": self._opts.speech_sample_rate,
             "model": self._opts.model,
@@ -296,6 +282,20 @@ class BulbulV3TTS(_SarvamTTS):
 # what the caller already said. The per-turn cost is dominated by the large
 # system prompt re-sent every turn, so a few short history messages are cheap.
 _MAX_CTX = 12
+
+_WATCHDOG_FAREWELLS = {
+    "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
+    "hi-IN":      "क्षमा करें, कॉल का अधिकतम समय समाप्त हो गया। ज़रूरत हो तो दोबारा कॉल करें। धन्यवाद, अलविदा!",
+    "ta-IN":      "மன்னிக்கவும், அழைப்பின் அதிகபட்ச நேரம் முடிந்தது. தேவையெனில் திரும்ப அழைக்கவும். நன்றி!",
+    "te-IN":      "క్షమించండి, గరిష్ట కాల్ సమయం ముగిసింది. అవసరమైతే తిరిగి కాల్ చేయండి. ధన్యవాదాలు!",
+    "kn-IN":      "ಕ್ಷಮಿಸಿ, ಗರಿಷ್ಠ ಕರೆ ಸಮಯ ಮುಗಿದಿದೆ. ಇನ್ನಷ್ಟು ಸಹಾಯ ಬೇಕಾದರೆ ಮತ್ತೆ ಕರೆ ಮಾಡಿ. ಧನ್ಯವಾದ!",
+    "bn-IN":      "দুঃখিত, সর্বোচ্চ কল সময় শেষ হয়েছে। প্রয়োজন হলে আবার কল করুন। ধন্যবাদ!",
+    "gu-IN":      "માફ કરશો, મહત્તમ કૉલ સમય પૂરો થયો. ફરીથી ફોન કરો. આભાર!",
+    "pa-IN":      "ਮਾਫ਼ ਕਰਨਾ, ਵੱਧ ਤੋਂ ਵੱਧ ਕਾਲ ਸਮਾਂ ਖਤਮ ਹੋ ਗਿਆ। ਲੋੜ ਹੋਵੇ ਤਾਂ ਦੁਬਾਰਾ ਕਾਲ ਕਰੋ। ਧੰਨਵਾਦ!",
+    "od-IN":      "କ୍ଷମା କରନ୍ତୁ, ସର୍ବାଧିକ call ସମୟ ଶେଷ ହୋଇଛି। ଆବଶ୍ୟକ ହେଲେ ପୁଣି call କରନ୍ତୁ। ଧନ୍ୟବାଦ!",
+    "mr-IN":      "क्षमस्व, कमाल कॉल वेळ संपली. गरज असल्यास पुन्हा कॉल करा. धन्यवाद!",
+    "en-IN":      "Sorry, we've reached the maximum call time. Please call back if you need anything else. Thank you, goodbye!",
+}
 
 _DTMF = {
     "1": "OPD timing please",
@@ -496,7 +496,7 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> Optional
 # System prompt builder
 # ==============================================================================
 
-def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict]) -> str:
+def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
     import pytz
     _IST = pytz.timezone("Asia/Kolkata")
     now = datetime.now(_IST)
@@ -560,9 +560,13 @@ def _build_prompt(hospital_ctx, agent_name: str, outbound_context: Optional[dict
                 "Ask how they are feeling and if they need anything.\n"
             )
 
-    return f"""You are {agent_name}, the voice receptionist for {hosp_name}.
+    return f"""You are the voice receptionist for {hosp_name}. You have NO personal name — never introduce yourself with one and never invent one. Identify only as {hosp_name}. If a caller asks who you are or your name, say you are the reception assistant at {hosp_name}.
 
 LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+
+SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
+
+MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?". Verbs take no gender suffix: "വന്നു" not "വന്നാൾ". Speak times as: "രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി" — never "10 AM" or "10:00 AM". For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
 
@@ -598,7 +602,7 @@ HOSPITAL:
 TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
 
 
-def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[dict],
+def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
                     returning_name: str = "", agent_language: str = "ml-IN") -> str:
     # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
@@ -613,21 +617,21 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
         ttime = outbound_context.get("appointment_time", "")
         if call_type == "confirmation":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
                 "Can you attend?"
             )
         elif call_type == "reminder":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"This is a reminder of your appointment with Dr. {dname} on {date}. "
                 "Do you have any questions?"
             )
         elif call_type == "callback":
-            return f"Hello {pname}, this is {agent_name} from {hosp_name}. How can I help you today?"
+            return f"Hello {pname}, this is {hosp_name} calling. How can I help you today?"
         elif call_type == "followup":
             return (
-                f"Hello {pname}, this is {agent_name} from {hosp_name}. "
+                f"Hello {pname}, this is {hosp_name} calling. "
                 f"How are you feeling after your visit with Dr. {dname}?"
             )
 
@@ -636,7 +640,7 @@ def _build_greeting(hospital_ctx, agent_name: str, outbound_context: Optional[di
     _IST = _pytz.timezone("Asia/Kolkata")
     hour = datetime.now(_IST).hour
     from src.ai.groq_brain import build_greeting_text
-    return build_greeting_text(hosp_name, agent_name, hour, lang=agent_language)
+    return build_greeting_text(hosp_name, hour, lang=agent_language)
 
 
 # ==============================================================================
@@ -764,12 +768,18 @@ class HospitalVoiceAgent(Agent):
             self._sensory.reset()
             return
 
-        # Inject acoustic metadata when noteworthy
+        # Inject acoustic metadata when noteworthy, and keep it for the call
+        # log (emotional_state) — computed-but-discarded sensory data made
+        # distressed calls impossible to find afterwards.
         meta = self._sensory.metadata()
         self._sensory.reset()
         if meta and text:
             try:
                 new_message.content = [f"{meta}\n{text}"]
+            except Exception:
+                pass
+            try:
+                self.session.userdata.setdefault("sensory_events", []).append(meta)
             except Exception:
                 pass
 
@@ -965,10 +975,10 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # ── Build system prompt ───────────────────────────────────────────────────
     from src.config.settings import settings
-    # Per-hospital agent persona overrides the global env var default
-    agent_name     = (getattr(hospital_ctx, "agent_name", None) or settings.AGENT_NAME)
+    # Per-hospital language overrides the global env var default. The agent has no
+    # spoken name — it identifies only by the hospital — so no agent_name is used.
     agent_language = (getattr(hospital_ctx, "agent_language", None) or settings.AGENT_LANGUAGE)
-    system_prompt = _build_prompt(hospital_ctx, agent_name, outbound_context)
+    system_prompt = _build_prompt(hospital_ctx, outbound_context)
     if patient_profile:
         last = patient_profile["history"][0] if patient_profile["history"] else {}
         system_prompt += (
@@ -978,7 +988,7 @@ async def entrypoint(ctx: JobContext) -> None:
         )
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
-    greeting = _build_greeting(hospital_ctx, agent_name, outbound_context, returning_name, agent_language)
+    greeting = _build_greeting(hospital_ctx, outbound_context, returning_name, agent_language)
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
@@ -1018,6 +1028,8 @@ async def entrypoint(ctx: JobContext) -> None:
         "transfer_requested":  False,
         "transfer_destination": "",
         "caller_lang":         "ml-IN",
+        "intents":             [],   # appended by tools via _mark_intent
+        "sensory_events":      [],   # acoustic [SENSORY:...] tags per turn
     }
 
     # ── Start session ─────────────────────────────────────────────────────────
@@ -1042,11 +1054,6 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        # Strip clinic background noise from the audio stream before it reaches
-        # VAD or STT. BVCTelephony is the telephony-optimised variant — trained
-        # specifically on inbound SIP/PSTN audio so it performs better than the
-        # generic BVC on compressed 8kHz phone-call streams.
-        input_audio_noise_cancellation=noise_cancellation.BVCTelephony(),
         # Start the LLM the moment the caller pauses, before end-of-turn is fully
         # confirmed, then keep or discard the draft once VAD settles. Removes most
         # of the post-speech dead air, so replies feel near-instant.
@@ -1089,6 +1096,13 @@ async def entrypoint(ctx: JobContext) -> None:
             if transfer_dest:
                 print(f"[arteq] call ended — transfer to {transfer_dest}")
 
+            # What actually happened on the call (tools mark these via
+            # _mark_intent) and how the caller sounded (acoustic tags).
+            intents = list(ud.get("intents", []) or [])
+            emotional_state = "; ".join(
+                dict.fromkeys(ud.get("sensory_events", []) or [])
+            )[:500]
+
             try:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
@@ -1104,11 +1118,19 @@ async def entrypoint(ctx: JobContext) -> None:
                     latency_avg_ms=meter.avg_ms(),
                     cost_paise=cost_paise,
                     transcript=transcript,
-                    intents=[],
+                    intents=intents,
                     outcome=outcome,
+                    emotional_state=emotional_state,
                 )
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
+
+            # Tell live-monitoring subscribers the call is over.
+            try:
+                from additions.live_events import emit_call_ended
+                await emit_call_ended(hospital_id, call_id)
+            except Exception:
+                pass
 
             # Increment campaign answered counter if this was an outbound campaign call
             campaign_id = (outbound_context or {}).get("campaign_id", "")
@@ -1124,7 +1146,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 await SMSService().send_call_summary(
                     phone=caller_phone,
                     hospital_name=hospital_name,
-                    summary="Thank you for calling. Arya was happy to help.",
+                    summary=f"Thank you for calling {hospital_name}. We were happy to help.",
                 )
 
             from src.services.staff_alert import StaffAlertService
@@ -1149,7 +1171,38 @@ async def entrypoint(ctx: JobContext) -> None:
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
-    await session.start(agent=agent, room=ctx.room, record=False)
+    await session.start(
+        agent=agent,
+        room=ctx.room,
+        record=False,
+        # Strip clinic background noise from the inbound audio stream before it
+        # reaches VAD or STT. BVCTelephony is the telephony-optimised variant —
+        # trained on inbound SIP/PSTN audio so it performs better than the
+        # generic BVC on compressed 8kHz phone-call streams.
+        # NOTE: livekit-agents 1.x takes this here via RoomInputOptions, NOT as
+        # an AgentSession kwarg — passing it to AgentSession() raises TypeError.
+        room_input_options=RoomInputOptions(
+            noise_cancellation=noise_cancellation.BVCTelephony(),
+        ),
+    )
+
+    # ── Live monitoring: announce the call to dashboard subscribers ───────────
+    # (additions/routes/live_ws.py forwards these over the /admin/ws/live
+    # socket; with REDIS_URL set the event crosses from this worker process to
+    # the web server. Best-effort — monitoring must never break a call.)
+    try:
+        from additions.live_events import emit_call_started
+        await emit_call_started(hospital_id, {
+            "call_id": call_id,
+            "hospital_id": hospital_id,
+            "caller": caller_phone or "unknown",
+            "started_at": call_started_at.isoformat(),
+            "ended_at": None,
+            "outcome": None,
+            "intents": [],
+        })
+    except Exception as exc:
+        _log.debug("live event emit failed: %s", exc)
 
     # ── Cost guardrail: cap call duration ──────────────────────────────────────
     # STT is billed per audio minute, so a phone left off-hook (or a caller who
@@ -1162,11 +1215,9 @@ async def entrypoint(ctx: JobContext) -> None:
         await asyncio.sleep(max_call_s)
         _log.info("max call duration reached room=%s", room_name)
         try:
-            await session.say(
-                "Sorry, we've reached the maximum call time. Please call back "
-                "if you need anything else. Thank you, goodbye!",
-                allow_interruptions=False,
-            )
+            caller_lang = session_data.get("caller_lang", agent_language)
+            farewell = _WATCHDOG_FAREWELLS.get(caller_lang, _WATCHDOG_FAREWELLS["en-IN"])
+            await session.say(farewell, allow_interruptions=False)
             await asyncio.sleep(8.0)
         except Exception:
             pass

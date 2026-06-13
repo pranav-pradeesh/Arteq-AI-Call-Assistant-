@@ -92,6 +92,7 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
     logger.info("reminder_loop_started", interval_seconds=interval_seconds)
 
     async def _pass(pool, tenant_slug):
+        from src.db.queries import increment_outbound_attempts
         reminders = await service.get_pending_reminders(pool)
         if reminders:
             logger.info("reminder_pass", tenant=tenant_slug, pending=len(reminders))
@@ -100,6 +101,7 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
                 break
             appt_id = appt.get("id")
             try:
+                await increment_outbound_attempts(pool, appt_id, "reminder")
                 ok = await service.schedule_reminder(
                     patient_phone=appt["patient_phone"],
                     patient_name=appt.get("patient_name") or "",
@@ -150,6 +152,7 @@ async def confirmation_loop(
     from src.db.queries import get_pending_confirmations
 
     async def _pass(pool, tenant_slug):
+        from src.db.queries import increment_outbound_attempts
         pending = await get_pending_confirmations(pool, days_min=days_min, days_max=days_max)
         if pending:
             logger.info("confirmation_pass", tenant=tenant_slug, pending=len(pending))
@@ -158,6 +161,7 @@ async def confirmation_loop(
                 break
             appt_id = appt.get("id")
             try:
+                await increment_outbound_attempts(pool, appt_id, "confirmation")
                 ok = await service.schedule_confirmation_call(
                     patient_phone=appt["patient_phone"],
                     patient_name=appt.get("patient_name") or "",
@@ -240,6 +244,7 @@ async def followup_loop(interval_seconds: int = 3600, days_after: int = 3) -> No
     from src.db.queries import get_pending_followups
 
     async def _pass(pool, tenant_slug):
+        from src.db.queries import increment_outbound_attempts
         pending = await get_pending_followups(pool, days_after=days_after)
         if pending:
             logger.info("followup_pass", tenant=tenant_slug, pending=len(pending))
@@ -248,6 +253,7 @@ async def followup_loop(interval_seconds: int = 3600, days_after: int = 3) -> No
                 break
             appt_id = appt.get("id")
             try:
+                await increment_outbound_attempts(pool, appt_id, "followup")
                 ok = await service.schedule_followup_call(
                     patient_phone=appt["patient_phone"],
                     patient_name=appt.get("patient_name") or "",
@@ -274,6 +280,100 @@ async def followup_loop(interval_seconds: int = 3600, days_after: int = 3) -> No
             pass
 
     logger.info("followup_loop_stopped")
+
+
+async def campaign_resume_loop(interval_seconds: int = 600) -> None:
+    """Resume stalled campaigns.
+
+    POST /api/v1/campaigns/launch dials recipients in an in-process background
+    task; a server restart mid-campaign used to strand the remaining
+    recipients in call_status='pending' forever. This loop picks up 'running'
+    campaigns that haven't progressed recently (updated_at goes stale once the
+    launch task dies), dials their pending recipients, and marks the campaign
+    completed when none remain. The staleness window keeps it from racing a
+    launch task that is still actively dialing.
+    """
+    service = OutboundCallService()
+    logger.info("campaign_resume_loop_started", interval_seconds=interval_seconds)
+
+    _STALLED = """
+        SELECT c.id, c.campaign_type, c.message_template, c.hospital_id, h.slug
+        FROM campaigns c
+        LEFT JOIN hospitals h ON h.id = c.hospital_id
+        WHERE c.status = 'running'
+          AND c.updated_at < now() - interval '15 minutes'
+          AND EXISTS (SELECT 1 FROM campaign_recipients r
+                      WHERE r.campaign_id = c.id AND r.call_status = 'pending')
+        LIMIT 5
+    """
+    _PENDING = """
+        SELECT phone FROM campaign_recipients
+        WHERE campaign_id = $1 AND call_status = 'pending'
+        ORDER BY id LIMIT 50
+    """
+
+    async def _pass(pool, tenant_slug):
+        async with pool.acquire() as conn:
+            stalled = await conn.fetch(_STALLED)
+        for c in stalled:
+            campaign_id = str(c["id"])
+            logger.info("campaign_resumed", campaign_id=campaign_id, tenant=tenant_slug)
+            async with pool.acquire() as conn:
+                phones = [r["phone"] for r in await conn.fetch(_PENDING, c["id"])]
+            for phone in phones:
+                if _stop.is_set():
+                    return
+                try:
+                    ok = await service.schedule_campaign_call(
+                        patient_phone=phone,
+                        patient_name="",
+                        campaign_type=c["campaign_type"] or "custom",
+                        campaign_message=c["message_template"] or "",
+                        hospital_id=str(c["hospital_id"] or ""),
+                        campaign_id=campaign_id,
+                        tenant_slug=c["slug"] or tenant_slug,
+                    )
+                    async with pool.acquire() as conn:
+                        if ok:
+                            await conn.execute(
+                                "UPDATE campaign_recipients SET call_status='called', "
+                                "called_at=now() WHERE campaign_id=$1 AND phone=$2",
+                                c["id"], phone,
+                            )
+                            await conn.execute(
+                                "UPDATE campaigns SET calls_placed = calls_placed + 1, "
+                                "updated_at = now() WHERE id=$1", c["id"],
+                            )
+                        else:
+                            await conn.execute(
+                                "UPDATE campaign_recipients SET call_status='failed' "
+                                "WHERE campaign_id=$1 AND phone=$2",
+                                c["id"], phone,
+                            )
+                except Exception as exc:
+                    logger.error("campaign_resume_item_failed",
+                                 campaign_id=campaign_id, error=str(exc))
+                await asyncio.sleep(2.0)
+            async with pool.acquire() as conn:
+                remaining = await conn.fetchval(
+                    "SELECT 1 FROM campaign_recipients "
+                    "WHERE campaign_id=$1 AND call_status='pending' LIMIT 1", c["id"],
+                )
+                if not remaining:
+                    await conn.execute(
+                        "UPDATE campaigns SET status='completed', updated_at=now() "
+                        "WHERE id=$1", c["id"],
+                    )
+                    logger.info("campaign_completed_on_resume", campaign_id=campaign_id)
+
+    while not _stop.is_set():
+        await _for_each_target("campaign_resume", _pass)
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("campaign_resume_loop_stopped")
 
 
 def start_scheduler() -> asyncio.Task | None:
@@ -315,6 +415,14 @@ def start_scheduler() -> asyncio.Task | None:
         )
         logger.info("followup_scheduler_started",
                     interval_seconds=fu_interval, days_after=fu_days)
+
+    if getattr(settings, "CAMPAIGN_RESUME_ENABLED", True):
+        cr_interval = getattr(settings, "CAMPAIGN_RESUME_INTERVAL_SECONDS", 600)
+        asyncio.create_task(
+            campaign_resume_loop(cr_interval),
+            name="campaign_resume_loop",
+        )
+        logger.info("campaign_resume_scheduler_started", interval_seconds=cr_interval)
 
     return task
 

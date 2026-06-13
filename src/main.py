@@ -32,6 +32,10 @@ except Exception as _import_exc:
 logger = get_logger(__name__)
 
 
+class _MigrationError(RuntimeError):
+    """A schema migration failed — startup must abort, not limp on."""
+
+
 # ── Lifespan ──────────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -57,24 +61,27 @@ async def lifespan(app: FastAPI):
         async with pool.acquire() as conn:
             await conn.fetchval("SELECT 1")
         logger.info("db_connected")
-        try:
-            import pathlib
-            migration_dir = pathlib.Path("migrations/versions")
-            for sql_file in sorted(migration_dir.glob("*.sql")):
-                sql = sql_file.read_text()
+        # A failed migration means the schema is incomplete and queries will
+        # break in confusing ways later — fail the startup, don't limp on.
+        import pathlib
+        migration_dir = pathlib.Path("migrations/versions")
+        for sql_file in sorted(migration_dir.glob("*.sql")):
+            sql = sql_file.read_text()
+            try:
                 async with pool.acquire() as conn:
                     await conn.execute(sql)
-            logger.info("db_migrations_applied")
-        except Exception as me:
-            logger.warning("db_migration_warning", error=str(me))
+            except Exception as me:
+                logger.error("db_migration_failed", file=sql_file.name, error=str(me))
+                raise _MigrationError(f"Migration {sql_file.name} failed: {me}") from me
+        logger.info("db_migrations_applied")
 
         # Upsert the superadmin account using the LIVE env password so the
         # credentials always match regardless of what hash is in 006b.sql.
         # Only runs when the users table exists (after migration 006).
         try:
             import bcrypt as _bcrypt
-            _admin_email = os.environ.get("SUPERADMIN_EMAIL", "admin@arteqai.com")
-            _admin_pw    = os.environ.get("DASHBOARD_ADMIN_PASSWORD", "")
+            _admin_email = settings.SUPERADMIN_EMAIL
+            _admin_pw    = settings.DASHBOARD_ADMIN_PASSWORD or ""
             if _admin_pw:
                 _hash = _bcrypt.hashpw(_admin_pw.encode()[:72], _bcrypt.gensalt(rounds=12)).decode()
                 async with pool.acquire() as conn:
@@ -94,6 +101,8 @@ async def lifespan(app: FastAPI):
             logger.warning("superadmin_upsert_skipped", reason=str(_se))
     except asyncio.TimeoutError:
         logger.error("db_connection_timeout", hint="Check DATABASE_URL / network")
+    except _MigrationError:
+        raise  # abort startup — running on a half-migrated schema is worse
     except Exception as e:
         logger.error("db_connection_failed", error=str(e))
 
@@ -287,22 +296,6 @@ async def livekit_token(request: Request, slug: str = "default", participant: st
 
 # ── Plivo inbound webhook ─────────────────────────────────────────────────────
 
-def _verify_plivo_signature(auth_token: str, full_url: str, params: dict, signature: str) -> bool:
-    """
-    Verify Plivo webhook signature per Plivo docs:
-    HMAC-SHA1 over (url + sorted key=value pairs), base64-encoded.
-    """
-    import base64
-    import hashlib
-    import hmac as _hmac
-    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()))
-    to_sign = (full_url + sorted_str).encode()
-    expected = base64.b64encode(
-        _hmac.new(auth_token.encode(), to_sign, hashlib.sha1).digest()
-    ).decode()
-    return _hmac.compare_digest(signature, expected)
-
-
 @app.post("/api/v1/call/inbound/{tenant_slug}")
 async def call_inbound_webhook(tenant_slug: str, request: Request):
     """
@@ -316,18 +309,45 @@ async def call_inbound_webhook(tenant_slug: str, request: Request):
     form = await request.form()
     params = {k: str(v) for k, v in form.items()}
 
-    # Verify Plivo signature when auth token is configured
-    if settings.PLIVO_AUTH_TOKEN:
-        sig = request.headers.get("X-Plivo-Signature", "")
-        full_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-        if sig and not _verify_plivo_signature(settings.PLIVO_AUTH_TOKEN, full_url, params, sig):
-            logger.warning("plivo_signature_mismatch", tenant=tenant_slug)
-            return Response(status_code=403)
-        elif not sig:
-            logger.debug("plivo_signature_absent", tenant=tenant_slug)
+    # Verify the Plivo signature when the auth token is configured. Fail closed:
+    # a missing header is treated the same as a bad signature, otherwise anyone
+    # who knows the URL can forge inbound-call webhooks. Without a token
+    # (browser-only dev) the check is skipped entirely.
+    from src.api.security import plivo_webhook_authentic
+    full_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
+    if not plivo_webhook_authentic(request, full_url, params):
+        logger.warning("plivo_signature_rejected", tenant=tenant_slug)
+        return Response(status_code=403)
 
     to_number = params.get("To", settings.PLIVO_PHONE_NUMBER)
     xml = get_inbound_pcml(to_number=to_number)
+    return Response(content=xml, media_type="text/xml")
+
+
+# ── Exotel inbound webhook ────────────────────────────────────────────────────
+
+@app.post("/api/v1/call/inbound/exotel/{token}/{tenant_slug}")
+async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request):
+    """
+    Exotel calls this webhook for every answered inbound call.
+    Returns ExoML that SIP-forwards the call to LiveKit.
+
+    The `token` path segment is compared against EXOTEL_WEBHOOK_TOKEN — embedding
+    a secret in the URL is Exotel's recommended webhook security mechanism since
+    they do not send a cryptographic signature header.
+    """
+    from fastapi.responses import Response
+    from src.api.security import exotel_webhook_authentic
+    from src.services.livekit_sip import get_inbound_exoml
+
+    if not exotel_webhook_authentic(request, token):
+        logger.warning("exotel_token_rejected", tenant=tenant_slug)
+        return Response(status_code=403)
+
+    form = await request.form()
+    params = {k: str(v) for k, v in form.items()}
+    to_number = params.get("To", settings.EXOTEL_PHONE_NUMBER)
+    xml = get_inbound_exoml(to_number=to_number)
     return Response(content=xml, media_type="text/xml")
 
 

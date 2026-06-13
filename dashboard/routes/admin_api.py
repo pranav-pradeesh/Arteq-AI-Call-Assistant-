@@ -46,6 +46,16 @@ DOW_FULL = {
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
+#
+# Two token shapes share DASHBOARD_JWT_SECRET:
+#   * legacy single-password login  → {"sub": "admin", "role": "super_admin"}
+#   * per-user RBAC login (additions/routes/users_api.py)
+#                                   → {"sub": <email>, "role": <role>}
+# Both are accepted everywhere; non-super roles are additionally scoped to the
+# hospitals listed for them in user_tenants (see _require_hospital_access).
+
+_RBAC_ROLES = {"super_admin", "tenant_admin", "viewer"}
+
 
 class LoginIn(BaseModel):
     password: str
@@ -56,21 +66,75 @@ def _create_token() -> str:
         minutes=getattr(settings, "DASHBOARD_JWT_EXPIRE_MINUTES", 720)
     )
     secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
-    return jwt.encode({"sub": "admin", "exp": exp}, secret, algorithm=ALGORITHM)
+    return jwt.encode(
+        {"sub": "admin", "role": "super_admin", "exp": exp}, secret, algorithm=ALGORITHM
+    )
 
 
-async def _require_auth(
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> None:
+def _decode_token(credentials: Optional[HTTPAuthorizationCredentials]) -> dict:
     secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
     if not credentials:
         raise HTTPException(status_code=401, detail="Not authenticated")
     try:
         payload = jwt.decode(credentials.credentials, secret, algorithms=[ALGORITHM])
-        if payload.get("sub") != "admin":
-            raise HTTPException(status_code=401, detail="Invalid token")
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
+    if payload.get("sub") != "admin" and payload.get("role") not in _RBAC_ROLES:
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return payload
+
+
+def _is_super(payload: dict) -> bool:
+    return payload.get("sub") == "admin" or payload.get("role") == "super_admin"
+
+
+async def _require_auth(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    return _decode_token(credentials)
+
+
+async def _require_super(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    payload = _decode_token(credentials)
+    if not _is_super(payload):
+        raise HTTPException(status_code=403, detail="super_admin role required")
+    return payload
+
+
+async def _assert_hospital_access(payload: dict, hospital_id: str) -> None:
+    """403 unless the token's user may touch this hospital.
+
+    super_admin (and the legacy single-password admin) pass unconditionally;
+    tenant_admin / viewer must have a user_tenants row linking their email to
+    the hospital's slug.
+    """
+    if _is_super(payload):
+        return
+    email = payload.get("sub", "")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        allowed = await conn.fetchval(
+            """SELECT 1 FROM user_tenants ut
+               JOIN users u ON u.id = ut.user_id
+               JOIN hospitals h ON h.slug = ut.tenant_slug
+               WHERE u.email = $1 AND h.id = $2 AND u.active
+               LIMIT 1""",
+            email, hospital_id,
+        )
+    if not allowed:
+        raise HTTPException(status_code=403, detail="No access to this hospital")
+
+
+async def _require_hospital_access(
+    hospital_id: str,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+) -> dict:
+    """Auth + per-hospital scoping for routes carrying a hospital_id."""
+    payload = _decode_token(credentials)
+    await _assert_hospital_access(payload, hospital_id)
+    return payload
 
 
 @router.post("/login")
@@ -103,14 +167,27 @@ def _invalidate(hospital_id: str):
 
 # ── Hospitals ─────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals", dependencies=[Depends(_require_auth)])
-async def list_hospitals():
+@router.get("/hospitals")
+async def list_hospitals(payload: dict = Depends(_require_auth)):
     pool = await _db()
     async with pool.acquire() as conn:
-        rows = await conn.fetch(
-            "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, tier, agent_name, agent_language FROM hospitals ORDER BY name"
-        )
+        if _is_super(payload):
+            rows = await conn.fetch(
+                "SELECT id, name, name_ml, address, phone, hours, active, "
+                "slug, plivo_number, tier, agent_name, agent_language FROM hospitals ORDER BY name"
+            )
+        else:
+            # tenant_admin / viewer only see hospitals assigned via user_tenants
+            rows = await conn.fetch(
+                """SELECT h.id, h.name, h.name_ml, h.address, h.phone, h.hours, h.active,
+                          h.slug, h.plivo_number, h.tier, h.agent_name, h.agent_language
+                   FROM hospitals h
+                   JOIN user_tenants ut ON ut.tenant_slug = h.slug
+                   JOIN users u ON u.id = ut.user_id
+                   WHERE u.email = $1 AND u.active
+                   ORDER BY h.name""",
+                payload.get("sub", ""),
+            )
     return [
         {
             "id": str(r["id"]),
@@ -131,7 +208,7 @@ async def list_hospitals():
     ]
 
 
-@router.get("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}", dependencies=[Depends(_require_hospital_access)])
 async def get_hospital(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -182,7 +259,7 @@ class HospitalUpdate(BaseModel):
     agent_language: Optional[str] = None # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, en-IN
 
 
-@router.post("/hospitals", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals", dependencies=[Depends(_require_super)])
 async def create_hospital(body: HospitalUpdate):
     if not body.name:
         raise HTTPException(status_code=400, detail="name is required")
@@ -210,7 +287,7 @@ async def create_hospital(body: HospitalUpdate):
     return {"id": new_id, "slug": slug, "tier": tier, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_hospital(hospital_id: str, body: HospitalUpdate):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -263,9 +340,40 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate):
     return {"status": "updated"}
 
 
+@router.delete("/hospitals/{hospital_id}", dependencies=[Depends(_require_super)])
+async def delete_hospital(hospital_id: str):
+    """Delete a hospital and its configuration (super_admin only).
+
+    Refuses (409) when patient data exists — appointments, callbacks, or call
+    logs — so a tenant with history can only be deactivated (PUT active=false),
+    never silently erased.
+    """
+    pool = await _db()
+    async with pool.acquire() as conn:
+        exists = await conn.fetchval("SELECT 1 FROM hospitals WHERE id=$1", hospital_id)
+        if not exists:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        for table in ("appointments", "callbacks", "call_logs"):
+            if await conn.fetchval(
+                f"SELECT 1 FROM {table} WHERE hospital_id=$1 LIMIT 1", hospital_id
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"Hospital has {table} records — deactivate it instead "
+                           "(PUT with active=false)",
+                )
+        async with conn.transaction():
+            for table in ("schedules", "doctors", "departments", "billing_info",
+                          "faqs", "emergency_contacts", "missed_questions"):
+                await conn.execute(f"DELETE FROM {table} WHERE hospital_id=$1", hospital_id)
+            await conn.execute("DELETE FROM hospitals WHERE id=$1", hospital_id)
+    _invalidate(hospital_id)
+    return {"status": "deleted"}
+
+
 # ── Departments ───────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_hospital_access)])
 async def list_departments(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -297,7 +405,7 @@ class DeptBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_hospital_access)])
 async def create_department(hospital_id: str, body: DeptBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -314,7 +422,7 @@ async def create_department(hospital_id: str, body: DeptBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_department(hospital_id: str, dept_id: str, body: DeptBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -331,7 +439,7 @@ async def update_department(hospital_id: str, dept_id: str, body: DeptBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_auth)])
+@router.delete("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_hospital_access)])
 async def delete_department(hospital_id: str, dept_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -345,7 +453,7 @@ async def delete_department(hospital_id: str, dept_id: str):
 
 # ── Doctors ───────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_hospital_access)])
 async def list_doctors(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -395,7 +503,7 @@ class DoctorBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_hospital_access)])
 async def create_doctor(hospital_id: str, body: DoctorBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -414,7 +522,7 @@ async def create_doctor(hospital_id: str, body: DoctorBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_doctor(hospital_id: str, doctor_id: str, body: DoctorBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -432,7 +540,7 @@ async def update_doctor(hospital_id: str, doctor_id: str, body: DoctorBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_auth)])
+@router.delete("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_hospital_access)])
 async def delete_doctor(hospital_id: str, doctor_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -454,15 +562,16 @@ class ScheduleBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/doctors/{doctor_id}/schedules", dependencies=[Depends(_require_auth)])
-async def add_schedule(doctor_id: str, body: ScheduleBody):
+@router.post("/doctors/{doctor_id}/schedules")
+async def add_schedule(doctor_id: str, body: ScheduleBody, payload: dict = Depends(_require_auth)):
     new_id = str(uuid.uuid4())
     pool = await _db()
     async with pool.acquire() as conn:
-        # Get hospital_id for cache invalidation
+        # Get hospital_id for tenant scoping + cache invalidation
         row = await conn.fetchrow("SELECT hospital_id FROM doctors WHERE id=$1", doctor_id)
         if not row:
             raise HTTPException(status_code=404, detail="Doctor not found")
+        await _assert_hospital_access(payload, str(row["hospital_id"]))
         await conn.execute(
             """INSERT INTO schedules
                (id, doctor_id, hospital_id, day_of_week, start_time, end_time, room, active)
@@ -475,12 +584,13 @@ async def add_schedule(doctor_id: str, body: ScheduleBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.delete("/schedules/{schedule_id}", dependencies=[Depends(_require_auth)])
-async def delete_schedule(schedule_id: str):
+@router.delete("/schedules/{schedule_id}")
+async def delete_schedule(schedule_id: str, payload: dict = Depends(_require_auth)):
     pool = await _db()
     async with pool.acquire() as conn:
         row = await conn.fetchrow("SELECT hospital_id FROM schedules WHERE id=$1", schedule_id)
         if row:
+            await _assert_hospital_access(payload, str(row["hospital_id"]))
             _invalidate(str(row["hospital_id"]))
         await conn.execute("DELETE FROM schedules WHERE id=$1", schedule_id)
     return {"status": "deleted"}
@@ -488,7 +598,7 @@ async def delete_schedule(schedule_id: str):
 
 # ── Billing ───────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_hospital_access)])
 async def list_billing(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -520,7 +630,7 @@ class BillingBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_hospital_access)])
 async def create_billing(hospital_id: str, body: BillingBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -537,7 +647,7 @@ async def create_billing(hospital_id: str, body: BillingBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_billing(hospital_id: str, item_id: str, body: BillingBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -554,7 +664,7 @@ async def update_billing(hospital_id: str, item_id: str, body: BillingBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_auth)])
+@router.delete("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_hospital_access)])
 async def delete_billing(hospital_id: str, item_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -568,7 +678,7 @@ async def delete_billing(hospital_id: str, item_id: str):
 
 # ── Emergency Contacts ────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_hospital_access)])
 async def list_emergency(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -598,7 +708,7 @@ class EmergencyBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_hospital_access)])
 async def create_emergency(hospital_id: str, body: EmergencyBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -615,7 +725,7 @@ async def create_emergency(hospital_id: str, body: EmergencyBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_emergency(hospital_id: str, contact_id: str, body: EmergencyBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -631,7 +741,7 @@ async def update_emergency(hospital_id: str, contact_id: str, body: EmergencyBod
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_auth)])
+@router.delete("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_hospital_access)])
 async def delete_emergency(hospital_id: str, contact_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -645,7 +755,7 @@ async def delete_emergency(hospital_id: str, contact_id: str):
 
 # ── FAQs ──────────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_hospital_access)])
 async def list_faqs(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -679,7 +789,7 @@ class FaqBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_hospital_access)])
 async def create_faq(hospital_id: str, body: FaqBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -697,7 +807,7 @@ async def create_faq(hospital_id: str, body: FaqBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_hospital_access)])
 async def update_faq(hospital_id: str, faq_id: str, body: FaqBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -714,7 +824,7 @@ async def update_faq(hospital_id: str, faq_id: str, body: FaqBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_auth)])
+@router.delete("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_hospital_access)])
 async def delete_faq(hospital_id: str, faq_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -728,7 +838,7 @@ async def delete_faq(hospital_id: str, faq_id: str):
 
 # ── Call Logs ─────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/calls", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/calls", dependencies=[Depends(_require_hospital_access)])
 async def list_calls(hospital_id: str, limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -754,7 +864,7 @@ async def list_calls(hospital_id: str, limit: int = 50):
     ]
 
 
-@router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_hospital_access)])
 async def get_stats(hospital_id: str, days: int = 7):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -781,7 +891,7 @@ async def get_stats(hospital_id: str, days: int = 7):
 
 # ── Appointments ─────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/appointments", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/appointments", dependencies=[Depends(_require_hospital_access)])
 async def list_appointments(hospital_id: str, status: str = "", limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -834,7 +944,7 @@ class ApptStatusBody(BaseModel):
     status: str
 
 
-@router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_hospital_access)])
 async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptStatusBody):
     allowed = {"requested", "confirmed", "cancelled", "completed", "no_show"}
     if body.status not in allowed:
@@ -850,7 +960,7 @@ async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptSt
 
 @router.post(
     "/hospitals/{hospital_id}/appointments/{appt_id}/confirm-payment",
-    dependencies=[Depends(_require_auth)],
+    dependencies=[Depends(_require_hospital_access)],
 )
 async def confirm_payment(hospital_id: str, appt_id: str):
     """Staff confirms an offline payment: activates the queue token and notifies
@@ -898,7 +1008,7 @@ async def _hospital_name(hospital_id: str) -> str:
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_hospital_access)])
 async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -1015,7 +1125,7 @@ async def telephony_status(hospital_id: str = ""):
 
 # ── Cache Clear ───────────────────────────────────────────────────────────────
 
-@router.post("/hospitals/{hospital_id}/cache/clear", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/cache/clear", dependencies=[Depends(_require_hospital_access)])
 async def clear_cache(hospital_id: str):
     _invalidate(hospital_id)
     return {"status": "cache_cleared", "hospital_id": hospital_id}
@@ -1080,7 +1190,7 @@ class HospitalWizardIn(BaseModel):
     provision_plivo_number: bool = False
 
 
-@router.post("/hospitals/wizard", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/wizard", dependencies=[Depends(_require_super)])
 async def hospital_wizard(body: HospitalWizardIn):
     """
     One-shot hospital onboarding: creates the hospital and all its data,
@@ -1185,7 +1295,7 @@ async def hospital_wizard(body: HospitalWizardIn):
     }
 
 
-@router.post("/hospitals/{hospital_id}/provision-number", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/provision-number", dependencies=[Depends(_require_hospital_access)])
 async def provision_plivo_number(hospital_id: str):
     """Buy and configure a Plivo number for an existing hospital."""
     pool = await _db()
@@ -1229,7 +1339,7 @@ async def provision_plivo_number(hospital_id: str):
     }
 
 
-@router.get("/hospitals/{hospital_id}/setup-status", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/setup-status", dependencies=[Depends(_require_hospital_access)])
 async def setup_status(hospital_id: str):
     """Check how complete a hospital's setup is — useful after wizard onboarding."""
     pool = await _db()
@@ -1280,7 +1390,7 @@ async def setup_status(hospital_id: str):
 
 # ── SIP provisioning ─────────────────────────────────────────────────────────
 
-@router.post("/sip/setup", dependencies=[Depends(_require_auth)])
+@router.post("/sip/setup", dependencies=[Depends(_require_super)])
 async def sip_setup():
     """
     One-time SIP trunk provisioning. Run this once after first deployment.
@@ -1352,6 +1462,79 @@ async def sip_setup():
     }
 
 
+@router.post("/sip/exotel/setup", dependencies=[Depends(_require_super)])
+async def sip_exotel_setup():
+    """
+    One-time Exotel SIP trunk provisioning. Run after first deployment with Exotel.
+
+    Creates:
+    • One Exotel SIP outbound trunk in LiveKit (for reminder/confirmation calls)
+    • One SIP inbound trunk + dispatch rule per hospital with an Exotel number
+
+    Returns the outbound trunk ID. Set it as LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
+    in Render environment variables, then redeploy.
+
+    Requires LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET,
+    EXOTEL_API_KEY, EXOTEL_API_TOKEN, EXOTEL_PHONE_NUMBER.
+    """
+    missing = [
+        k for k in (
+            "LIVEKIT_URL", "LIVEKIT_API_KEY", "LIVEKIT_API_SECRET",
+            "EXOTEL_API_KEY", "EXOTEL_API_TOKEN", "EXOTEL_PHONE_NUMBER",
+        )
+        if not getattr(settings, k, "")
+    ]
+    if missing:
+        return {
+            "status": "not_configured",
+            "missing_env_vars": missing,
+            "message": "Set the listed environment variables, then call this endpoint again.",
+        }
+
+    try:
+        from src.services.livekit_sip import (
+            setup_sip_outbound_trunk_exotel,
+            setup_hospital_inbound_exotel,
+        )
+    except ImportError:
+        raise HTTPException(status_code=501, detail="livekit package not installed")
+
+    outbound_trunk_id = await setup_sip_outbound_trunk_exotel()
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hospitals = await conn.fetch(
+            "SELECT id, slug, exotel_number FROM hospitals "
+            "WHERE exotel_number IS NOT NULL AND exotel_number != '' "
+            "ORDER BY created_at"
+        )
+
+    inbound = []
+    for h in hospitals:
+        slug = h["slug"] or str(h["id"])
+        trunk_id, rule_id = await setup_hospital_inbound_exotel(slug, h["exotel_number"])
+        inbound.append({
+            "hospital_id": str(h["id"]),
+            "slug": slug,
+            "exotel_number": h["exotel_number"],
+            "sip_trunk_id": trunk_id,
+            "dispatch_rule_id": rule_id,
+            "ok": bool(trunk_id),
+        })
+
+    return {
+        "outbound_trunk_id": outbound_trunk_id,
+        "inbound_trunks": inbound,
+        "sip_host": settings.LIVEKIT_SIP_HOST or "(set LIVEKIT_SIP_HOST from LiveKit dashboard)",
+        "next_steps": [
+            f"1. Set LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID={outbound_trunk_id} in Render env vars",
+            "2. Configure each hospital's ExoPhone VoiceUrl to:",
+            f"   POST {settings.PUBLIC_BASE_URL}/api/v1/call/inbound/exotel/<EXOTEL_WEBHOOK_TOKEN>/<slug>",
+            "3. Redeploy both arteq-voice-agent and arteq-livekit-agent",
+        ],
+    }
+
+
 # ── HIS Integration ──────────────────────────────────────────────────────────
 
 class HisConfigBody(BaseModel):
@@ -1365,7 +1548,7 @@ class HisConfigBody(BaseModel):
     timeout_seconds: Optional[int] = 8
 
 
-@router.get("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_hospital_access)])
 async def get_his_config(hospital_id: str):
     """Return HIS config for the hospital. Auth value is masked for security."""
     pool = await _db()
@@ -1382,7 +1565,7 @@ async def get_his_config(hospital_id: str):
     return cfg or {"enabled": False}
 
 
-@router.put("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
+@router.put("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_hospital_access)])
 async def update_his_config(hospital_id: str, body: HisConfigBody):
     """Save HIS config. Auth value of '••••••••' preserves the existing stored secret."""
     pool = await _db()
@@ -1432,7 +1615,7 @@ async def update_his_config(hospital_id: str, body: HisConfigBody):
     return {"status": "updated"}
 
 
-@router.get("/hospitals/{hospital_id}/his-status", dependencies=[Depends(_require_auth)])
+@router.get("/hospitals/{hospital_id}/his-status", dependencies=[Depends(_require_hospital_access)])
 async def get_his_status(hospital_id: str):
     """Return HIS connectivity status (reachable / not configured / etc.)."""
     try:
@@ -1442,7 +1625,7 @@ async def get_his_status(hospital_id: str):
         return {"configured": False, "enabled": False, "reachable": False, "error": str(exc)}
 
 
-@router.post("/hospitals/{hospital_id}/his-config/test", dependencies=[Depends(_require_auth)])
+@router.post("/hospitals/{hospital_id}/his-config/test", dependencies=[Depends(_require_hospital_access)])
 async def test_his_connection(hospital_id: str):
     """Ping the HIS endpoint to verify connectivity."""
     try:
@@ -1588,7 +1771,7 @@ async def features_catalog():
     }
 
 
-@router.get("/tenants", dependencies=[Depends(_require_auth)])
+@router.get("/tenants", dependencies=[Depends(_require_super)])
 async def list_tenants_route(include_inactive: bool = True):
     from src.tenancy import registry
     tenants = await registry.list_tenants(include_inactive=include_inactive)
@@ -1599,7 +1782,7 @@ async def list_tenants_route(include_inactive: bool = True):
     return tenants
 
 
-@router.get("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+@router.get("/tenants/{slug}", dependencies=[Depends(_require_super)])
 async def get_tenant_route(slug: str):
     from src.tenancy import registry
     t = await registry.get_tenant(slug)
@@ -1611,7 +1794,7 @@ async def get_tenant_route(slug: str):
     return t
 
 
-@router.post("/tenants", dependencies=[Depends(_require_auth)])
+@router.post("/tenants", dependencies=[Depends(_require_super)])
 async def create_tenant_route(body: TenantOnboardIn):
     """Onboard a hospital/clinic: registry row (features auto from tier) +
     provision its own Supabase DB (run migrations) + seed hospital data."""
@@ -1668,7 +1851,7 @@ async def create_tenant_route(body: TenantOnboardIn):
     }
 
 
-@router.put("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+@router.put("/tenants/{slug}", dependencies=[Depends(_require_super)])
 async def update_tenant_route(slug: str, body: TenantUpdateIn):
     from src.tenancy import registry
     fields = {k: v for k, v in body.model_dump().items() if v is not None}
@@ -1681,7 +1864,7 @@ async def update_tenant_route(slug: str, body: TenantUpdateIn):
     return t
 
 
-@router.put("/tenants/{slug}/features", dependencies=[Depends(_require_auth)])
+@router.put("/tenants/{slug}/features", dependencies=[Depends(_require_super)])
 async def set_tenant_features_route(slug: str, body: FeaturesIn):
     from src.tenancy import registry
     t = await registry.set_features(slug, body.features)
@@ -1690,7 +1873,7 @@ async def set_tenant_features_route(slug: str, body: FeaturesIn):
     return {"slug": slug, "features": t["features"]}
 
 
-@router.delete("/tenants/{slug}", dependencies=[Depends(_require_auth)])
+@router.delete("/tenants/{slug}", dependencies=[Depends(_require_super)])
 async def deactivate_tenant_route(slug: str):
     from src.tenancy import registry
     ok = await registry.deactivate_tenant(slug)

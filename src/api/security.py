@@ -17,16 +17,18 @@ Dependencies provided:
 NOTE on scaling: the rate limiter is process-local. With multiple Uvicorn /
 Gunicorn workers each worker keeps its own counters, so the effective limit is
 roughly `max_per_minute * num_workers`. For a hard cross-worker / multi-host
-limit, back this with Redis (the project already ships src/cache/redis_client.py)
-and replace the in-memory `_WINDOWS` dict with INCR + EXPIRE on a key.
+limit, back it with Redis (INCR + EXPIRE on a key) — there is no Redis client
+in the project yet; `REDIS_URL` is currently only used by the live-event bus.
 """
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import hmac
 import threading
 import time
-from typing import Callable
+from typing import Callable, Mapping
 
 from fastapi import HTTPException, Request, status
 
@@ -177,4 +179,73 @@ def rate_limit(max_per_minute: int) -> Callable[[Request], None]:
     return _dependency
 
 
-__all__ = ["require_api_key", "rate_limit"]
+# ─────────────────────────────────────────────────────────────────────────────
+# Plivo webhook signature verification
+# ─────────────────────────────────────────────────────────────────────────────
+
+def verify_plivo_signature_v1(
+    auth_token: str, full_url: str, params: Mapping[str, str], signature: str
+) -> bool:
+    """Legacy X-Plivo-Signature: base64(HMAC-SHA1(url + sorted key+value pairs))."""
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+    expected = base64.b64encode(
+        hmac.new(auth_token.encode(), (full_url + sorted_str).encode(), hashlib.sha1).digest()
+    ).decode()
+    return hmac.compare_digest(signature, expected)
+
+
+def verify_plivo_signature_v2(
+    auth_token: str, full_url: str, nonce: str, signature: str
+) -> bool:
+    """X-Plivo-Signature-V2: base64(HMAC-SHA256(url + nonce))."""
+    expected = base64.b64encode(
+        hmac.new(auth_token.encode(), (full_url + nonce).encode(), hashlib.sha256).digest()
+    ).decode()
+    return hmac.compare_digest(signature, expected)
+
+
+def plivo_webhook_authentic(
+    request: Request, full_url: str, params: Mapping[str, str]
+) -> bool:
+    """True if the request carries a valid Plivo signature (V2 preferred, V1
+    accepted), False otherwise — including when no signature header is present.
+    Callers should skip the check entirely when PLIVO_AUTH_TOKEN is unset."""
+    token = getattr(settings, "PLIVO_AUTH_TOKEN", "") or ""
+    if not token:
+        return True
+    sig_v2 = request.headers.get("X-Plivo-Signature-V2", "")
+    nonce = request.headers.get("X-Plivo-Signature-V2-Nonce", "")
+    if sig_v2 and nonce:
+        return verify_plivo_signature_v2(token, full_url, nonce, sig_v2)
+    sig_v1 = request.headers.get("X-Plivo-Signature", "")
+    if sig_v1:
+        return verify_plivo_signature_v1(token, full_url, params, sig_v1)
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Exotel webhook token verification
+# ─────────────────────────────────────────────────────────────────────────────
+
+def exotel_webhook_authentic(request: Request, url_token: str) -> bool:
+    """Verify an Exotel inbound webhook.
+
+    Exotel does not send a cryptographic signature header. Security relies on
+    the webhook URL itself being a secret — `url_token` is a random token
+    embedded in the URL path that only Exotel (who was given the configured URL)
+    knows. If EXOTEL_WEBHOOK_TOKEN is blank the check is skipped (dev/test only).
+    """
+    expected = getattr(settings, "EXOTEL_WEBHOOK_TOKEN", "") or ""
+    if not expected:
+        return True
+    return hmac.compare_digest(url_token, expected)
+
+
+__all__ = [
+    "require_api_key",
+    "rate_limit",
+    "plivo_webhook_authentic",
+    "exotel_webhook_authentic",
+    "verify_plivo_signature_v1",
+    "verify_plivo_signature_v2",
+]

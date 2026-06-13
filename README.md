@@ -238,7 +238,7 @@ These tests verify:
 - `HospitalContext.hours_for_day()` logic
 - Slug derivation
 
-All 9 tests run in under 1 second, no DB or API keys required.
+All tests run in under a second, no DB or API keys required.
 
 ### Integration tests
 
@@ -748,6 +748,6 @@ dow = (now.weekday() + 1) % 7   # Python Mon(0) -> DB Mon(1)
 ## Contributing
 
 1. Branch off `main`: `git checkout -b feature/your-feature`
-2. `make test` before pushing — all 9 smoke tests must pass
+2. `make test` before pushing — all smoke tests must pass
 3. `make lint` to auto-fix style issues
 4. API keys must never appear in code or commits — `.env` only

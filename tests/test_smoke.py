@@ -14,12 +14,12 @@ def test_settings_import():
 
 def test_build_greeting_text():
     from src.ai.groq_brain import build_greeting_text
-    morning = build_greeting_text("Kairali Hospital", "Arya", 9)
-    assert "Arya" in morning
+    morning = build_greeting_text("Kairali Hospital", 9)
     assert "Kairali Hospital" in morning
+    assert "Arya" not in morning  # agent identifies by hospital, not a name
 
-    evening = build_greeting_text("Kairali Hospital", "Arya", 19)
-    assert "Arya" in evening
+    evening = build_greeting_text("Kairali Hospital", 19)
+    assert "Kairali Hospital" in evening
 
 
 def test_parse_slot_valid():
@@ -114,3 +114,171 @@ def test_features_normalize_over_tier():
     # Explicit override wins over tier default.
     overridden = feat.normalize({"campaigns": False}, "hospital")
     assert overridden["campaigns"] is False
+
+
+def test_plivo_signature_v1_and_v2():
+    """Both Plivo signature schemes verify correctly and reject tampering."""
+    import base64
+    import hashlib
+    import hmac
+    from src.api.security import verify_plivo_signature_v1, verify_plivo_signature_v2
+
+    token = "test-auth-token"
+    url = "https://example.com/api/v1/call/inbound/demo"
+
+    params = {"From": "+919999999999", "To": "+918888888888"}
+    sorted_str = "".join(f"{k}{v}" for k, v in sorted(params.items()))
+    sig_v1 = base64.b64encode(
+        hmac.new(token.encode(), (url + sorted_str).encode(), hashlib.sha1).digest()
+    ).decode()
+    assert verify_plivo_signature_v1(token, url, params, sig_v1) is True
+    assert verify_plivo_signature_v1(token, url, params, "forged") is False
+    assert verify_plivo_signature_v1("wrong-token", url, params, sig_v1) is False
+
+    nonce = "12345"
+    sig_v2 = base64.b64encode(
+        hmac.new(token.encode(), (url + nonce).encode(), hashlib.sha256).digest()
+    ).decode()
+    assert verify_plivo_signature_v2(token, url, nonce, sig_v2) is True
+    assert verify_plivo_signature_v2(token, url, "other-nonce", sig_v2) is False
+
+
+def test_admin_token_carries_super_admin_role():
+    """Legacy single-password tokens carry role=super_admin so RBAC-aware
+    routes (additions/*) authorise them coherently."""
+    from jose import jwt
+    from src.config.settings import settings
+    from dashboard.routes.admin_api import _create_token, _is_super
+
+    payload = jwt.decode(
+        _create_token(), settings.DASHBOARD_JWT_SECRET, algorithms=["HS256"]
+    )
+    assert payload["sub"] == "admin"
+    assert payload["role"] == "super_admin"
+    assert _is_super(payload) is True
+    assert _is_super({"sub": "viewer@x.com", "role": "viewer"}) is False
+
+
+def test_decode_token_accepts_both_shapes_rejects_garbage():
+    from datetime import datetime, timedelta, timezone
+    from fastapi import HTTPException
+    from fastapi.security import HTTPAuthorizationCredentials
+    from jose import jwt
+    from src.config.settings import settings
+    from dashboard.routes.admin_api import _decode_token
+
+    def creds(token):
+        return HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+    exp = datetime.now(timezone.utc) + timedelta(minutes=5)
+    rbac = jwt.encode(
+        {"sub": "staff@hosp.com", "role": "tenant_admin", "exp": exp},
+        settings.DASHBOARD_JWT_SECRET, algorithm="HS256",
+    )
+    assert _decode_token(creds(rbac))["role"] == "tenant_admin"
+
+    # Valid signature but neither legacy sub nor a known role -> 401
+    rogue = jwt.encode(
+        {"sub": "nobody", "exp": exp}, settings.DASHBOARD_JWT_SECRET, algorithm="HS256"
+    )
+    for bad in (rogue, "not-a-jwt"):
+        try:
+            _decode_token(creds(bad))
+            assert False, "expected HTTPException"
+        except HTTPException as e:
+            assert e.status_code == 401
+
+
+def test_suffix_logic_dative():
+    from utils.suffix_logic import choose_suffix, format_doctor
+    assert choose_suffix("Lakshmi") == "-യ്ക്ക്"     # ends in 'i' → vowel
+    assert choose_suffix("Ranjith") == "-ന്"           # ends in 'h' → consonant
+    assert choose_suffix("Anita") == "-യ്ക്ക്"        # ends in 'a' → vowel
+    assert choose_suffix("Suresh Kumar") == "-ന്"      # ends in 'r' → consonant
+    assert format_doctor("Lakshmi").startswith("Dr. Lakshmi")
+    assert "-യ്ക്ക്" in format_doctor("Lakshmi")
+
+
+def test_suffix_logic_possessive():
+    from utils.suffix_logic import choose_possessive, format_doctor_possessive
+    assert choose_possessive("Lakshmi") == "-യുടെ"
+    assert choose_possessive("Menon") == "-ന്റെ"
+    assert "-യുടെ" in format_doctor_possessive("Anitha")
+    assert "-ന്റെ" in format_doctor_possessive("Ranjith Menon")
+
+
+def test_detect_tts_lang_scripts():
+    from src.tts_normalize import detect_tts_lang
+    ml_text = "ഞാൻ doctor appointment വേണം"
+    assert detect_tts_lang(ml_text, "ml-IN") == "ml-IN"
+
+    ta_text = "நான் டாக்டரை பார்க்க வேண்டும்"
+    assert detect_tts_lang(ta_text, "ml-IN") == "ta-IN"
+
+    hi_text = "मुझे डॉक्टर से मिलना है"
+    assert detect_tts_lang(hi_text, "ml-IN") == "hi-IN"
+
+
+def test_detect_tts_lang_manglish_uses_fallback():
+    from src.tts_normalize import detect_tts_lang
+    manglish = "Doctor appointment veenam paranjalo"
+    assert detect_tts_lang(manglish, "ml-IN") == "ml-IN"
+    assert detect_tts_lang(manglish, "en-IN") == "en-IN"
+
+
+def test_normalize_for_tts_exact_match():
+    from src.tts_normalize import normalize_for_tts
+    result = normalize_for_tts("ഡോക്ടർ ഉണ്ട്")
+    assert "Doctor" in result
+    assert "ഡോക്ടർ" not in result
+
+    result = normalize_for_tts("appointment ബുക്ക് ചെയ്യണം")
+    assert "appointment" in result
+
+
+def test_normalize_for_tts_stem_absorption():
+    from src.tts_normalize import normalize_for_tts
+    # "അപ്പോയിന്റ്മെന്റിന്" = "appointment" + dative suffix
+    result = normalize_for_tts("അപ്പോയിന്റ്മെന്റിന് time എന്ത്?")
+    assert "appointment" in result
+
+
+def test_greeting_language_matrix():
+    from src.ai.groq_brain import build_greeting_text, _GREETING_TEMPLATES
+    hosp = "Test Hospital"
+    hour = 10
+
+    # Every templated language names the hospital and never a personal agent name.
+    for lang in list(_GREETING_TEMPLATES) + ["od-IN", "mr-IN", "manglish"]:
+        text = build_greeting_text(hosp, hour, lang=lang)
+        assert hosp in text, f"hosp name missing for lang={lang}"
+        assert "Arya" not in text, f"agent name leaked for lang={lang}"
+
+    # Malayalam fallback: uses time-of-day opener, hospital only
+    ml = build_greeting_text(hosp, 9, lang="ml-IN")
+    assert "Good morning" in ml or "Good" in ml
+    assert hosp in ml
+
+
+def test_voice_for_lang_maps_to_real_v3_speakers():
+    from src.tts_normalize import voice_for_lang, LANG_VOICE, BULBUL_V3_SPEAKERS
+    # Known languages get a dedicated native-fit voice; unknown falls back.
+    assert voice_for_lang("ml-IN", "priya") == "kavitha"
+    assert voice_for_lang("ta-IN", "priya") == "shruti"
+    assert voice_for_lang("zz-ZZ", "priya") == "priya"
+    # Every mapped voice must be a real Bulbul v3 speaker (else Sarvam 400s).
+    for code, voice in LANG_VOICE.items():
+        assert voice in BULBUL_V3_SPEAKERS, f"{voice} ({code}) not a v3 speaker"
+
+
+def test_mark_intent_dedupes():
+    from src.telephony.livekit_tools import _mark_intent
+
+    class Ctx:
+        userdata = {}
+
+    ctx = Ctx()
+    _mark_intent(ctx, "book_appointment")
+    _mark_intent(ctx, "book_appointment")
+    _mark_intent(ctx, "emergency")
+    assert ctx.userdata["intents"] == ["book_appointment", "emergency"]
