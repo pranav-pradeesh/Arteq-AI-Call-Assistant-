@@ -78,6 +78,27 @@ def voice_for_lang(lang: str, default: str) -> str:
     return LANG_VOICE.get(lang, default)
 
 
+# Languages that use a non-Latin script natively — for these we prefer name_ml
+# (native script) over the romanized Latin name so TTS phonetics are correct.
+_INDIC_LANGS = {
+    "ml-IN", "hi-IN", "ta-IN", "te-IN", "kn-IN",
+    "bn-IN", "gu-IN", "pa-IN", "od-IN", "mr-IN",
+}
+
+
+def name_for_lang(name: str, name_ml: str, lang: str) -> str:
+    """Return the native-script hospital name when TTS lang is Indic, else Latin.
+
+    Bulbul mispronounces romanized Indic words (e.g. "Kirali") when the TTS
+    target is an Indic language because the phoneme inventory is wrong for Latin
+    chars. Passing the native-script name (name_ml) fixes pronunciation.
+    Falls back to `name` when name_ml is empty or lang is Latin/Manglish.
+    """
+    if lang in _INDIC_LANGS and name_ml:
+        return name_ml
+    return name
+
+
 _TTS_EN_MAP = {
     "ഡോക്ടര്‍": "Doctor", "ഡോക്ടർ": "Doctor", "ഡോക്ടര്": "Doctor", "ഡോ.": "Doctor",
     "അപ്പോയിന്റ്മെന്റ്": "appointment", "അപ്പോയിന്റ്മെൻറ്": "appointment",

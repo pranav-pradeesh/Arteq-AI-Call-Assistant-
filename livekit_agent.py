@@ -147,36 +147,101 @@ def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
 
 class _BulbulV3ChunkedStream(_SarvamChunkedStream):
     async def _run(self, output_emitter) -> None:
-        # Audio cache: identical text+voice → identical audio. The greeting is
-        # synthesized on every call, so caching it (O(1) lookup) removes a full
-        # Bulbul round-trip from the first thing the caller hears. LRU + 24h TTL
-        # keep the hottest phrases (greeting, confirmations) warm; dynamic
-        # replies churn out harmlessly at the cold end.
+        import hashlib
         from src.cache.store import tts_cache, TTS_CACHE_TTL
-        # Detect reply language per-utterance so one agent speaks every caller's
-        # language (the LLM replies in their language; we match the voice to it).
+
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)
-        # Pick the most native-sounding v3 voice for the detected language so each
-        # language is spoken by its best-fit speaker (falls back to the configured
-        # default). Speaker is part of the cache key so voices don't cross-pollute.
         speaker = _voice_for_lang(lang, self._opts.speaker)
-        cache_key = _tts_cache_key(self._opts, text, lang, speaker)
-        cached = tts_cache.get(cache_key)
-        if cached is not None:
+
+        # Two separate cache namespaces: WebSocket streaming produces MP3 chunks;
+        # REST produces WAV. Mixing them would require tracking format per-entry,
+        # so they use distinct key prefixes. WS cache value: {"mime":…, "chunks":[…]}.
+        # REST cache value: [wav_bytes, …] (legacy list format).
+        ws_key = "tts:ws:" + hashlib.md5(
+            f"bulbul:v3|{lang}|{speaker}|{text}".encode("utf-8")
+        ).hexdigest()
+        rest_key = _tts_cache_key(self._opts, text, lang, speaker)
+
+        ws_cached = tts_cache.get(ws_key)
+        if ws_cached is not None:
+            output_emitter.initialize(
+                request_id="cache",
+                sample_rate=self._tts.sample_rate,
+                num_channels=self._tts.num_channels,
+                mime_type=ws_cached["mime"],
+            )
+            for chunk in ws_cached["chunks"]:
+                output_emitter.push(chunk)
+            return
+
+        rest_cached = tts_cache.get(rest_key)
+        if rest_cached is not None:
             output_emitter.initialize(
                 request_id="cache",
                 sample_rate=self._tts.sample_rate,
                 num_channels=self._tts.num_channels,
                 mime_type="audio/wav",
             )
-            for chunk in cached:
+            for chunk in rest_cached:
                 output_emitter.push(chunk)
             return
 
-        # v3-only payload: pitch, loudness and enable_preprocessing are all
-        # rejected by bulbul:v3, so none are sent. pace + speech_sample_rate are
-        # the only voice knobs v3 accepts here.
+        try:
+            await self._run_ws(output_emitter, text, lang, speaker, ws_key)
+        except Exception as exc:
+            _sarvam_log.warning("TTS WebSocket failed (%s), falling back to REST", exc)
+            await self._run_rest(output_emitter, text, lang, speaker, rest_key)
+
+    async def _run_ws(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """WebSocket streaming TTS — first audio chunk plays while Bulbul generates the rest."""
+        from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        if self._tts._ws_client is None:
+            self._tts._ws_client = AsyncSarvamAI(api_subscription_key=self._opts.api_key)
+
+        chunks: list[bytes] = []
+        initialized = False
+        mime = "audio/mpeg"
+
+        async with self._tts._ws_client.text_to_speech_streaming.connect(
+            model="bulbul:v3",
+            send_completion_event=True,
+        ) as ws:
+            await ws.configure(target_language_code=lang, speaker=speaker)
+            await ws.convert(text)
+            await ws.flush()
+
+            async for message in ws:
+                if isinstance(message, AudioOutput):
+                    chunk = _b64.b64decode(message.data.audio)
+                    if not initialized:
+                        output_emitter.initialize(
+                            request_id="ws-stream",
+                            sample_rate=self._tts.sample_rate,
+                            num_channels=self._tts.num_channels,
+                            mime_type=mime,
+                        )
+                        initialized = True
+                    output_emitter.push(chunk)
+                    chunks.append(chunk)
+                elif isinstance(message, EventResponse):
+                    if getattr(message.data, "event_type", "") == "final":
+                        break
+
+        if not initialized:
+            raise RuntimeError("WebSocket TTS: no audio chunks received")
+        tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
+
+    async def _run_rest(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """REST TTS fallback — waits for full synthesis before any audio plays."""
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
         payload = {
             "target_language_code": lang,
             "text": text,
@@ -201,7 +266,7 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             ) as res:
                 if res.status != 200:
                     error_text = await res.text()
-                    _sarvam_log.error(f"Sarvam TTS API error: {res.status} - {error_text}")
+                    _sarvam_log.error("Sarvam TTS REST error: %s - %s", res.status, error_text)
                     raise _APIStatusErr(
                         message=f"Sarvam TTS API Error: {error_text}", status_code=res.status
                     )
@@ -267,6 +332,7 @@ class BulbulV3TTS(_SarvamTTS):
             speech_sample_rate=speech_sample_rate,
             **kwargs,
         )
+        self._ws_client = None  # AsyncSarvamAI, lazily created on first WS TTS request
 
     def synthesize(self, text: str, *, conn_options=None):
         from livekit.agents import DEFAULT_API_CONNECT_OPTIONS
@@ -296,6 +362,25 @@ _WATCHDOG_FAREWELLS = {
     "mr-IN":      "क्षमस्व, कमाल कॉल वेळ संपली. गरज असल्यास पुन्हा कॉल करा. धन्यवाद!",
     "en-IN":      "Sorry, we've reached the maximum call time. Please call back if you need anything else. Thank you, goodbye!",
 }
+
+# ── Ambient background audio ──────────────────────────────────────────────────
+# Published as a second LocalAudioTrack from the agent participant. LiveKit's
+# SIP gateway mixes all tracks from a participant before forwarding to PSTN,
+# so the caller hears a constant low-level ambient noise that makes the AI feel
+# like a real hospital reception rather than a silent VoIP line.
+_AMBIENT_SAMPLE_RATE = 16000
+_AMBIENT_FRAME_SAMPLES = 320  # 20 ms at 16 kHz — standard WebRTC frame size
+
+# Pre-generate 5 s of softened white noise (fixed seed → deterministic across
+# worker restarts). A 7-sample boxcar smooths out the harshest high-frequency
+# content so it sounds closer to HVAC ventilation than raw hiss.
+# Amplitude 0.06 (6 % of int16 max) keeps it well below conversational speech.
+_rng = np.random.default_rng(seed=0)
+_raw = _rng.standard_normal(5 * _AMBIENT_SAMPLE_RATE + 7).astype(np.float64)
+_raw = np.convolve(_raw, np.ones(7) / 7, mode="valid")
+_raw /= np.abs(_raw).max()
+_AMBIENT_BUF = (_raw * 0.06 * 32767).astype(np.int16)
+del _raw, _rng
 
 _DTMF = {
     "1": "OPD timing please",
@@ -355,7 +440,7 @@ def _build_llm(premium: bool = True):
             # sound human without letting llama-3.3 drift into emitting its
             # <function=...> tool syntax as spoken text.
             model=model,
-            max_completion_tokens=512,
+            max_completion_tokens=200,
             temperature=0.5,
         )
 
@@ -510,7 +595,9 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
             hosp_block = _build_hospital_summary(hospital_ctx)
         except Exception:
             hosp_block = f"Hospital: {hospital_ctx.name}"
-        hosp_name = hospital_ctx.name
+        from src.tts_normalize import name_for_lang
+        _lang = getattr(hospital_ctx, "agent_language", "ml-IN") or "ml-IN"
+        hosp_name = name_for_lang(hospital_ctx.name, hospital_ctx.name_ml or "", _lang)
         dow = (now.weekday() + 1) % 7
         hours = hospital_ctx.hours_for_day(dow)
         if hours:
@@ -568,7 +655,22 @@ SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them
 
 MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?". Verbs take no gender suffix: "വന്നു" not "വന്നാൾ". Speak times as: "രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി" — never "10 AM" or "10:00 AM". For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
+GRAMMAR (apply per reply language — speak like a real native, not a translation):
+Hindi/Marathi: "आप"/"तुम्ही" (formal). Verb agrees with subject gender; use masculine default if gender unknown. Times: "सुबह दस बजे"/"सकाळी दहा वाजता". Spoken questions tag "ना?" or end with "क्या?".
+Tamil: "நீங்கள்" (formal). Questions end "-ஆ?". Time: "காலை 10 மணி". Spoken contraction: "வாங்க" not "வாரும்". Never "நீர்" (archaic).
+Telugu: "మీరు" (formal). Questions end "-ఆ?". Time: "ఉదయం 10 గంటలు". Use everyday speech forms, not literary Telugu.
+Kannada: "ನೀವು" (formal). Questions end "-ಆ?". Time: "ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆ". Use "-ರಿ" honorific suffix on verbs.
+Bengali: "আপনি" (formal). Questions add "কি?" at end. Time: "সকাল দশটা". Verb endings: "-চ্ছেন" (progressive), "-লেন" (past).
+Gujarati: "આપ" (formal). Time: "સવારે દસ". Questions: "-ને?" suffix.
+Punjabi: "ਆਪ" (formal). Time: "ਸਵੇਰੇ ਦਸ ਵਜੇ". Respectful verb suffix "-ਜੀ".
+Odia: "ଆପଣ" (formal). Time: "ସକାଳ ୧୦ ଟା". Questions end "-କି?".
+
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
+
+NAME COLLECTION: When asking for the caller's name for the first time, use these exact phrasings — natural, warm, not robotic:
+Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?" | Hindi → "आपका नाम बताइए?" | Tamil → "உங்கள் பெயர் சொல்லுங்கள்?" | Telugu → "మీ పేరు చెప్పండి?" | Kannada → "ನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ?" | Bengali → "আপনার নাম বলুন?" | English → "Could I get your name?"
+
+CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call.
 
 PUNCTUATION: Use full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — the voice uses it for intonation. Do NOT repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase.
 
@@ -607,7 +709,15 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
     # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
     # cache, every subsequent call is an instant cache hit.
-    hosp_name = (hospital_ctx.name if hospital_ctx else "the hospital")
+    from src.tts_normalize import name_for_lang
+    # Outbound calls are always English-language, so always use the Latin name.
+    # Inbound uses the native-script name for Indic langs so TTS phonetics are correct.
+    if hospital_ctx:
+        hosp_name_en = hospital_ctx.name
+        hosp_name = (hosp_name_en if outbound_context
+                     else name_for_lang(hospital_ctx.name, hospital_ctx.name_ml or "", agent_language))
+    else:
+        hosp_name = hosp_name_en = "the hospital"
 
     if outbound_context:
         call_type = outbound_context.get("call_type", "")
@@ -912,6 +1022,66 @@ class _LatencyMeter:
 # Agent entrypoint
 # ==============================================================================
 
+async def _run_ambient_audio(room: rtc.Room) -> None:
+    """Publish low-level background noise as a second audio track for the call.
+
+    The LiveKit SIP gateway mixes all tracks from a participant before sending
+    to PSTN, so this ambient sound is heard by the caller throughout. Task
+    cancellation is the shutdown signal — finally block unpublishes cleanly.
+    """
+    source = rtc.AudioSource(_AMBIENT_SAMPLE_RATE, 1)
+    track = rtc.LocalAudioTrack.create_audio_track("arteq-ambient", source)
+    await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
+
+    buf, n, pos = _AMBIENT_BUF, len(_AMBIENT_BUF), 0
+    frame_s = _AMBIENT_FRAME_SAMPLES / _AMBIENT_SAMPLE_RATE
+    try:
+        while True:
+            end = pos + _AMBIENT_FRAME_SAMPLES
+            chunk = buf[pos:end] if end <= n else np.concatenate([buf[pos:], buf[: end - n]])
+            pos = end % n
+            await source.capture_frame(rtc.AudioFrame(
+                data=chunk.tobytes(),
+                sample_rate=_AMBIENT_SAMPLE_RATE,
+                num_channels=1,
+                samples_per_channel=_AMBIENT_FRAME_SAMPLES,
+            ))
+            await asyncio.sleep(frame_s)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        try:
+            await room.local_participant.unpublish_track(track.sid)
+        except Exception:
+            pass
+
+
+async def _prewarm_static_phrases(lang: str) -> None:
+    """Cache TTS audio for deterministic per-language strings that will be spoken.
+
+    LLM replies are too variable to cache. Only hardcoded strings (watchdog
+    farewell, fallback error message) reliably match their cache key at runtime.
+    """
+    from src.ai.groq_brain import _FALLBACK_MESSAGES
+    phrases = [
+        _WATCHDOG_FAREWELLS.get(lang, _WATCHDOG_FAREWELLS["en-IN"]),
+        _FALLBACK_MESSAGES.get(lang, _FALLBACK_MESSAGES["en-IN"]),
+    ]
+    tts = BulbulV3TTS(
+        api_key=os.getenv("SARVAM_API_KEY", ""),
+        target_language_code=lang,
+        speaker="priya",
+    )
+    for phrase in phrases:
+        try:
+            stream = tts.synthesize(phrase)
+            async for _ in stream:
+                pass
+            await stream.aclose()
+        except Exception:
+            pass
+
+
 async def _prewarm_greeting_audio(text: str, lang: str) -> None:
     """Synthesize the greeting once up front so its audio is in the TTS cache
     before the call's on_enter fires — removes the first-call Bulbul round-trip
@@ -992,6 +1162,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
+    asyncio.create_task(_prewarm_static_phrases(agent_language))
 
     # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
@@ -1074,7 +1245,11 @@ async def entrypoint(ctx: JobContext) -> None:
     session.on("metrics_collected", meter.on_metrics)
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
+    _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
+
     async def _on_end_async(_event=None):
+        if _ambient_task:
+            _ambient_task.cancel()
         try:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0
@@ -1185,6 +1360,11 @@ async def entrypoint(ctx: JobContext) -> None:
             noise_cancellation=noise_cancellation.BVCTelephony(),
         ),
     )
+
+    # Start ambient background noise loop — must be after session.start so the
+    # local_participant is fully connected. _on_end_async reads this variable
+    # by name from the enclosing scope (Python late-binding) and cancels it.
+    _ambient_task = asyncio.create_task(_run_ambient_audio(ctx.room))
 
     # ── Live monitoring: announce the call to dashboard subscribers ───────────
     # (additions/routes/live_ws.py forwards these over the /admin/ws/live
