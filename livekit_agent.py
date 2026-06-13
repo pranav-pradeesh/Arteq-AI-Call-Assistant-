@@ -510,7 +510,9 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
             hosp_block = _build_hospital_summary(hospital_ctx)
         except Exception:
             hosp_block = f"Hospital: {hospital_ctx.name}"
-        hosp_name = hospital_ctx.name
+        from src.tts_normalize import name_for_lang
+        _lang = getattr(hospital_ctx, "agent_language", "ml-IN") or "ml-IN"
+        hosp_name = name_for_lang(hospital_ctx.name, hospital_ctx.name_ml or "", _lang)
         dow = (now.weekday() + 1) % 7
         hours = hospital_ctx.hours_for_day(dow)
         if hours:
@@ -607,7 +609,15 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
     # Fixed text per call type. Inbound uses a time-of-day Malayalam greeting so the
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
     # cache, every subsequent call is an instant cache hit.
-    hosp_name = (hospital_ctx.name if hospital_ctx else "the hospital")
+    from src.tts_normalize import name_for_lang
+    # Outbound calls are always English-language, so always use the Latin name.
+    # Inbound uses the native-script name for Indic langs so TTS phonetics are correct.
+    if hospital_ctx:
+        hosp_name_en = hospital_ctx.name
+        hosp_name = (hosp_name_en if outbound_context
+                     else name_for_lang(hospital_ctx.name, hospital_ctx.name_ml or "", agent_language))
+    else:
+        hosp_name = hosp_name_en = "the hospital"
 
     if outbound_context:
         call_type = outbound_context.get("call_type", "")
