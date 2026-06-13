@@ -300,14 +300,16 @@ _DTMF = {
 }
 
 
-class _GroqLLM(openai.LLM):
-    """Groq LLM that injects anti-repetition penalties on every turn.
+class _PenalizedLLM(openai.LLM):
+    """OpenAI-compatible LLM that injects anti-repetition penalties on every turn.
 
     The voice pipeline calls ``chat()`` internally, so there's no per-call hook to
     pass penalties through — we set them here. frequency_penalty curbs the same
     word recurring within a reply; presence_penalty pushes the model to introduce
-    new wording instead of echoing the caller's phrasing back. Both are Groq/OpenAI
-    chat params; Sarvam's leg stays plain (it may reject them).
+    new wording instead of echoing the caller's phrasing back. Both are standard
+    OpenAI chat params, accepted by Groq/Cerebras/Together/Fireworks/OpenAI; if a
+    host rejects them the FallbackAdapter just moves to the next leg. Sarvam's leg
+    stays plain (it may reject them).
     """
 
     def chat(self, **kwargs):
@@ -319,47 +321,78 @@ class _GroqLLM(openai.LLM):
         return super().chat(**kwargs)
 
 
+# OpenAI-compatible LLM hosts. Each is a Bearer-auth endpoint; a leg is added to
+# the fallback chain only if its API key is set. All serve a llama-3.3-70b-class
+# model by default (the 8b/mini tier is too weak at Malayalam + multi-rule prompt
+# adherence — it parroted callers and transliterated English despite the SCRIPT
+# rule, which is why 70b is the quality floor). Default models are overridable per
+# host via <PROVIDER>_MODEL so cost/quality can be dialled without code changes.
+_LLM_HOSTS = {
+    "groq":      "https://api.groq.com/openai/v1",
+    "cerebras":  "https://api.cerebras.ai/v1",
+    "together":  "https://api.together.xyz/v1",
+    "fireworks": "https://api.fireworks.ai/inference/v1",
+    "openai":    "https://api.openai.com/v1",
+}
+
+
 def _build_llm(premium: bool = True):
-    """Resilient LLM with a 3-leg fallback chain: 70b → 8b → Sarvam.
+    """Resilient multi-provider LLM chain.
 
-    70b is the primary for EVERY tenant: the 8b model is too weak at Malayalam +
-    multi-rule prompt adherence — on live calls it parroted the caller's question
-    back instead of acting on it and transliterated English words ("ഇയേസ്" for
-    "Yes") despite the SCRIPT rule. 70b follows both reliably and is free on Groq.
+    Tries each OpenAI-compatible host named in LLM_PROVIDER_ORDER that has an API
+    key set, in that order, falling back to the next leg on error / rate-limit.
+    Sarvam (a separate Indian-language provider with its own quota and custom
+    `api-subscription-key` auth) is always appended last, so Arya never goes
+    silent even if every Bearer host is down or capped — this is what makes a
+    single-vendor outage (e.g. Groq's dev plan being pulled) non-fatal.
 
-    The chain matters because Groq's free tier enforces a *per-model* daily token
-    cap (TPD, 100k): when 70b's cap is exhausted it 429s every turn. Each model
-    has its OWN bucket, so llama-3.1-8b-instant keeps serving — and it's
-    sub-second, vs Sarvam's ~12s. So 8b is the fast middle leg; Sarvam (Indian-
-    language, fully separate provider/quota) is the last resort that guarantees
-    Arya never goes silent even if all of Groq is down.
-
-    Sarvam's OpenAI-compatible endpoint authenticates with an
-    `api-subscription-key` header, not Bearer, so it needs a custom client.
+    The chain is fully config-driven: add a key for any host and it joins; set
+    <PROVIDER>_MODEL to pick the model (and thus the cost/quality point). `premium`
+    is kept for signature compatibility.
     """
-    def _groq(model: str) -> openai.LLM:
-        return _GroqLLM(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.getenv("GROQ_API_KEY", ""),
-            # Malayalam script is token-dense, so 200 truncates a 2-sentence
-            # reply mid-word; 512 fits a full reply. 0.5 adds enough variation to
-            # sound human without letting llama-3.3 drift into emitting its
-            # <function=...> tool syntax as spoken text.
-            model=model,
-            max_completion_tokens=512,
-            temperature=0.5,
-        )
+    from src.config.settings import settings
 
-    # premium retained for signature compat; both tiers now lead with 70b for
-    # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
-    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")]
+    # Per-host model overrides; fall back to a 70b-class default per host.
+    _models = {
+        "groq":      settings.GROQ_MODEL,
+        "cerebras":  settings.CEREBRAS_MODEL,
+        "together":  settings.TOGETHER_MODEL,
+        "fireworks": settings.FIREWORKS_MODEL,
+        "openai":    settings.OPENAI_MODEL,
+    }
+    _keys = {
+        "groq":      settings.GROQ_API_KEY,
+        "cerebras":  settings.CEREBRAS_API_KEY,
+        "together":  settings.TOGETHER_API_KEY,
+        "fireworks": settings.FIREWORKS_API_KEY,
+        "openai":    settings.OPENAI_API_KEY,
+    }
 
-    sarvam_key = os.getenv("SARVAM_API_KEY", "")
+    chain: list = []
+    seen: set[str] = set()
+    order = [p.strip().lower() for p in settings.LLM_PROVIDER_ORDER.split(",") if p.strip()]
+    for pid in order:
+        if pid in seen or pid not in _LLM_HOSTS or not _keys.get(pid):
+            continue
+        seen.add(pid)
+        chain.append(_PenalizedLLM(
+            base_url=_LLM_HOSTS[pid],
+            api_key=_keys[pid],
+            model=_models[pid],
+            # Malayalam script is token-dense; 512 fits a full 2-sentence reply
+            # without truncating mid-word. temperature adds human variation
+            # without letting the model emit <function=...> syntax as speech.
+            max_completion_tokens=settings.LLM_MAX_TOKENS,
+            temperature=settings.LLM_TEMPERATURE,
+        ))
+
+    # Sarvam — always the last resort (custom auth header, ~12s latency).
+    sarvam_key = settings.SARVAM_API_KEY
     if sarvam_key:
         chain.append(openai.LLM(
             # sarvam-m was deprecated by Sarvam (returns 400). sarvam-30b is the
             # current Indian-language chat model — separate provider, so it keeps
-            # answering when all Groq legs are capped. ~12s latency, hence last.
+            # answering when every Bearer host is capped.
             model="sarvam-30b",
             temperature=0.4,
             client=_AsyncOpenAI(
@@ -369,6 +402,11 @@ def _build_llm(premium: bool = True):
             ),
         ))
 
+    if not chain:
+        raise RuntimeError(
+            "No LLM provider configured. Set an API key for at least one of "
+            "GROQ / CEREBRAS / TOGETHER / FIREWORKS / OPENAI (or SARVAM)."
+        )
     if len(chain) == 1:
         return chain[0]
     return agents_llm.FallbackAdapter(chain)

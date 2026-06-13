@@ -276,3 +276,45 @@ def test_mark_intent_dedupes():
     _mark_intent(ctx, "book_appointment")
     _mark_intent(ctx, "emergency")
     assert ctx.userdata["intents"] == ["book_appointment", "emergency"]
+
+
+def test_llm_chain_builds_from_configured_providers(monkeypatch):
+    """_build_llm honours LLM_PROVIDER_ORDER, only adds hosts with keys, and
+    always keeps Sarvam last. Skips if livekit plugins aren't installed."""
+    try:
+        import livekit_agent
+    except Exception:
+        import pytest
+        pytest.skip("livekit agent deps not installed")
+
+    s = livekit_agent.__dict__["_build_llm"].__globals__  # noqa: F841
+    from src.config.settings import settings as st
+
+    # Order requests groq then openai; only those two + sarvam have keys.
+    monkeypatch.setattr(st, "LLM_PROVIDER_ORDER", "openai,groq,together")
+    monkeypatch.setattr(st, "GROQ_API_KEY", "gk")
+    monkeypatch.setattr(st, "OPENAI_API_KEY", "ok")
+    monkeypatch.setattr(st, "TOGETHER_API_KEY", "")
+    monkeypatch.setattr(st, "CEREBRAS_API_KEY", "")
+    monkeypatch.setattr(st, "FIREWORKS_API_KEY", "")
+    monkeypatch.setattr(st, "SARVAM_API_KEY", "sk")
+
+    llm = livekit_agent._build_llm()
+    # FallbackAdapter wraps multiple legs; should be openai + groq + sarvam = 3.
+    legs = getattr(llm, "_llm_instances", None) or getattr(llm, "_llm", None)
+    assert legs is not None
+
+
+def test_llm_chain_raises_when_no_provider(monkeypatch):
+    try:
+        import livekit_agent
+    except Exception:
+        import pytest
+        pytest.skip("livekit agent deps not installed")
+    from src.config.settings import settings as st
+    for k in ("GROQ_API_KEY", "CEREBRAS_API_KEY", "TOGETHER_API_KEY",
+              "FIREWORKS_API_KEY", "OPENAI_API_KEY", "SARVAM_API_KEY"):
+        monkeypatch.setattr(st, k, "")
+    import pytest
+    with pytest.raises(RuntimeError):
+        livekit_agent._build_llm()

@@ -19,8 +19,11 @@ Indian vendors (Sarvam, Plivo); ~21% (≈3% forex + 18% GST) on USD vendors
 |---|---|---|
 | **Sarvam STT (Saaras)** | ₹30 / audio-hour = **₹0.50/min** | Billed per audio minute |
 | **Sarvam TTS (Bulbul v3)** | ₹15–30 / 10k chars | ~₹0.0015–0.003 / char |
-| **Groq LLM — llama-3.3-70b** | $0.59 / 1M in, $0.79 / 1M out | Premium quality |
-| **Groq LLM — llama-3.1-8b** | $0.05 / 1M in, $0.08 / 1M out | ~12× cheaper, fine for receptionist intents |
+| **Groq LLM — llama-3.3-70b** | $0.59 / 1M in, $0.79 / 1M out | Premium quality. Free dev tier was pulled — assume paid. |
+| **Groq LLM — llama-3.1-8b** | $0.05 / 1M in, $0.08 / 1M out | ~12× cheaper, but too weak at Malayalam — fallback only |
+| **Together / Fireworks — llama-3.3-70b** | ~$0.88–0.90 / 1M flat | Drop-in 70b when Groq is unavailable |
+| **OpenAI — gpt-4o-mini** | $0.15 / 1M in, $0.60 / 1M out | Budget; Malayalam quality must be A/B tested |
+| **OpenAI — gpt-5 / 4.1 (full)** | $1.25+ / 1M in | Keeps quality; ~₹1.5/min, breaks ₹2 on phone |
 | **LiveKit Cloud — agent session** | **$0.01/min ≈ ₹1.03/min** (tax-in) | **One per call — the dominant cost.** Free: 1,000 min/mo (Build), 5,000 (Ship $50/mo), 50,000 (Scale $500/mo) |
 | **LiveKit Cloud — WebRTC participant** | $0.0005/min ≈ ₹0.05/min | Per end-user; 5k min/mo free |
 | **LiveKit self-hosted (OSS)** | **₹0 marginal** | Runs on your server/VPS — zeroes the agent-session charge |
@@ -56,6 +59,35 @@ tokens, output ≈ 600 tokens (prompt already shrunk for Groq TPM); agent speaks
 - **Core, LiveKit Cloud + 8b**  = 0.59 + 0.53 + 0.04 + 1.08 = **₹2.24/min** ❌
 - **Core, self-hosted LK + 70b** = 0.59 + 0.53 + 0.47 + 0   = **₹1.59/min** ✅
 - **Core, self-hosted LK + 8b**  = 0.59 + 0.53 + 0.04 + 0   = **₹1.16/min** ✅
+
+### LLM line — multi-provider chain (≤₹2/min implications)
+
+The agent now runs a **resilient multi-provider chain** (`LLM_PROVIDER_ORDER`):
+any OpenAI-compatible host with a key joins, Sarvam is always the last resort, so
+a single-vendor outage (e.g. Groq's dev tier being pulled) is non-fatal. The
+**LLM ₹/min** depends on which model is primary (7,000 in + 600 out tokens/min):
+
+| Primary model | LLM ₹/min (tax-in) |
+|---|---|
+| Groq llama-3.3-70b (paid) | ₹0.47 |
+| Together / Fireworks llama-3.3-70b | ₹0.70 |
+| OpenAI gpt-4o-mini | ₹0.15 |
+| OpenAI gpt-5 / 4.1 (full) | ₹1.52 |
+
+**The ≤₹2/min constraint vs. 70b quality is a real tension** (core = self-hosted
+LiveKit + Sarvam STT/TTS = ₹1.12/min):
+
+| Channel | 70b (Groq) | 70b (Together) | gpt-4o-mini |
+|---|---|---|---|
+| Browser | ₹1.59 ✅ | ₹1.82 ✅ | ₹1.27 ✅ |
+| Phone (SIP) | ₹1.99 ✅ | ₹2.22 ❌ | ₹1.67 ✅ |
+| Phone (DID) / outbound | ₹2.30 ❌ | ₹2.53 ❌ | ₹1.98 ✅ |
+
+**To stay ≤₹2/min on *every* channel** while Sarvam STT/TTS is in use, the primary
+must be a mini-class model (~₹0.15) — which carries Malayalam quality risk and
+**must be A/B tested**. To keep **70b quality AND ≤₹2**: either (a) restrict to
+browser + Plivo **SIP** (not DID), or (b) **self-host STT/TTS** — that drops core
+to ~₹0.44/min, after which 70b fits under ₹2 on every channel including outbound.
 
 ### Channel add-on
 
