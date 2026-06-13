@@ -307,7 +307,7 @@ class _PenalizedLLM(openai.LLM):
     pass penalties through — we set them here. frequency_penalty curbs the same
     word recurring within a reply; presence_penalty pushes the model to introduce
     new wording instead of echoing the caller's phrasing back. Both are standard
-    OpenAI chat params, accepted by Groq/Cerebras/Together/Fireworks/OpenAI; if a
+    OpenAI chat params, accepted by Groq/Cerebras/Fireworks/OpenAI; if a
     host rejects them the FallbackAdapter just moves to the next leg. Sarvam's leg
     stays plain (it may reject them).
     """
@@ -330,7 +330,6 @@ class _PenalizedLLM(openai.LLM):
 _LLM_HOSTS = {
     "groq":      "https://api.groq.com/openai/v1",
     "cerebras":  "https://api.cerebras.ai/v1",
-    "together":  "https://api.together.xyz/v1",
     "fireworks": "https://api.fireworks.ai/inference/v1",
     # Gemini exposes an OpenAI-compatible endpoint. Free tier needs only a Google
     # account (no card) — the card-free way to run when paid hosts are unavailable.
@@ -364,7 +363,6 @@ def _build_llm(premium: bool = True):
     _models = {
         "groq":      settings.GROQ_MODEL,
         "cerebras":  settings.CEREBRAS_MODEL,
-        "together":  settings.TOGETHER_MODEL,
         "fireworks": settings.FIREWORKS_MODEL,
         "gemini":    settings.GEMINI_MODEL,
         "openai":    settings.OPENAI_MODEL,
@@ -372,7 +370,6 @@ def _build_llm(premium: bool = True):
     _keys = {
         "groq":      settings.GROQ_API_KEY,
         "cerebras":  settings.CEREBRAS_API_KEY,
-        "together":  settings.TOGETHER_API_KEY,
         "fireworks": settings.FIREWORKS_API_KEY,
         "gemini":    settings.GEMINI_API_KEY,
         "openai":    settings.OPENAI_API_KEY,
@@ -418,7 +415,7 @@ def _build_llm(premium: bool = True):
     if not chain:
         raise RuntimeError(
             "No LLM provider configured. Set an API key for at least one of "
-            "GROQ / CEREBRAS / TOGETHER / FIREWORKS / OPENAI (or SARVAM)."
+            "GROQ / GEMINI / CEREBRAS / FIREWORKS / OPENAI (or SARVAM)."
         )
     if len(chain) == 1:
         return chain[0]

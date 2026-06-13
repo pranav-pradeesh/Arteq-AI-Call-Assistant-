@@ -318,3 +318,15 @@ def test_llm_chain_raises_when_no_provider(monkeypatch):
     import pytest
     with pytest.raises(RuntimeError):
         livekit_agent._build_llm()
+
+
+def test_llm_provider_settings_are_consistent():
+    """Every host named in LLM_PROVIDER_ORDER must have matching <P>_API_KEY and
+    <P>_MODEL settings — guards against the chain referencing a removed field
+    (which would AttributeError at call time, where livekit tests can't reach)."""
+    from src.config.settings import settings
+    for pid in (p.strip() for p in settings.LLM_PROVIDER_ORDER.split(",") if p.strip()):
+        assert hasattr(settings, f"{pid.upper()}_API_KEY"), f"missing {pid.upper()}_API_KEY"
+        assert hasattr(settings, f"{pid.upper()}_MODEL"), f"missing {pid.upper()}_MODEL"
+    # Together was removed by request — must not linger as a setting.
+    assert not hasattr(settings, "TOGETHER_API_KEY")
