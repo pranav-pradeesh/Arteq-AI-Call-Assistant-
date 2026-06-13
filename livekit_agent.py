@@ -90,6 +90,11 @@ def _voice_for_lang(lang: str, default: str) -> str:
     return voice_for_lang(lang, default)
 
 
+def _split_mixed_script(text: str, fallback: str) -> list:
+    from src.tts_normalize import split_mixed_script
+    return split_mixed_script(text, fallback)
+
+
 # Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
 # text correctly *when the English word is in Latin script*, so the only job here
 # is to undo the cases where a weaker LLM transliterated a common English term
@@ -187,6 +192,14 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
                 output_emitter.push(chunk)
             return
 
+        # Mixed-script text (e.g. "Good morning! Welcome to Hospital, <native question>"):
+        # split into per-script segments and synthesize each with the correct lang so
+        # English words get English phonetics and native words get native phonetics.
+        segments = _split_mixed_script(text, lang)
+        if len(segments) > 1:
+            await self._run_multi(output_emitter, segments, speaker, rest_key)
+            return
+
         try:
             await self._run_ws(output_emitter, text, lang, speaker, ws_key)
         except Exception as exc:
@@ -236,12 +249,8 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             raise RuntimeError("WebSocket TTS: no audio chunks received")
         tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
 
-    async def _run_rest(
-        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
-    ) -> None:
-        """REST TTS fallback — waits for full synthesis before any audio plays."""
-        from src.cache.store import tts_cache, TTS_CACHE_TTL
-
+    async def _fetch_wav_bytes(self, text: str, lang: str, speaker: str) -> list:
+        """Fetch decoded WAV bytes from Sarvam REST for one text segment."""
         payload = {
             "target_language_code": lang,
             "text": text,
@@ -271,24 +280,79 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
                         message=f"Sarvam TTS API Error: {error_text}", status_code=res.status
                     )
                 response_json = await res.json()
-                request_id = response_json.get("request_id", "")
                 audios = response_json.get("audios", [])
                 if not audios or not isinstance(audios, list):
                     raise _APIConnErr("Sarvam TTS API response invalid: no audio data")
-                output_emitter.initialize(
-                    request_id=request_id or "unknown",
-                    sample_rate=self._tts.sample_rate,
-                    num_channels=self._tts.num_channels,
-                    mime_type="audio/wav",
-                )
-                decoded = [_b64.b64decode(b64) for b64 in audios]
-                for chunk in decoded:
-                    output_emitter.push(chunk)
-                tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
+                return [_b64.b64decode(b64) for b64 in audios]
         except asyncio.TimeoutError as e:
             raise _APITimeoutErr("Sarvam TTS API request timed out") from e
         except _aiohttp.ClientError as e:
             raise _APIConnErr(f"Sarvam TTS API connection error: {e}") from e
+
+    async def _run_rest(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """REST TTS fallback — waits for full synthesis before any audio plays."""
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        decoded = await self._fetch_wav_bytes(text, lang, speaker)
+        output_emitter.initialize(
+            request_id="rest",
+            sample_rate=self._tts.sample_rate,
+            num_channels=self._tts.num_channels,
+            mime_type="audio/wav",
+        )
+        for chunk in decoded:
+            output_emitter.push(chunk)
+        tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
+
+    async def _run_multi(
+        self, output_emitter, segments: list, speaker: str, cache_key: str
+    ) -> None:
+        """Synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
+
+        Each segment is synthesized with its own language code so English words
+        use English phonetics and native-script words use native phonetics.
+        The joined PCM is pushed as a single seamless audio stream.
+        """
+        import io
+        import wave
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        all_pcm = b""
+        sr = nc = sw = None
+
+        for seg_text, seg_lang in segments:
+            seg_speaker = _voice_for_lang(seg_lang, speaker)
+            wav_chunks = await self._fetch_wav_bytes(seg_text, seg_lang, seg_speaker)
+            for wav_bytes in wav_chunks:
+                with io.BytesIO(wav_bytes) as buf:
+                    with wave.open(buf, "rb") as wf:
+                        if sr is None:
+                            sr = wf.getframerate()
+                            nc = wf.getnchannels()
+                            sw = wf.getsampwidth()
+                        all_pcm += wf.readframes(wf.getnframes())
+
+        if not all_pcm or sr is None:
+            raise _APIConnErr("Multi-segment TTS: no audio data received")
+
+        out = io.BytesIO()
+        with wave.open(out, "wb") as wf:
+            wf.setnchannels(nc)
+            wf.setsampwidth(sw)
+            wf.setframerate(sr)
+            wf.writeframes(all_pcm)
+        combined = out.getvalue()
+
+        output_emitter.initialize(
+            request_id="multi-seg",
+            sample_rate=self._tts.sample_rate,
+            num_channels=self._tts.num_channels,
+            mime_type="audio/wav",
+        )
+        output_emitter.push(combined)
+        tts_cache.set(cache_key, [combined], ttl=TTS_CACHE_TTL)
 
 
 # Bulbul v3 voice roster (Sarvam docs). v3 rejects pitch, loudness and
