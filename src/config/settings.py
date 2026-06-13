@@ -92,7 +92,12 @@ class Settings(BaseSettings):
     # so no single-vendor outage (e.g. Groq's dev plan) can take the agent down.
     # Default models are llama-3.3-70b-class (the quality floor for Malayalam);
     # override per host to trade cost for quality. See COST_MODEL.md for ₹/min.
-    LLM_PROVIDER_ORDER: str = "groq,cerebras,together,fireworks,openai"
+    # Preference order, cheapest-quality-first: Groq 70b (₹0.47, cheapest+fastest
+    # when its plan is up) → Together/Fireworks 70b (₹0.70, the drop-in 70b hosts
+    # available now) → Cerebras 70b (fast, custom pricing) → OpenAI gpt-4o-mini
+    # (₹0.15 cheap safety net, lower Malayalam quality) → Sarvam (always last).
+    # A host is only used if its key is set, so leave Groq blank while it's down.
+    LLM_PROVIDER_ORDER: str = "groq,together,fireworks,cerebras,openai"
     LLM_TEMPERATURE: float = 0.5
     LLM_MAX_TOKENS: int = 512
 
