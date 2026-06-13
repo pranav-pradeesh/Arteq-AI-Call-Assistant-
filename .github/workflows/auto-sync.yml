@@ -1,0 +1,22 @@
+name: Sync with Upstream
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'   # Every 15 minutes
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Upstream Sync
+        uses: aormsby/Fork-Sync-With-Upstream-action@v3.4.1
+        with:
+          upstream_sync_repo: pranav-pradeesh/Arteq-AI-Call-Assistant-
+          upstream_sync_branch: main
+          target_sync_branch: main
+          target_repo_token: ${{ secrets.GITHUB_TOKEN }}
