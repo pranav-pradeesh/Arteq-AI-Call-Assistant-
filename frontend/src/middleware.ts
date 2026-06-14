@@ -1,0 +1,28 @@
+import { withAuth } from "next-auth/middleware";
+import { NextResponse } from "next/server";
+
+// Routes only super_admin may open.
+const SUPER_ADMIN_ONLY = ["/users", "/tenants"];
+
+export default withAuth(
+  function middleware(req) {
+    const { pathname } = req.nextUrl;
+    const role = req.nextauth.token?.role;
+    if (SUPER_ADMIN_ONLY.some((p) => pathname.startsWith(p)) && role !== "super_admin") {
+      return NextResponse.redirect(new URL("/overview", req.url));
+    }
+    return NextResponse.next();
+  },
+  {
+    callbacks: {
+      // Authenticated iff a NextAuth token exists.
+      authorized: ({ token }) => !!token,
+    },
+    pages: { signIn: "/login" },
+  }
+);
+
+// Protect everything except the login page, the auth API, and static assets.
+export const config = {
+  matcher: ["/((?!login|api/auth|_next/static|_next/image|favicon.ico).*)"],
+};
