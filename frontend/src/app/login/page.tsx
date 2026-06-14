@@ -30,7 +30,7 @@ export default function LoginPage() {
       <Card className="w-full max-w-sm">
         <CardBody>
           <div className="mb-5 flex items-center gap-2">
-            <span className="grid h-8 w-8 place-items-center rounded-md bg-brand-600 font-semibold text-white">A</span>
+            <img src="/logo.svg" alt="Arteq" className="h-10 w-10 object-contain" />
             <div>
               <p className="font-semibold">Arteq Admin</p>
               <p className="text-xs text-gray-500">Hospital Voice Agent dashboard</p>
