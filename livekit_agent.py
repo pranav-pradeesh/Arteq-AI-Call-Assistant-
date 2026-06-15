@@ -2,7 +2,7 @@
 Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
-  • Silero VAD → Sarvam STT (Saaras v3, 23 languages, codemix)
+  • Silero VAD → Sarvam STT (Saarika, transcribes in the caller's own language)
   • Groq LLaMA 70B (via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
@@ -713,6 +713,8 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
     return f"""You are the voice receptionist for {hosp_name}. You have NO personal name — never introduce yourself with one and never invent one. Identify only as {hosp_name}. If a caller asks who you are or your name, say you are the reception assistant at {hosp_name}.
 
+SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
+
 LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
@@ -842,10 +844,19 @@ class HospitalVoiceAgent(Agent):
         super().__init__(
             instructions=system_prompt,
             tools=tools,
+            # Saarika = Speech-to-Text (transcribes in the caller's OWN language and
+            # native script). Saaras = Speech-to-Text-TRANSLATE (rewrites everything
+            # to English) — that silently breaks this agent, because both the reply-
+            # language rules in the system prompt and _detect_tts_lang() decide the
+            # caller's language from the SCRIPT of the transcript. An English-only
+            # transcript makes Arya answer in English even to a Malayalam caller.
+            # Model + language are env-overridable so the version can be bumped or the
+            # language pinned (e.g. "ml-IN") without a code change. "unknown" lets one
+            # agent auto-detect every caller language; pin it if auto-detect is shaky.
             stt=sarvam.STT(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
-                model="saaras:v3",
-                language="unknown",
+                model=os.getenv("SARVAM_STT_MODEL", "saarika:v2.5"),
+                language=os.getenv("SARVAM_STT_LANGUAGE", "unknown"),
             ),
             # Reuse the worker-prewarmed VAD (loaded once in prewarm_fnc) so the
             # Silero model load is off the per-call critical path. Fall back to a
