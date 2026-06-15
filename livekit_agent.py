@@ -510,7 +510,15 @@ def _build_llm(premium: bool = True):
 
     # premium retained for signature compat; both tiers now lead with 70b for
     # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
-    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")]
+    # Each Groq model has its OWN rate-limit bucket, so listing more models in
+    # GROQ_MODELS (comma-separated, best first) adds throughput headroom without
+    # a code change — the single biggest lever against the 429/413 rate-limit
+    # errors on Groq's free tier. The real fix for zero errors is a paid Groq
+    # tier (much higher TPM); this just spreads load until then.
+    models = [m.strip() for m in os.getenv(
+        "GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant"
+    ).split(",") if m.strip()]
+    chain = [_groq(m) for m in models]
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
     if sarvam_key:
@@ -748,11 +756,13 @@ DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour
 
 ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request.
 
-NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor, NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in that department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
+NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor — AND that department/specialty is listed in the HOSPITAL section — NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in THAT SAME department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
-NEVER say a department or doctor listed in the HOSPITAL section is unavailable or does not exist. If the caller names a specialty (e.g. "a cardiology doctor"), pick a doctor from that department and proceed — do NOT reply "no doctor available". If they don't know any name, briefly list that department's doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
+MATCH THE EXACT DEPARTMENT/DOCTOR ASKED: Answer ONLY about the specific department, specialty, or doctor the caller named. NEVER substitute a different one — if they ask about Neurology, do NOT answer with Orthopedics; if they ask for Dr. A, do NOT offer Dr. B unless they ask. First decide whether what they named actually appears in the HOSPITAL section:
+ • IF IT IS LISTED: never say it is unavailable or does not exist. If they named a specialty (e.g. "a cardiology doctor"), pick a doctor from THAT department and proceed — do NOT reply "no doctor available". If they don't know a name, briefly list that department's own doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
+ • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Say plainly that the hospital does not have that department/specialty/doctor here, then offer to transfer to reception (transfer_to_department) or help with a department it does have.
 
-NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
+NEVER invent doctor names, departments, specialties, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, do not make it up; say it is not available here and transfer.
 
 CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
 
