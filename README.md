@@ -500,6 +500,35 @@ Telephony code fails gracefully when Plivo keys are absent. The agent works via 
 
 The Telephony tab in the admin dashboard shows exactly which env vars are missing and has a **Run SIP Setup** button that creates LiveKit trunks automatically once all keys are present.
 
+### Exotel — SIP or WebSocket streaming
+
+Exotel works as a carrier in two modes, selected by `EXOTEL_TRANSPORT`:
+
+- **`sip`** (default) — Exotel's webhook returns ExoML that SIP-forwards the call
+  to LiveKit, same as the Plivo flow above.
+- **`websocket`** — the webhook returns a **Voicebot applet** that opens a
+  bidirectional WebSocket to `/ws/exotel/stream/<token>/<slug>`. Exotel streams
+  the caller's audio as **raw/slin 16-bit 8 kHz mono PCM (little-endian, base64)**
+  and `ExotelLiveKitBridge` publishes it into a LiveKit room, then streams the
+  agent's reply back in the same format (frames are multiples of 320 bytes,
+  3200–100000 bytes each). The existing `arya` agent runs unchanged.
+
+```
+Patient -> ExoPhone -> Exotel webhook -> POST /api/v1/call/inbound/exotel/<token>/<slug>
+  -> Voicebot applet (EXOTEL_TRANSPORT=websocket)
+  -> Exotel opens WS -> /ws/exotel/stream/<token>/<slug>
+  -> ExotelLiveKitBridge joins room "{slug}-call-{uuid}" (dispatches the agent)
+  -> caller audio <-> LiveKit room <-> agent
+```
+
+**Outbound over WebSocket:** set `EXOTEL_VOICEBOT_APP_ID` to an Exotel App whose
+Voicebot applet points at the WS URL, then call `dial_outbound(..., carrier="exotel_ws")`.
+The room is pre-created (with context + agent dispatch) and its name is passed to
+Exotel via `CustomField`, which the bridge reads from the `start` event's
+`custom_parameters` to join the right room.
+
+Audio format reference: [Exotel AgentStream developer guide](https://developer.exotel.com/docs/agentstream/developer-guide).
+
 ---
 
 ## Cost Analysis

@@ -74,6 +74,52 @@ async def reconfigure_number(number: str, new_slug: str) -> bool:
     return await configure_number_for_hospital(number, new_slug)
 
 
+async def connect_call_to_voicebot(patient_phone: str, room: str) -> bool:
+    """Place an outbound call that streams over the Voicebot WebSocket.
+
+    Exotel dials `patient_phone` from the ExoPhone and connects it to the App
+    in EXOTEL_VOICEBOT_APP_ID, whose Voicebot applet streams audio to our WS.
+    The pre-created LiveKit `room` is forwarded via `CustomField` so the bridge
+    joins the right room (it surfaces in the start event's custom_parameters).
+
+    Returns True if Exotel accepted the call request.
+    """
+    if not settings.EXOTEL_VOICEBOT_APP_ID:
+        logger.error("exotel_voicebot_app_id_unset")
+        return False
+    if not settings.EXOTEL_PHONE_NUMBER:
+        logger.error("exotel_phone_number_unset")
+        return False
+
+    phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
+    app_url = (
+        f"http://my.exotel.com/{settings.EXOTEL_API_KEY}"
+        f"/exoml/start_voice/{settings.EXOTEL_VOICEBOT_APP_ID}"
+    )
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.post(
+            f"{_base()}/Calls/connect.json",
+            data={
+                "From": phone,
+                "CallerId": settings.EXOTEL_PHONE_NUMBER,
+                "Url": app_url,
+                "CustomField": room,
+                "StatusCallback": f"{settings.PUBLIC_BASE_URL}/api/v1/call/status",
+            },
+            auth=_auth(),
+        )
+    if resp.status_code in (200, 201, 202):
+        logger.info("exotel_voicebot_call_placed", patient=phone[-4:], room=room)
+        return True
+    logger.error(
+        "exotel_voicebot_call_failed",
+        patient=phone[-4:],
+        status=resp.status_code,
+        body=resp.text[:200],
+    )
+    return False
+
+
 async def list_owned_numbers() -> list[dict]:
     """List all ExoPhones on this Exotel account."""
     async with httpx.AsyncClient(timeout=15.0) as client:

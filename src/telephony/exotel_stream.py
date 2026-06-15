@@ -1,0 +1,235 @@
+"""
+Exotel Voicebot / AgentStream WebSocket protocol — pure (de)serialization.
+
+This module is the audio-format heart of the Exotel WebSocket integration. It
+has NO LiveKit or network dependency so it can be unit-tested in isolation; the
+bridge in ``exotel_bridge.py`` wires it to a LiveKit room.
+
+Audio format (per Exotel AgentStream spec)
+-------------------------------------------
+Media payloads are ``raw/slin``: **16-bit signed linear PCM, 8 kHz, mono,
+little-endian**, base64-encoded. The same format is expected back from us for
+bidirectional (Voicebot) playback to the caller.
+
+Outgoing chunk rules (bidirectional only)
+-----------------------------------------
+Each ``media`` frame we send back MUST be a multiple of 320 bytes, at least
+3200 bytes (≈100 ms) and at most 100000 bytes. Non-multiple sizes introduce
+~20 ms gaps; oversized frames may time out.
+
+Messages FROM Exotel:  connected → start → media* → (dtmf) → stop
+Messages TO Exotel  :  media (audio back), mark (playback checkpoint),
+                       clear (flush buffered playback — used for barge-in)
+
+Note on casing: the Voicebot applet uses snake_case ``stream_sid``; some Exotel
+flows / the pipecat client use camelCase ``streamSid``. We accept both on the
+way in and emit snake_case on the way out (matching the Voicebot applet).
+
+Reference: https://developer.exotel.com/docs/agentstream/developer-guide
+"""
+from __future__ import annotations
+
+import base64
+import json
+from dataclasses import dataclass, field
+from typing import Any, Iterator
+
+# ── Audio format constants ─────────────────────────────────────────────────────
+
+EXOTEL_SAMPLE_RATE = 8000        # Hz
+EXOTEL_NUM_CHANNELS = 1          # mono
+EXOTEL_BYTES_PER_SAMPLE = 2      # 16-bit signed PCM
+EXOTEL_BYTES_PER_SEC = EXOTEL_SAMPLE_RATE * EXOTEL_NUM_CHANNELS * EXOTEL_BYTES_PER_SAMPLE  # 16000
+
+# Outgoing chunk constraints (bytes).
+CHUNK_MULTIPLE = 320
+MIN_CHUNK_BYTES = 3200           # ≈100 ms
+MAX_CHUNK_BYTES = 100000
+
+
+# ── Inbound event parsing ──────────────────────────────────────────────────────
+
+@dataclass
+class StreamStart:
+    """Parsed ``start`` event — the call's identity and stream metadata."""
+    stream_sid: str
+    call_sid: str = ""
+    account_sid: str = ""
+    from_number: str = ""
+    to_number: str = ""
+    custom_parameters: dict[str, str] = field(default_factory=dict)
+    media_format: dict[str, Any] = field(default_factory=dict)
+
+
+def parse_message(raw: str | bytes) -> dict[str, Any]:
+    """Decode a WebSocket text frame into a dict. Returns {} on malformed JSON."""
+    if isinstance(raw, (bytes, bytearray)):
+        raw = raw.decode("utf-8", "replace")
+    try:
+        msg = json.loads(raw)
+        return msg if isinstance(msg, dict) else {}
+    except (ValueError, TypeError):
+        return {}
+
+
+def event_type(msg: dict[str, Any]) -> str:
+    """Return the lowercased ``event`` field ("" if absent)."""
+    return str(msg.get("event", "")).lower()
+
+
+def extract_stream_sid(msg: dict[str, Any]) -> str:
+    """Pull the stream sid from any event, tolerating snake/camel and nesting."""
+    for key in ("stream_sid", "streamSid"):
+        val = msg.get(key)
+        if val:
+            return str(val)
+    start = msg.get("start") or {}
+    if isinstance(start, dict):
+        for key in ("stream_sid", "streamSid"):
+            val = start.get(key)
+            if val:
+                return str(val)
+    return ""
+
+
+def parse_start(msg: dict[str, Any]) -> StreamStart:
+    """Parse a ``start`` event payload into a StreamStart."""
+    start = msg.get("start") or {}
+    if not isinstance(start, dict):
+        start = {}
+    params = start.get("custom_parameters") or start.get("customParameters") or {}
+    if not isinstance(params, dict):
+        params = {}
+    media_format = start.get("media_format") or start.get("mediaFormat") or {}
+    if not isinstance(media_format, dict):
+        media_format = {}
+    return StreamStart(
+        stream_sid=extract_stream_sid(msg),
+        call_sid=str(start.get("call_sid") or start.get("callSid") or ""),
+        account_sid=str(start.get("account_sid") or start.get("accountSid") or ""),
+        from_number=str(start.get("from") or ""),
+        to_number=str(start.get("to") or ""),
+        custom_parameters={str(k): str(v) for k, v in params.items()},
+        media_format=media_format,
+    )
+
+
+def decode_media(msg: dict[str, Any]) -> bytes:
+    """Return the raw PCM16/8 kHz bytes from a ``media`` event ( b"" if none)."""
+    media = msg.get("media") or {}
+    if not isinstance(media, dict):
+        return b""
+    payload = media.get("payload")
+    if not payload:
+        return b""
+    try:
+        return base64.b64decode(payload)
+    except (ValueError, TypeError):
+        return b""
+
+
+def extract_dtmf(msg: dict[str, Any]) -> str:
+    """Return the DTMF digit from a ``dtmf`` event ("" if none)."""
+    dtmf = msg.get("dtmf") or {}
+    if not isinstance(dtmf, dict):
+        return ""
+    return str(dtmf.get("digit", ""))
+
+
+# ── Outbound chunking & event building ─────────────────────────────────────────
+
+def chunk_pcm(pcm: bytes, frame_bytes: int = MIN_CHUNK_BYTES) -> Iterator[bytes]:
+    """Yield Exotel-compliant PCM frames from a (possibly partial) buffer.
+
+    Every yielded frame is a multiple of 320 bytes and within
+    [MIN_CHUNK_BYTES, MAX_CHUNK_BYTES]. A trailing remainder shorter than one
+    frame is NOT yielded — callers buffer it and pad/flush at end of speech via
+    :func:`flush_pcm` so we never emit a non-320-multiple frame mid-stream.
+    """
+    frame_bytes = _normalize_frame_bytes(frame_bytes)
+    total = len(pcm)
+    offset = 0
+    while total - offset >= frame_bytes:
+        yield pcm[offset:offset + frame_bytes]
+        offset += frame_bytes
+
+
+def flush_pcm(pcm: bytes) -> bytes:
+    """Pad a trailing remainder up to the next 320-byte multiple with silence.
+
+    Returns b"" for an empty buffer. Used to flush the tail of an utterance so
+    the final frame still satisfies Exotel's multiple-of-320 constraint.
+    """
+    if not pcm:
+        return b""
+    remainder = len(pcm) % CHUNK_MULTIPLE
+    if remainder:
+        pcm = pcm + b"\x00" * (CHUNK_MULTIPLE - remainder)
+    return pcm
+
+
+def _normalize_frame_bytes(frame_bytes: int) -> int:
+    """Clamp/round a requested frame size to a legal Exotel chunk size."""
+    frame_bytes = max(MIN_CHUNK_BYTES, min(MAX_CHUNK_BYTES, int(frame_bytes)))
+    # Round down to a multiple of 320 (stay within the max).
+    frame_bytes -= frame_bytes % CHUNK_MULTIPLE
+    return max(MIN_CHUNK_BYTES, frame_bytes)
+
+
+def build_media_event(stream_sid: str, pcm: bytes, *, chunk: int = 0, seq: int = 0) -> str:
+    """Build a ``media`` event (audio back to the caller) as a JSON string."""
+    payload = base64.b64encode(pcm).decode("ascii")
+    msg: dict[str, Any] = {
+        "event": "media",
+        "stream_sid": stream_sid,
+        "media": {"payload": payload},
+    }
+    if chunk:
+        msg["media"]["chunk"] = chunk
+    if seq:
+        msg["sequence_number"] = seq
+    return json.dumps(msg)
+
+
+def build_clear_event(stream_sid: str) -> str:
+    """Build a ``clear`` event — tells Exotel to discard buffered playback.
+
+    Sent on barge-in so the caller's interruption stops our queued audio
+    immediately instead of after the already-buffered speech finishes.
+    """
+    return json.dumps({"event": "clear", "stream_sid": stream_sid})
+
+
+def build_mark_event(stream_sid: str, name: str, *, seq: int = 0) -> str:
+    """Build a ``mark`` event — a playback checkpoint Exotel echoes back."""
+    msg: dict[str, Any] = {
+        "event": "mark",
+        "stream_sid": stream_sid,
+        "mark": {"name": name},
+    }
+    if seq:
+        msg["sequence_number"] = seq
+    return json.dumps(msg)
+
+
+__all__ = [
+    "EXOTEL_SAMPLE_RATE",
+    "EXOTEL_NUM_CHANNELS",
+    "EXOTEL_BYTES_PER_SAMPLE",
+    "EXOTEL_BYTES_PER_SEC",
+    "CHUNK_MULTIPLE",
+    "MIN_CHUNK_BYTES",
+    "MAX_CHUNK_BYTES",
+    "StreamStart",
+    "parse_message",
+    "event_type",
+    "extract_stream_sid",
+    "parse_start",
+    "decode_media",
+    "extract_dtmf",
+    "chunk_pcm",
+    "flush_pcm",
+    "build_media_event",
+    "build_clear_event",
+    "build_mark_event",
+]
