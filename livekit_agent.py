@@ -224,7 +224,9 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             model="bulbul:v3",
             send_completion_event=True,
         ) as ws:
-            await ws.configure(target_language_code=lang, speaker=speaker)
+            # pace must be set here too — the WS streaming path is tried first, so
+            # without it the speed setting would only apply to the REST fallback.
+            await ws.configure(target_language_code=lang, speaker=speaker, pace=self._opts.pace)
             await ws.convert(text)
             await ws.flush()
 
@@ -373,6 +375,14 @@ _SARVAM_COMPAT["bulbul:v3"] = {
     "female": [],
     "male": [],
 }
+
+
+# Talking speed for Bulbul TTS. `pace` is Sarvam's speed multiplier — 1.0 is the
+# natural default, higher is faster. Env-tunable via TTS_PACE; 1.3 makes Arya
+# speak a bit brisker without clipping clarity. Must be applied on BOTH the
+# WebSocket and REST paths (and every TTS instance) or the prewarm cache — whose
+# key includes pace — won't match the live voice.
+_TTS_PACE = float(os.getenv("TTS_PACE", "1.3"))
 
 
 class BulbulV3TTS(_SarvamTTS):
@@ -894,6 +904,7 @@ class HospitalVoiceAgent(Agent):
                 # speaker and 24000 Hz sample rate are enforced by BulbulV3TTS.
                 target_language_code=agent_language,
                 speaker="priya",
+                pace=_TTS_PACE,
             ),
         )
         self._greeting = greeting
@@ -1165,6 +1176,7 @@ async def _prewarm_static_phrases(lang: str) -> None:
         api_key=os.getenv("SARVAM_API_KEY", ""),
         target_language_code=lang,
         speaker="priya",
+        pace=_TTS_PACE,
     )
     for phrase in phrases:
         try:
@@ -1186,6 +1198,7 @@ async def _prewarm_greeting_audio(text: str, lang: str) -> None:
             api_key=os.getenv("SARVAM_API_KEY", ""),
             target_language_code=lang,
             speaker="priya",
+            pace=_TTS_PACE,
         )
         stream = tts.synthesize(text)
         try:
