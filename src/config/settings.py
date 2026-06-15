@@ -39,6 +39,22 @@ class Settings(BaseSettings):
     EXOTEL_WEBHOOK_TOKEN: str = ""
     LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID: str = ""  # set after POST /admin/sip/exotel/setup
 
+    # Exotel transport for the conversation audio path:
+    #   "sip"       → forward the call to LiveKit over SIP (get_inbound_exoml)
+    #   "websocket" → Exotel Voicebot/AgentStream applet streams raw audio over a
+    #                 WebSocket which we bridge into a LiveKit room (get_voicebot_exoml).
+    # The WebSocket path runs no SIP trunk — Exotel speaks raw/slin 16-bit 8 kHz
+    # mono PCM (little-endian, base64) directly to /ws/exotel/stream/{token}/{slug}.
+    EXOTEL_TRANSPORT: str = "sip"
+    # Outgoing audio chunk size sent back to Exotel. Must be a multiple of 320
+    # bytes; Exotel requires min 3200 and max 100000 bytes per media frame.
+    # 3200 bytes = 100 ms of 8 kHz/16-bit/mono PCM.
+    EXOTEL_STREAM_CHUNK_BYTES: int = 3200
+    # Exotel App/flow id whose Voicebot applet streams to our WS, used to place
+    # outbound WebSocket-streamed calls via the Exotel Connect API. Leave blank
+    # if outbound-over-WebSocket is not used (SIP outbound still works).
+    EXOTEL_VOICEBOT_APP_ID: str = ""
+
     # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
     # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
     WHATSAPP_ENABLED: bool = True

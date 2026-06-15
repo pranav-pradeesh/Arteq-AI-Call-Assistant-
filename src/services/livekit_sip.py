@@ -255,10 +255,26 @@ async def dial_outbound(
     """
     Create a LiveKit room then dial the patient via SIP.
 
-    carrier: "plivo" | "exotel" | "auto" (auto picks Exotel if its trunk is set,
-    falls back to Plivo).
+    carrier: "plivo" | "exotel" | "exotel_ws" | "auto" (auto picks Exotel if its
+    trunk is set, falls back to Plivo). "exotel_ws" places the call over the
+    Exotel Voicebot WebSocket instead of SIP — Exotel dials and streams audio
+    to our bridge, which joins the LiveKit room we pre-create here.
     Returns the room name on success, "" on failure.
     """
+    # Exotel WebSocket-streamed outbound: we pre-create the room (with context +
+    # agent dispatch), then have Exotel dial the patient and stream to our WS.
+    if carrier == "exotel_ws":
+        room_name = await precreate_exotel_ws_room(hospital_slug, context)
+        if not room_name:
+            return ""
+        from src.services.exotel_provisioning import connect_call_to_voicebot
+        ok = await connect_call_to_voicebot(patient_phone, room_name)
+        if not ok:
+            await delete_room(room_name)
+            return ""
+        logger.info("outbound_exotel_ws_dialed", room=room_name, patient=patient_phone[-4:])
+        return room_name
+
     exotel_trunk = settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
     plivo_trunk = settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID
 
@@ -425,6 +441,83 @@ def get_inbound_exoml(to_number: str = "") -> str:
         "  </Dial>\n"
         "</Response>"
     )
+
+
+# ── Runtime: inbound Voicebot applet (Exotel WebSocket streaming) ─────────────
+
+def _exotel_ws_url(slug: str) -> str:
+    """WebSocket endpoint Exotel's Voicebot applet streams audio to."""
+    token = settings.EXOTEL_WEBHOOK_TOKEN or "default"
+    base = settings.PUBLIC_WS_URL.rstrip("/")
+    return f"{base}/ws/exotel/stream/{token}/{slug}"
+
+
+def get_voicebot_exoml(slug: str, room: str = "", extra_params: dict[str, str] | None = None) -> str:
+    """
+    Return Exotel Voicebot-applet ExoML that opens a bidirectional WebSocket.
+
+    Exotel streams raw/slin 16-bit 8 kHz mono PCM (base64) to our WS, which
+    bridges the audio into a LiveKit room where the agent answers. Custom
+    `<Parameter>` children arrive on the WS `start` event as `custom_parameters`
+    — we pass `room` for outbound so the bridge joins the pre-created room.
+    """
+    from xml.sax.saxutils import quoteattr
+
+    url = _exotel_ws_url(slug)
+    params = dict(extra_params or {})
+    if room:
+        params["room"] = room
+
+    param_xml = "".join(
+        f'      <Parameter name={quoteattr(k)} value={quoteattr(v)} />\n'
+        for k, v in params.items()
+    )
+    return (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        "<Response>\n"
+        "  <Connect>\n"
+        f'    <Voicebot url={quoteattr(url)}>\n'
+        f"{param_xml}"
+        "    </Voicebot>\n"
+        "  </Connect>\n"
+        "</Response>"
+    )
+
+
+async def precreate_exotel_ws_room(hospital_slug: str, context: dict[str, Any]) -> str:
+    """
+    Create a LiveKit room (with outbound context + agent dispatch) for an
+    Exotel WebSocket-streamed *outbound* call, returning the room name.
+
+    The room is created up front so its name can be handed to Exotel as a
+    custom parameter; the bridge then joins it when Exotel connects the WS.
+    Returns "" on failure.
+    """
+    if not settings.LIVEKIT_URL or not settings.LIVEKIT_API_KEY:
+        logger.error("livekit_not_configured")
+        return ""
+    room_name = f"{hospital_slug}-call-{uuid.uuid4().hex[:8]}"
+    lk = None
+    try:
+        from livekit import api as lk_api
+        lk = _lk()
+        await lk.room.create_room(
+            lk_api.CreateRoomRequest(
+                name=room_name,
+                metadata=json.dumps(context),
+                empty_timeout=90,
+                max_participants=3,
+                agents=[lk_api.RoomAgentDispatch(agent_name=settings.LIVEKIT_DISPATCH_NAME)],
+            )
+        )
+        logger.info("exotel_ws_room_precreated", room=room_name, slug=hospital_slug)
+        return room_name
+    except Exception as exc:
+        logger.error("exotel_ws_room_precreate_failed", slug=hospital_slug, error=str(exc))
+        return ""
+    finally:
+        if lk is not None:
+            await lk.aclose()
 
 
 # ── Runtime: inbound PCML ─────────────────────────────────────────────────────
