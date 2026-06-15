@@ -30,8 +30,12 @@ class Settings(BaseSettings):
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
     # Exotel — Indian cloud telephony (alternative to Plivo)
-    EXOTEL_API_KEY: str = ""          # Account SID (shown in Exotel dashboard)
-    EXOTEL_API_TOKEN: str = ""        # API token
+    EXOTEL_API_KEY: str = ""          # API Key — HTTP Basic username
+    EXOTEL_API_TOKEN: str = ""        # API Token — HTTP Basic password
+    # Account SID — goes in the API URL path (…/v1/Accounts/<sid>/…). Newer
+    # Exotel accounts issue a SID (e.g. "arteqai3") distinct from the API Key;
+    # leave blank on older accounts where the API Key doubles as the SID.
+    EXOTEL_ACCOUNT_SID: str = ""
     EXOTEL_PHONE_NUMBER: str = ""     # Virtual Number / ExoPhone, E.164 +91XXXXXXXXXX
     EXOTEL_SUBDOMAIN: str = "api.exotel.com"  # or api.in.exotel.com for India region
     # Embed in webhook URL so only Exotel (who was given the URL) can trigger it.
