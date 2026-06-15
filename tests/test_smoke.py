@@ -226,6 +226,18 @@ def test_detect_tts_lang_manglish_uses_fallback():
     assert detect_tts_lang(manglish, "en-IN") == "en-IN"
 
 
+def test_detect_tts_lang_real_english_gets_english_phonetics():
+    # Genuine English from a Malayalam (ml-IN) tenant must route to en-IN so it
+    # is spoken in English, not with Malayalam phonetics in the Malayalam voice.
+    from src.tts_normalize import detect_tts_lang
+    english = "Sorry, I can only help with matters related to the hospital. How can I help you?"
+    assert detect_tts_lang(english, "ml-IN") == "en-IN"
+    # A real English reply that happens to mention a hospital term stays English.
+    assert detect_tts_lang("Your appointment with the doctor is confirmed.", "ml-IN") == "en-IN"
+    # Manglish still keeps Malayalam phonetics for the same tenant.
+    assert detect_tts_lang("Doctor ne kaanan appointment venam", "ml-IN") == "ml-IN"
+
+
 def test_normalize_for_tts_exact_match():
     from src.tts_normalize import normalize_for_tts
     result = normalize_for_tts("ഡോക്ടർ ഉണ്ട്")
@@ -266,6 +278,8 @@ def test_voice_for_lang_maps_to_real_v3_speakers():
     assert voice_for_lang("ml-IN", "priya") == "kavitha"
     assert voice_for_lang("ta-IN", "priya") == "shruti"
     assert voice_for_lang("zz-ZZ", "priya") == "priya"
+    # English intentionally keeps the call's default speaker (no voice switch).
+    assert voice_for_lang("en-IN", "priya") == "priya"
     # Every mapped voice must be a real Bulbul v3 speaker (else Sarvam 400s).
     for code, voice in LANG_VOICE.items():
         assert voice in BULBUL_V3_SPEAKERS, f"{voice} ({code}) not a v3 speaker"

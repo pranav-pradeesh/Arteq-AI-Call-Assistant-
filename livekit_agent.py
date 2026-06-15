@@ -510,7 +510,15 @@ def _build_llm(premium: bool = True):
 
     # premium retained for signature compat; both tiers now lead with 70b for
     # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
-    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")]
+    # Each Groq model has its OWN rate-limit bucket, so listing more models in
+    # GROQ_MODELS (comma-separated, best first) adds throughput headroom without
+    # a code change — the single biggest lever against the 429/413 rate-limit
+    # errors on Groq's free tier. The real fix for zero errors is a paid Groq
+    # tier (much higher TPM); this just spreads load until then.
+    models = [m.strip() for m in os.getenv(
+        "GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant"
+    ).split(",") if m.strip()]
+    chain = [_groq(m) for m in models]
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
     if sarvam_key:
