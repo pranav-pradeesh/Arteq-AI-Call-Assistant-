@@ -50,7 +50,7 @@ CALLER (phone) ──► PLIVO DID ──► Plivo webhook ──► /api/v1/cal
                                           ┌──────────────┼──────────────┐
                                           ▼              ▼              ▼
                                      Silero VAD    Sarvam STT     Sarvam TTS
-                                     (turn det.)  (Saaras v3)   (Bulbul v3)
+                                     (turn det.)  (Saarika)     (Bulbul v3)
                                                        │
                                                        ▼
                                                Groq LLaMA 70B
@@ -77,7 +77,7 @@ Both share the same PostgreSQL database (Supabase).
 | Service | Purpose | Free tier |
 |---------|---------|-----------|
 | [LiveKit Cloud](https://cloud.livekit.io) | WebRTC rooms + SIP | Yes |
-| [Sarvam AI](https://app.sarvam.ai) | STT (Saaras v3) + TTS (Bulbul v3) | Trial credits |
+| [Sarvam AI](https://app.sarvam.ai) | STT (Saarika) + TTS (Bulbul v3) | Trial credits |
 | [Groq](https://console.groq.com) | LLaMA 70B LLM | Free (rate-limited) |
 | [Supabase](https://supabase.com) | PostgreSQL database | Free |
 
@@ -542,7 +542,7 @@ Audio format reference: [Exotel AgentStream developer guide](https://developer.e
 | LiveKit agent session | ₹0.83 ($0.010) | livekit.io/pricing |
 | LiveKit SIP minutes | ₹0.25 ($0.003) | livekit.io/pricing |
 | Plivo India inbound DID | ₹0.33 ($0.0040) | plivo.com/voice/pricing/in |
-| Sarvam STT (Saaras v3) | ₹0.50 | docs.sarvam.ai/pricing |
+| Sarvam STT (Saarika) | ₹0.50 | docs.sarvam.ai/pricing |
 | Sarvam TTS (Bulbul v3) | ₹0.24 (~800 chars/min) | docs.sarvam.ai/pricing |
 | Groq llama-3.3-70b | ₹0.04 (~2K tokens/call) | groq.com/pricing |
 | **Total** | **~₹2.19/min** | |
@@ -591,7 +591,7 @@ If hospitals require HIPAA-compliant processing (patient data in voice transcrip
 
 | Component | Current | Better for scale | Do NOT use |
 |-----------|---------|-----------------|-----------|
-| STT | Sarvam Saaras v3 | Self-hosted IndicWhisper at 50K+ min | Deepgram (no Malayalam) |
+| STT | Sarvam Saarika | Self-hosted IndicWhisper at 50K+ min | Deepgram (no Malayalam) |
 | TTS | Sarvam Bulbul v3 | Self-hosted IndicTTS at 50K+ min | Deepgram Aura (no Malayalam) |
 | LLM | Groq llama-3.3-70b | Groq llama-3.1-8b (save ₹0.04/min) | Azure OpenAI (8x more expensive) |
 | Carrier | Plivo | Telnyx SIP for outbound | Twilio (2x DID cost, higher per-min) |

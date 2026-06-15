@@ -98,7 +98,7 @@ class Settings(BaseSettings):
     # AI Brain
     DEFAULT_LANGUAGE: str = "ml-IN"
 
-    # Sarvam AI — STT (Saarika v2) + TTS (Bulbul v3)
+    # Sarvam AI — STT (Saarika, transcribes in caller's language) + TTS (Bulbul v3)
     SARVAM_API_KEY: str = ""
 
     # Groq AI — LLaMA brain
