@@ -174,3 +174,39 @@ def require_role(*allowed_roles: str):
 
 PoolDep = Annotated[asyncpg.Pool, Depends(get_pool)]
 AuthDep = Annotated[dict, Depends(require_auth)]
+
+
+# ---------------------------------------------------------------------------
+# Per-hospital access guard
+# ---------------------------------------------------------------------------
+
+def _is_super(payload: dict) -> bool:
+    """True for both the legacy single-password admin and super_admin role tokens."""
+    return payload.get("sub") == "admin" or payload.get("role") == "super_admin"
+
+
+async def require_hospital_access(
+    hospital_id: str,   # injected from the route's path parameter by FastAPI
+    pool: PoolDep,
+    payload: AuthDep,
+) -> None:
+    """Dependency: 403 unless the authenticated user may access this hospital.
+
+    super_admin (and the legacy single-password 'admin' sub) pass unconditionally.
+    tenant_admin / viewer must have a user_tenants row linking their email to
+    the hospital's slug — mirrors _assert_hospital_access in admin_api.py.
+    """
+    if _is_super(payload):
+        return
+    email = payload.get("sub", "")
+    async with pool.acquire() as conn:
+        allowed = await conn.fetchval(
+            """SELECT 1 FROM user_tenants ut
+               JOIN users u ON u.id = ut.user_id
+               JOIN hospitals h ON h.slug = ut.tenant_slug
+               WHERE u.email = $1 AND h.id = $2 AND u.active
+               LIMIT 1""",
+            email, hospital_id,
+        )
+    if not allowed:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="No access to this hospital")
