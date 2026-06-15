@@ -438,12 +438,16 @@ _AMBIENT_FRAME_SAMPLES = 320  # 20 ms at 16 kHz — standard WebRTC frame size
 # Pre-generate 5 s of softened white noise (fixed seed → deterministic across
 # worker restarts). A 7-sample boxcar smooths out the harshest high-frequency
 # content so it sounds closer to HVAC ventilation than raw hiss.
-# Amplitude 0.06 (6 % of int16 max) keeps it well below conversational speech.
+# Level is the fraction of int16 max (0.0–1.0) and is env-tunable via
+# AMBIENT_NOISE_LEVEL: lower = quieter background, 0 = silent line (track not
+# published at all). Default 0.02 (2 %) — subtle presence well under speech;
+# the original 0.06 was noticeably loud on a real call.
+_AMBIENT_LEVEL = min(max(float(os.getenv("AMBIENT_NOISE_LEVEL", "0.02")), 0.0), 1.0)
 _rng = np.random.default_rng(seed=0)
 _raw = _rng.standard_normal(5 * _AMBIENT_SAMPLE_RATE + 7).astype(np.float64)
 _raw = np.convolve(_raw, np.ones(7) / 7, mode="valid")
 _raw /= np.abs(_raw).max()
-_AMBIENT_BUF = (_raw * 0.06 * 32767).astype(np.int16)
+_AMBIENT_BUF = (_raw * _AMBIENT_LEVEL * 32767).astype(np.int16)
 del _raw, _rng
 
 _DTMF = {
@@ -1113,7 +1117,12 @@ async def _run_ambient_audio(room: rtc.Room) -> None:
     The LiveKit SIP gateway mixes all tracks from a participant before sending
     to PSTN, so this ambient sound is heard by the caller throughout. Task
     cancellation is the shutdown signal — finally block unpublishes cleanly.
+
+    AMBIENT_NOISE_LEVEL=0 disables it entirely — no track is published and the
+    caller hears a clean line.
     """
+    if _AMBIENT_LEVEL <= 0.0:
+        return
     source = rtc.AudioSource(_AMBIENT_SAMPLE_RATE, 1)
     track = rtc.LocalAudioTrack.create_audio_track("arteq-ambient", source)
     await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
