@@ -1256,7 +1256,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
-    asyncio.create_task(_prewarm_static_phrases(agent_language))
+    # Hold a reference — a bare create_task() can be garbage-collected mid-await,
+    # cancelling the prewarm before the static phrases are cached.
+    _prewarm_static_task = asyncio.create_task(_prewarm_static_phrases(agent_language))
 
     # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
@@ -1270,6 +1272,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # ── Acoustic sensory layer ────────────────────────────────────────────────
     sensory = AcousticSensoryLayer()
 
+    # Per-track audio drain tasks. Tracked so they are cancelled on call end —
+    # otherwise each subscribed track leaks a task + AudioStream per call.
+    _drain_tasks: list[asyncio.Task] = []
+
     @ctx.room.on("track_subscribed")
     def _on_track(track, publication, participant):
         if track.kind != rtc.TrackKind.KIND_AUDIO:
@@ -1277,10 +1283,16 @@ async def entrypoint(ctx: JobContext) -> None:
         stream = rtc.AudioStream(track)
 
         async def _drain():
-            async for frame in stream:
-                sensory.feed(frame)
+            try:
+                async for frame in stream:
+                    sensory.feed(frame)
+            finally:
+                try:
+                    await stream.aclose()
+                except Exception:
+                    pass
 
-        asyncio.create_task(_drain())
+        _drain_tasks.append(asyncio.create_task(_drain()))
 
     # ── Session userdata (accessible inside tools via context.userdata) ───────
     session_data = {
@@ -1344,6 +1356,8 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _on_end_async(_event=None):
         if _ambient_task:
             _ambient_task.cancel()
+        for _t in _drain_tasks:
+            _t.cancel()
         try:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0

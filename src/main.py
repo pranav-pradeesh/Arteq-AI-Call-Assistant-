@@ -374,7 +374,10 @@ async def exotel_stream_ws(websocket, token: str, tenant_slug: str):
     import hmac as _hmac
 
     expected = settings.EXOTEL_WEBHOOK_TOKEN or ""
-    if expected and not _hmac.compare_digest(token, expected):
+    _is_prod = str(getattr(settings, "ENV", "dev")).lower() in ("production", "prod")
+    # Reject on token mismatch, and — in production — also when no token is
+    # configured (a blank token must not fail open on a public audio socket).
+    if (expected and not _hmac.compare_digest(token, expected)) or (not expected and _is_prod):
         logger.warning("exotel_ws_token_rejected", tenant=tenant_slug)
         await websocket.close(code=1008)
         return

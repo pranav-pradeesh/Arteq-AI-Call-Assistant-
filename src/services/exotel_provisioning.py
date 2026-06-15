@@ -103,8 +103,11 @@ async def connect_call_to_voicebot(patient_phone: str, room: str) -> bool:
         return False
 
     phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
+    # Applet path is keyed by the Account SID (same identifier as the REST base),
+    # not the API Key — on newer Exotel accounts the two differ, so using the key
+    # here 404s/mis-routes. Use https for the same reason _base() does.
     app_url = (
-        f"http://my.exotel.com/{settings.EXOTEL_API_KEY}"
+        f"https://my.exotel.com/{_account_sid()}"
         f"/exoml/start_voice/{settings.EXOTEL_VOICEBOT_APP_ID}"
     )
     async with httpx.AsyncClient(timeout=15.0) as client:
