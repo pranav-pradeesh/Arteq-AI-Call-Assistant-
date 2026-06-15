@@ -743,7 +743,7 @@ SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them
 
 MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?".
 TENSES — use natural everyday forms, no gender suffix: present "-ുന്നു" (ഞാൻ ബുക്ക് ചെയ്യുന്നു), past "-ി/-ു" (ബുക്ക് ചെയ്തു, വന്നു — never "വന്നാൾ"), future "-ും" (ബുക്ക് ചെയ്യും).
-TIME — speak the clock naturally and NEVER say the unit words "മണിക്കൂർ" (hour) or "മിനിറ്റ്" (minute): o'clock = number + മണി ("ഒരു മണി" 1:00, "രണ്ട് മണി" 2:00, "പത്ത് മണി" 10:00); half past = the "-ര" form ("ഒന്നര" 1:30, "രണ്ടര" 2:30, "പത്തര" 10:30); always add the part of day ("രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി", "വൈകുന്നേരം 5 മണി"). Never say "10 AM", "10:00", or "10 മണിക്കൂർ 30 മിനിറ്റ്".
+TIME — speak the clock naturally and NEVER say the unit words "മണിക്കൂർ" (hour) or "മിനിറ്റ്" (minute). Use these forms: :00 (o'clock) = number + മണി ("ഒരു മണി" 1:00, "പത്ത് മണി" 10:00); :15 = "Xഏ കാൽ" ("10ഏ കാൽ" 10:15); :30 (half) = the "-ര" form ("ഒന്നര" 1:30, "രണ്ടര" 2:30, "പത്തര" 10:30); :45 = "Xഏ മുക്കാൽ" ("10ഏ മുക്കാൽ" 10:45); any other minute Y = "Xഏ Y" ("10ഏ 20" 10:20). Always add the part of day ("രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി", "വൈകുന്നേരം 5ഏ 20"). Never say "10 AM", "10:00", or "10 മണിക്കൂർ 30 മിനിറ്റ്".
 For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
 GRAMMAR (apply per reply language — speak like a real native, not a translation):
