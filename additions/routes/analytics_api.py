@@ -41,7 +41,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ..deps import AuthDep, PoolDep, require_auth
+from ..deps import AuthDep, PoolDep, require_auth, require_hospital_access
 
 router = APIRouter(prefix="/admin", tags=["analytics"])
 
@@ -198,6 +198,7 @@ def _tally_languages(rows: list[asyncpg.Record]) -> Dict[str, int]:
     "/hospitals/{hospital_id}/analytics",
     response_model=List[AnalyticsPoint],
     summary="Time-bucketed call metrics",
+    dependencies=[Depends(require_hospital_access)],
 )
 async def get_analytics(
     hospital_id: str,
@@ -286,6 +287,7 @@ async def get_analytics(
     "/hospitals/{hospital_id}/analytics/summary",
     response_model=AnalyticsSummary,
     summary="Aggregate analytics summary with delta comparison",
+    dependencies=[Depends(require_hospital_access)],
 )
 async def get_analytics_summary(
     hospital_id: str,
