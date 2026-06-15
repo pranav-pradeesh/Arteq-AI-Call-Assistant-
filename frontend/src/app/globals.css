@@ -6,6 +6,24 @@
   body {
     @apply bg-gray-50 text-gray-900 antialiased;
   }
+
+  /* Lenis smooth-scroll (https://github.com/darkroomengineering/lenis) */
+  html.lenis,
+  html.lenis body {
+    height: auto;
+  }
+  .lenis.lenis-smooth {
+    scroll-behavior: auto !important;
+  }
+  .lenis.lenis-smooth [data-lenis-prevent] {
+    overscroll-behavior: contain;
+  }
+  .lenis.lenis-stopped {
+    overflow: hidden;
+  }
+  .lenis.lenis-smooth iframe {
+    pointer-events: none;
+  }
 }
 
 @layer components {

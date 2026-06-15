@@ -3,7 +3,7 @@ import * as React from "react";
 import { useRouter } from "next/navigation";
 import { useSession } from "next-auth/react";
 import { AppShell } from "@/components/app-shell";
-import { Spinner } from "@/components/ui";
+import { AppLoader } from "@/components/brand";
 
 export default function AppLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
@@ -14,11 +14,7 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
   }, [status, router]);
 
   if (status !== "authenticated") {
-    return (
-      <div className="grid min-h-screen place-items-center text-gray-400">
-        <Spinner className="h-6 w-6" />
-      </div>
-    );
+    return <AppLoader label="Signing in" />;
   }
   return <AppShell>{children}</AppShell>;
 }

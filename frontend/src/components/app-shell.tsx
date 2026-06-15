@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCurrentHospital } from "./providers";
+import { Reveal } from "./reveal";
 import { cn } from "@/lib/utils";
 
 type Item = { href: string; label: string; icon: React.ElementType };
@@ -173,7 +174,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
-        <main className="min-w-0 flex-1 p-4 sm:p-5">{children}</main>
+        <main className="min-w-0 flex-1 p-4 sm:p-5">
+          <Reveal>{children}</Reveal>
+        </main>
       </div>
     </div>
   );
