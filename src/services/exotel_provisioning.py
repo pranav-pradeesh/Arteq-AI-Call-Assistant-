@@ -23,8 +23,19 @@ from src.config.settings import settings
 logger = structlog.get_logger(__name__)
 
 
+def _account_sid() -> str:
+    """Exotel Account SID used in the API URL path.
+
+    Newer Exotel accounts issue a distinct API Key, API Token and Account SID;
+    the SID (e.g. "arteqai3") is what goes in the URL while the Key/Token are
+    the HTTP Basic credentials. Older accounts used the API Key as the SID, so
+    fall back to EXOTEL_API_KEY when EXOTEL_ACCOUNT_SID is unset.
+    """
+    return settings.EXOTEL_ACCOUNT_SID or settings.EXOTEL_API_KEY
+
+
 def _base() -> str:
-    return f"https://{settings.EXOTEL_SUBDOMAIN}/v1/Accounts/{settings.EXOTEL_API_KEY}"
+    return f"https://{settings.EXOTEL_SUBDOMAIN}/v1/Accounts/{_account_sid()}"
 
 
 def _auth() -> tuple[str, str]:
