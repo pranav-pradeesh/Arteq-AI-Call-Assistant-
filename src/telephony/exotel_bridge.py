@@ -186,6 +186,14 @@ class ExotelLiveKitBridge:
         """Push one Exotel media chunk into the LiveKit audio source."""
         try:
             from livekit import rtc
+            # Drop a trailing odd byte: 16-bit PCM must be sample-aligned, else
+            # `data` and samples_per_channel disagree and every following frame is
+            # byte-shifted into noise.
+            extra = len(pcm) % ex.EXOTEL_BYTES_PER_SAMPLE
+            if extra:
+                pcm = pcm[:-extra]
+            if not pcm:
+                return
             frame = rtc.AudioFrame(
                 data=pcm,
                 sample_rate=ex.EXOTEL_SAMPLE_RATE,
@@ -254,7 +262,7 @@ class ExotelLiveKitBridge:
             await self._ws.send_text(
                 ex.build_media_event(self._stream_sid, pcm, chunk=self._seq, seq=self._seq)
             )
-            self._last_agent_audio = asyncio.get_event_loop().time()
+            self._last_agent_audio = asyncio.get_running_loop().time()
         except Exception as exc:
             logger.debug("exotel_send_failed", error=str(exc)[:100])
 
@@ -267,7 +275,7 @@ class ExotelLiveKitBridge:
         playing whatever audio we already queued. A ``clear`` event drops that
         buffered playback so the interruption feels immediate.
         """
-        now = asyncio.get_event_loop().time()
+        now = asyncio.get_running_loop().time()
         # Only relevant shortly after we forwarded agent audio.
         if now - self._last_agent_audio > 1.0:
             return
@@ -276,7 +284,9 @@ class ExotelLiveKitBridge:
         if not self._is_speech(pcm):
             return
         self._last_clear = now
-        asyncio.create_task(self._send_clear())
+        # Track the task so it isn't garbage-collected mid-send (which silently
+        # drops the clear) and is cancelled on teardown.
+        self._forward_tasks.append(asyncio.create_task(self._send_clear()))
 
     @staticmethod
     def _is_speech(pcm: bytes) -> bool:

@@ -237,7 +237,9 @@ def exotel_webhook_authentic(request: Request, url_token: str) -> bool:
     """
     expected = getattr(settings, "EXOTEL_WEBHOOK_TOKEN", "") or ""
     if not expected:
-        return True
+        # No token configured: allow only outside production. In production a
+        # blank token must NOT fail open — that would let anyone hit the webhook.
+        return str(getattr(settings, "ENV", "dev")).lower() not in ("production", "prod")
     return hmac.compare_digest(url_token, expected)
 
 
