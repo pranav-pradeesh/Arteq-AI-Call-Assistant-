@@ -17,7 +17,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -360,7 +360,7 @@ async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request)
 # ── Exotel Voicebot WebSocket stream ──────────────────────────────────────────
 
 @app.websocket("/ws/exotel/stream/{token}/{tenant_slug}")
-async def exotel_stream_ws(websocket, token: str, tenant_slug: str):
+async def exotel_stream_ws(websocket: WebSocket, token: str, tenant_slug: str):
     """
     Bidirectional Exotel Voicebot/AgentStream WebSocket endpoint.
 
