@@ -45,7 +45,8 @@ class ExotelLiveKitBridge:
         self._source: Any = None          # rtc.AudioSource (Exotel → LiveKit)
         self._forward_tasks: list[asyncio.Task] = []
         self._seq = 0
-        self._closed = False
+        self._closed = False               # stop forwarding (peer gone or call ending)
+        self._torndown = False             # idempotency guard for _teardown
         self._forwarding = False           # guard: only one agent→Exotel stream
         self._send_lock = asyncio.Lock()   # serialize WS sends (no concurrent send_text)
         # Barge-in bookkeeping: timestamp (loop time) of the last agent audio we
@@ -77,7 +78,12 @@ class ExotelLiveKitBridge:
                     break
                 # "mark" echoes and unknown events are ignored.
         except Exception as exc:  # WebSocketDisconnect or transport error
-            logger.info("exotel_ws_closed", slug=self._slug, reason=str(exc)[:120])
+            # A failed send marks the call closed and leaves Starlette's WS in
+            # DISCONNECTED, so the next receive_text() raises a misleading
+            # 'WebSocket is not connected. Need to call "accept" first.'. When we
+            # already know the peer went away, report that instead of the symptom.
+            reason = "peer_disconnected" if self._closed else str(exc)[:120]
+            logger.info("exotel_ws_closed", slug=self._slug, reason=reason)
         finally:
             await self._teardown()
 
@@ -253,6 +259,8 @@ class ExotelLiveKitBridge:
                     break
                 buf.extend(bytes(event.frame.data))
                 while len(buf) >= chunk_bytes:
+                    if self._closed:
+                        break
                     await self._send_media(bytes(buf[:chunk_bytes]))
                     del buf[:chunk_bytes]
         except Exception as exc:
@@ -275,6 +283,12 @@ class ExotelLiveKitBridge:
                 )
             self._last_agent_audio = asyncio.get_running_loop().time()
         except Exception as exc:
+            # The Exotel socket is gone: Starlette flips the WS to DISCONNECTED
+            # on the underlying OSError (and raises a WebSocketDisconnect we
+            # swallow here). Mark the call closed so the forward loop and
+            # barge-in stop writing into a dead socket; the receive side unwinds
+            # on its own and teardown still runs via its own guard.
+            self._closed = True
             logger.debug("exotel_send_failed", error=str(exc)[:100])
 
     # ── Barge-in ───────────────────────────────────────────────────────────────
@@ -318,13 +332,14 @@ class ExotelLiveKitBridge:
                 await self._ws.send_text(ex.build_clear_event(self._stream_sid))
             logger.info("exotel_ws_clear_sent", sid=self._stream_sid[-6:])
         except Exception:
-            pass
+            self._closed = True
 
     # ── Teardown ───────────────────────────────────────────────────────────────
 
     async def _teardown(self) -> None:
-        if self._closed:
+        if self._torndown:
             return
+        self._torndown = True
         self._closed = True
         for task in self._forward_tasks:
             task.cancel()
