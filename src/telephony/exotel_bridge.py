@@ -46,6 +46,8 @@ class ExotelLiveKitBridge:
         self._forward_tasks: list[asyncio.Task] = []
         self._seq = 0
         self._closed = False
+        self._forwarding = False           # guard: only one agent→Exotel stream
+        self._send_lock = asyncio.Lock()   # serialize WS sends (no concurrent send_text)
         # Barge-in bookkeeping: timestamp (loop time) of the last agent audio we
         # forwarded, and the last time we issued a clear, to debounce barge-ins.
         self._last_agent_audio = 0.0
@@ -218,6 +220,14 @@ class ExotelLiveKitBridge:
         ident = getattr(participant, "identity", "")
         if ident.startswith("exotel-caller"):
             return
+        # Forward only ONE agent audio stream. track_subscribed can fire more than
+        # once (re-publish / a second track); a second concurrent sender on the
+        # same WebSocket corrupts its state — the receive loop then dies with
+        # 'WebSocket is not connected. Need to call "accept" first.' — and doubles
+        # the audio sent to the caller.
+        if self._forwarding:
+            return
+        self._forwarding = True
         logger.info("exotel_bridge_agent_track", participant=ident)
         self._forward_tasks.append(
             asyncio.create_task(self._forward_agent_audio(track))
@@ -259,9 +269,10 @@ class ExotelLiveKitBridge:
             return
         self._seq += 1
         try:
-            await self._ws.send_text(
-                ex.build_media_event(self._stream_sid, pcm, chunk=self._seq, seq=self._seq)
-            )
+            async with self._send_lock:
+                await self._ws.send_text(
+                    ex.build_media_event(self._stream_sid, pcm, chunk=self._seq, seq=self._seq)
+                )
             self._last_agent_audio = asyncio.get_running_loop().time()
         except Exception as exc:
             logger.debug("exotel_send_failed", error=str(exc)[:100])
@@ -303,7 +314,8 @@ class ExotelLiveKitBridge:
 
     async def _send_clear(self) -> None:
         try:
-            await self._ws.send_text(ex.build_clear_event(self._stream_sid))
+            async with self._send_lock:
+                await self._ws.send_text(ex.build_clear_event(self._stream_sid))
             logger.info("exotel_ws_clear_sent", sid=self._stream_sid[-6:])
         except Exception:
             pass
