@@ -224,7 +224,7 @@ function TenantFormModal({
         <Field label="Phone">
           <Input value={form.phone} onChange={(e) => set("phone", e.target.value)} />
         </Field>
-        <Field label="Plivo Number">
+        <Field label="Phone Number (DID)">
           <Input value={form.plivo_number} onChange={(e) => set("plivo_number", e.target.value)} />
         </Field>
         <Field label="Agent Name">
@@ -306,7 +306,7 @@ export default function TenantsPage() {
       cell: ({ row }) => row.original.phone ?? <span className="text-gray-400">—</span>,
     },
     {
-      header: "Plivo Number",
+      header: "Phone Number",
       accessorKey: "plivo_number",
       cell: ({ row }) =>
         row.original.plivo_number ? (

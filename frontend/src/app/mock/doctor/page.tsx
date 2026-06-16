@@ -121,11 +121,26 @@ function ScheduleModal({ open, onClose }: { open: boolean; onClose: () => void }
   };
 
   return (
-    <Modal open={open} onClose={close} title="Schedule appointment" wide>
+    <Modal
+      open={open}
+      onClose={close}
+      title="Schedule appointment"
+      wide
+      footer={
+        created ? undefined : (
+          <>
+            <Button type="button" variant="ghost" onClick={close}>Cancel</Button>
+            <Button type="submit" form="schedule-form" disabled={!patientId || !slot}>
+              Create booking
+            </Button>
+          </>
+        )
+      }
+    >
       {created ? (
         <ResultStep booking={created} onClose={close} />
       ) : (
-        <form onSubmit={submit} className="space-y-4">
+        <form id="schedule-form" onSubmit={submit} className="space-y-4">
           <div className="grid gap-3 sm:grid-cols-2">
             <Field label="Patient">
               <select
@@ -180,11 +195,6 @@ function ScheduleModal({ open, onClose }: { open: boolean; onClose: () => void }
                 desc="Issue a temporary token over WhatsApp. AI confirms ~1 week before; token activates on confirmation."
               />
             </div>
-          </div>
-
-          <div className="flex justify-end gap-2 pt-1">
-            <Button type="button" variant="ghost" onClick={close}>Cancel</Button>
-            <Button type="submit" disabled={!patientId || !slot}>Create booking</Button>
           </div>
         </form>
       )}

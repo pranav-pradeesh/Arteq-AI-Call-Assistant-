@@ -10,6 +10,7 @@ import type {
   Faq, Appointment, AppointmentStatus, Callback, CallLog, Stats, Tenant,
   TelephonyStatus, SetupStatus, HisConfig, AnalyticsPoint, AnalyticsSummary,
   CallFeedback, MissedQuestion, User,
+  Patient, Booking, BookingStatus, PaymentMode, WhatsAppMessage,
 } from "./types";
 
 import { getSession } from "next-auth/react";
@@ -173,6 +174,24 @@ export const api = {
   listMissedQuestions: (hid: string, language?: string) =>
     get<MissedQuestion[]>(`/hospitals/${hid}/missed-questions${qs({ language })}`),
   activeCalls: (hid: string) => get<CallLog[]>(`/hospitals/${hid}/active-calls`),
+
+  // ── Patient intake workflow (planned endpoints — see
+  //    backend-patches/BACKEND_SPEC_patient_intake.md) ──────────────────────
+  listPatients: (hid: string) => get<Patient[]>(`/hospitals/${hid}/patients`),
+  createPatient: (hid: string, b: { name: string; phone: string }) =>
+    post<Patient>(`/hospitals/${hid}/patients`, b),
+  listBookings: (hid: string) => get<Booking[]>(`/hospitals/${hid}/bookings`),
+  createBooking: (
+    hid: string,
+    b: { patient_id: string; slot: string; payment_mode: PaymentMode; amount_paise: number }
+  ) => post<Booking>(`/hospitals/${hid}/bookings`, b),
+  updateBookingStatus: (hid: string, id: string, status: BookingStatus) =>
+    put<Booking>(`/hospitals/${hid}/bookings/${id}/status`, { status }),
+  changeBookingToken: (hid: string, id: string) =>
+    post<Booking>(`/hospitals/${hid}/bookings/${id}/change-token`),
+  runConfirmationCall: (hid: string, id: string) =>
+    post<Booking>(`/hospitals/${hid}/bookings/${id}/confirm-call`),
+  listWhatsApp: (hid: string) => get<WhatsAppMessage[]>(`/hospitals/${hid}/whatsapp`),
 
   // ── Users / RBAC (planned) ────────────────────────────
   me: () => get<User>("/auth/me"),

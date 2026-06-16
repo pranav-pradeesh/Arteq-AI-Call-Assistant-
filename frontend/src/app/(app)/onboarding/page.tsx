@@ -67,7 +67,7 @@ export default function OnboardingPage() {
           <CardBody className="space-y-3 text-sm">
             <div className="flex items-center gap-2"><Badge tone="green">Success</Badge><span className="font-medium">{form.name}</span></div>
             <div><span className="text-gray-500">Slug:</span> <code>{result.slug}</code></div>
-            {result.plivo_number && <div><span className="text-gray-500">Plivo number:</span> <code>{result.plivo_number}</code></div>}
+            {result.plivo_number && <div><span className="text-gray-500">Phone number:</span> <code>{result.plivo_number}</code></div>}
             {result.bsnl_forward_code && (
               <div><span className="text-gray-500">BSNL forward code:</span> <code>{result.bsnl_forward_code}</code></div>
             )}
@@ -103,7 +103,7 @@ export default function OnboardingPage() {
           <Field label="Address"><Input value={form.address} onChange={(e) => set("address", e.target.value)} /></Field>
           <label className="col-span-full mt-1 flex items-center gap-2 text-sm">
             <input type="checkbox" checked={form.provision_plivo_number} onChange={(e) => set("provision_plivo_number", e.target.checked)} />
-            Provision a Plivo number now
+            Provision a phone number now
           </label>
         </CardBody>
       </Card>

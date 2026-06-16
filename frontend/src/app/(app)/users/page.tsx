@@ -15,12 +15,13 @@ type UserForm = {
   role: Role;
   password: string;
   active: boolean;
+  tenant_slugs: string[];
 };
 
-const EMPTY_FORM: UserForm = { email: "", role: "viewer", password: "", active: true };
+const EMPTY_FORM: UserForm = { email: "", role: "viewer", password: "", active: true, tenant_slugs: [] };
 
 function userToForm(u: User): UserForm {
-  return { email: u.email, role: u.role, password: "", active: u.active };
+  return { email: u.email, role: u.role, password: "", active: u.active, tenant_slugs: u.tenant_slugs ?? [] };
 }
 
 function roleTone(r: Role): "red" | "blue" | "gray" {
@@ -41,6 +42,7 @@ function UserFormModal({
   const toast = useToast();
   const qc = useQueryClient();
   const [form, setForm] = React.useState<UserForm>(EMPTY_FORM);
+  const { data: hospitals = [] } = useQuery({ queryKey: ["hospitals"], queryFn: api.listHospitals });
 
   React.useEffect(() => {
     if (editing) setForm(userToForm(editing));
@@ -53,11 +55,12 @@ function UserFormModal({
 
   const saveMutation = useMutation({
     mutationFn: () => {
+      // super_admins see every hospital, so tenant_slugs is irrelevant for them.
+      const tenant_slugs = form.role === "super_admin" ? [] : form.tenant_slugs;
       if (editing) {
-        const payload: Partial<User> = { email: form.email, role: form.role, active: form.active };
-        return api.updateUser(editing.id, payload);
+        return api.updateUser(editing.id, { email: form.email, role: form.role, active: form.active, tenant_slugs });
       }
-      return api.createUser({ email: form.email, role: form.role, active: form.active, password: form.password });
+      return api.createUser({ email: form.email, role: form.role, active: form.active, password: form.password, tenant_slugs });
     },
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["users"] });
@@ -90,6 +93,41 @@ function UserFormModal({
           ))}
         </Select>
       </Field>
+      {form.role !== "super_admin" && (
+        <Field label="Hospitals this user can access">
+          <div className="max-h-40 space-y-1 overflow-auto rounded-md border border-gray-200 p-2">
+            {hospitals.length === 0 && (
+              <p className="text-xs text-gray-400">No hospitals available.</p>
+            )}
+            {hospitals.map((h) => {
+              const slug = h.slug ?? "";
+              const checked = !!slug && form.tenant_slugs.includes(slug);
+              return (
+                <label key={h.id} className="flex items-center gap-2 text-sm">
+                  <input
+                    type="checkbox"
+                    disabled={!slug}
+                    checked={checked}
+                    onChange={(e) =>
+                      set(
+                        "tenant_slugs",
+                        e.target.checked
+                          ? [...form.tenant_slugs, slug]
+                          : form.tenant_slugs.filter((s) => s !== slug)
+                      )
+                    }
+                    className="h-4 w-4 rounded border-gray-300"
+                  />
+                  {h.name}{slug ? "" : " (no slug — set one first)"}
+                </label>
+              );
+            })}
+          </div>
+          <p className="mt-1 text-xs text-gray-400">
+            Super-admins see all hospitals; tenant-admins / viewers see only the ones checked here.
+          </p>
+        </Field>
+      )}
       {!editing && (
         <Field label="Password *">
           <Input
@@ -159,6 +197,20 @@ export default function UsersPage() {
       ),
     },
     {
+      header: "Hospitals",
+      id: "tenant_slugs",
+      cell: ({ row }) => {
+        const u = row.original;
+        if (u.role === "super_admin") return <span className="text-xs text-gray-400">All</span>;
+        const slugs = u.tenant_slugs ?? [];
+        return slugs.length ? (
+          <span className="text-xs">{slugs.join(", ")}</span>
+        ) : (
+          <span className="text-xs text-gray-400">none</span>
+        );
+      },
+    },
+    {
       header: "Actions",
       id: "actions",
       cell: ({ row }) => {
@@ -190,8 +242,8 @@ export default function UsersPage() {
       <div>
         <PageHeader title="Users" />
         <EmptyState
-          title="User management requires the RBAC backend (planned)"
-          hint="The /users endpoint has not been implemented on the backend yet. This page will become available once the RBAC system is deployed."
+          title="Couldn't load users"
+          hint="Only super-admins can manage users. Check your connection and try again."
         />
       </div>
     );

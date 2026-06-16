@@ -45,7 +45,7 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
     onSuccess: (result) => {
       setProvisionResult(result);
       qc.invalidateQueries({ queryKey: ["setup", hospitalId] });
-      toast("Plivo number provisioned successfully");
+      toast("Phone number provisioned successfully");
     },
     onError: (e: Error) => toast(e.message, "err"),
   });
@@ -106,7 +106,7 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
           onClick={() => provisionMutation.mutate()}
           disabled={provisionMutation.isPending}
         >
-          {provisionMutation.isPending && <Spinner />} Provision Plivo Number
+          {provisionMutation.isPending && <Spinner />} Provision Phone Number
         </Button>
       </div>
 
@@ -117,7 +117,7 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
           </CardHeader>
           <CardBody className="space-y-3">
             <div>
-              <p className="mb-1 text-xs font-medium text-gray-500">Plivo Number</p>
+              <p className="mb-1 text-xs font-medium text-gray-500">Phone Number</p>
               <div className="flex items-center gap-3">
                 <code className="font-mono text-sm text-gray-800">{provisionResult.plivo_number}</code>
                 <CopyButton text={provisionResult.plivo_number} />
@@ -133,7 +133,7 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
                   <CopyButton text={`**21*${provisionResult.plivo_number}#`} />
                 </div>
                 <p className="mt-1 text-xs text-gray-400">
-                  Dial this code on a BSNL line to forward calls to your Plivo number.
+                  Dial this code on a BSNL line to forward calls to your Arteq number.
                 </p>
               </div>
             )}

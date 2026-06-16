@@ -3,6 +3,7 @@ import * as React from "react";
 import { Phone, MessageCircle, CalendarCheck, CheckCircle2 } from "lucide-react";
 import { PageHeader, Card, CardBody, CardHeader, Badge, EmptyState } from "@/components/ui";
 import { StatCard } from "@/components/stat-card";
+import { WhatsAppFeed } from "@/components/whatsapp-feed";
 import { fmtDateTime, paiseToRupees } from "@/lib/utils";
 import { useMockStore, type BookingStatus } from "../_store";
 

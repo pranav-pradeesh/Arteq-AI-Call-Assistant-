@@ -123,19 +123,16 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { data: session } = useSession();
   const role = (session?.user as { role?: string } | undefined)?.role;
-  // Show admin-only sections to super_admins. During the bootstrap phase the
-  // role may be undefined briefly; treat that as allowed so the management
-  // screens are never accidentally hidden. Defined non-admin roles
-  // (tenant_admin / viewer) are still excluded.
-  const sections = SECTIONS.filter(
-    (s) => !s.superAdminOnly || role === "super_admin" || !role
-  );
+  // Admin-only sections (Hospitals, Onboard, Tenants, Users) are visible only to
+  // super_admins. The (app) layout already waits for an authenticated session
+  // before rendering, so `role` is resolved by the time this runs.
+  const sections = SECTIONS.filter((s) => !s.superAdminOnly || role === "super_admin");
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
   return (
-    <div className="flex min-h-screen">
-      {/* Desktop sidebar */}
-      <aside className="hidden w-60 shrink-0 border-r border-gray-200 bg-white lg:block">
+    <div className="flex h-dvh overflow-hidden">
+      {/* Desktop sidebar — fixed full height, scrolls independently if nav is long */}
+      <aside className="hidden w-60 shrink-0 overflow-y-auto border-r border-gray-200 bg-white lg:block">
         <NavContent sections={sections} pathname={pathname} />
       </aside>
 
@@ -143,7 +140,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       {mobileOpen && (
         <div className="fixed inset-0 z-40 lg:hidden">
           <div className="absolute inset-0 bg-black/40" onClick={() => setMobileOpen(false)} />
-          <aside className="absolute left-0 top-0 h-full w-64 border-r border-gray-200 bg-white">
+          <aside className="absolute left-0 top-0 h-full w-64 overflow-y-auto border-r border-gray-200 bg-white">
             <button
               className="absolute right-2 top-2 rounded p-1 text-gray-400 hover:bg-gray-100"
               onClick={() => setMobileOpen(false)}
@@ -156,7 +153,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between gap-2 border-b border-gray-200 bg-white px-4">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-2 border-b border-gray-200 bg-white px-4">
           <div className="flex min-w-0 items-center gap-2">
             <button className="rounded p-1.5 text-gray-600 hover:bg-gray-100 lg:hidden" onClick={() => setMobileOpen(true)} aria-label="Open menu">
               <Menu className="h-5 w-5" />
@@ -174,7 +171,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
-        <main className="min-w-0 flex-1 p-4 sm:p-5">
+        <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
           <Reveal>{children}</Reveal>
         </main>
       </div>
