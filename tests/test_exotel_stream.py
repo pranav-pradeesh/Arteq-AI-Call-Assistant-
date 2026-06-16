@@ -54,6 +54,36 @@ def test_parse_start_camel_case_fallback():
     assert start.custom_parameters == {"k": "v"}
 
 
+def test_sample_rate_from_start_reads_media_format():
+    start = ex.parse_start({
+        "event": "start",
+        "start": {"stream_sid": "MZ", "media_format": {"sample_rate": "16000"}},
+    })
+    assert ex.sample_rate_from_start(start) == 16000
+
+
+def test_sample_rate_from_start_camel_case_and_int():
+    start = ex.parse_start({
+        "event": "start",
+        "start": {"stream_sid": "MZ", "mediaFormat": {"sampleRate": 24000}},
+    })
+    assert ex.sample_rate_from_start(start) == 24000
+
+
+def test_sample_rate_from_start_defaults_when_absent():
+    start = ex.parse_start({"event": "start", "start": {"stream_sid": "MZ"}})
+    assert ex.sample_rate_from_start(start) == ex.EXOTEL_SAMPLE_RATE  # 8000
+
+
+def test_sample_rate_from_start_rejects_unsupported():
+    start = ex.parse_start({
+        "event": "start",
+        "start": {"stream_sid": "MZ", "media_format": {"sample_rate": "44100"}},
+    })
+    # Unknown rate falls back to the default rather than trusting a bad value.
+    assert ex.sample_rate_from_start(start) == ex.EXOTEL_SAMPLE_RATE
+
+
 def test_extract_stream_sid_variants():
     assert ex.extract_stream_sid({"stream_sid": "A"}) == "A"
     assert ex.extract_stream_sid({"streamSid": "B"}) == "B"

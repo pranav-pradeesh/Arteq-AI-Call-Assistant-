@@ -41,6 +41,7 @@ class ExotelLiveKitBridge:
         self._slug = (slug or "default").strip().lower() or "default"
         self._start: ex.StreamStart | None = None
         self._stream_sid = ""
+        self._sample_rate = ex.EXOTEL_SAMPLE_RATE  # negotiated from the start event
         self._room: Any = None
         self._source: Any = None          # rtc.AudioSource (Exotel → LiveKit)
         self._forward_tasks: list[asyncio.Task] = []
@@ -53,6 +54,11 @@ class ExotelLiveKitBridge:
         # forwarded, and the last time we issued a clear, to debounce barge-ins.
         self._last_agent_audio = 0.0
         self._last_clear = 0.0
+        # Diagnostics: frame counters and start time, logged at teardown so a
+        # single call shows whether audio flowed each way and for how long.
+        self._in_frames = 0
+        self._out_frames = 0
+        self._started_at = 0.0
 
     # ── Public entrypoint ──────────────────────────────────────────────────────
 
@@ -92,6 +98,11 @@ class ExotelLiveKitBridge:
     async def _on_start(self, msg: dict[str, Any]) -> None:
         self._start = ex.parse_start(msg)
         self._stream_sid = self._start.stream_sid
+        # Honour the rate Exotel negotiated (16 kHz unless the applet URL pins
+        # ?sample-rate=8000); assuming 8 kHz when it streams 16 kHz garbles audio
+        # both ways and makes the agent unintelligible to the caller.
+        self._sample_rate = ex.sample_rate_from_start(self._start)
+        self._started_at = asyncio.get_running_loop().time()
         # Outbound calls pre-create the room and pass its name through; inbound
         # mints a fresh room so the agent dispatches to a clean conversation.
         room_name = self._resolve_room_name()
@@ -101,6 +112,7 @@ class ExotelLiveKitBridge:
             room=room_name,
             sid=self._stream_sid[-6:],
             frm=self._start.from_number[-4:],
+            rate=self._sample_rate,
         )
         await self._join_room(room_name)
 
@@ -181,7 +193,7 @@ class ExotelLiveKitBridge:
         # Publish the caller's audio as an 8 kHz mono source. LiveKit (and the
         # agent's STT) resample as needed, so we feed Exotel's native rate
         # straight through with no manual resampling.
-        source = rtc.AudioSource(ex.EXOTEL_SAMPLE_RATE, ex.EXOTEL_NUM_CHANNELS)
+        source = rtc.AudioSource(self._sample_rate, ex.EXOTEL_NUM_CHANNELS)
         track = rtc.LocalAudioTrack.create_audio_track("caller", source)
         await room.local_participant.publish_track(
             track,
@@ -204,11 +216,12 @@ class ExotelLiveKitBridge:
                 return
             frame = rtc.AudioFrame(
                 data=pcm,
-                sample_rate=ex.EXOTEL_SAMPLE_RATE,
+                sample_rate=self._sample_rate,
                 num_channels=ex.EXOTEL_NUM_CHANNELS,
                 samples_per_channel=len(pcm) // ex.EXOTEL_BYTES_PER_SAMPLE,
             )
             await self._source.capture_frame(frame)
+            self._in_frames += 1
         except Exception as exc:
             logger.debug("exotel_capture_failed", error=str(exc)[:100])
 
@@ -246,10 +259,10 @@ class ExotelLiveKitBridge:
         except ImportError:
             return
         chunk_bytes = ex._normalize_frame_bytes(settings.EXOTEL_STREAM_CHUNK_BYTES)
-        # AudioStream resamples to Exotel's 8 kHz mono for us.
+        # AudioStream resamples to Exotel's negotiated mono rate for us.
         audio_stream = rtc.AudioStream(
             track,
-            sample_rate=ex.EXOTEL_SAMPLE_RATE,
+            sample_rate=self._sample_rate,
             num_channels=ex.EXOTEL_NUM_CHANNELS,
         )
         buf = bytearray()
@@ -282,6 +295,7 @@ class ExotelLiveKitBridge:
                     ex.build_media_event(self._stream_sid, pcm, chunk=self._seq, seq=self._seq)
                 )
             self._last_agent_audio = asyncio.get_running_loop().time()
+            self._out_frames += 1
         except Exception as exc:
             # The Exotel socket is gone: Starlette flips the WS to DISCONNECTED
             # on the underlying OSError (and raises a WebSocketDisconnect we
@@ -348,4 +362,15 @@ class ExotelLiveKitBridge:
                 await self._room.disconnect()
             except Exception:
                 pass
-        logger.info("exotel_bridge_torndown", slug=self._slug, sid=self._stream_sid[-6:])
+        duration = 0.0
+        if self._started_at:
+            duration = round(asyncio.get_running_loop().time() - self._started_at, 1)
+        logger.info(
+            "exotel_bridge_torndown",
+            slug=self._slug,
+            sid=self._stream_sid[-6:],
+            rate=self._sample_rate,
+            in_frames=self._in_frames,
+            out_frames=self._out_frames,
+            duration_s=duration,
+        )

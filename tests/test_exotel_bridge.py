@@ -42,6 +42,34 @@ class FakeWS:
         return item
 
 
+def test_on_start_adopts_negotiated_sample_rate():
+    """The bridge uses the rate Exotel declares, not a hard-coded 8 kHz.
+
+    _join_room short-circuits when LiveKit is unconfigured (the test env), so
+    this exercises only the start parsing / rate selection.
+    """
+    ws = FakeWS()
+    bridge = ExotelLiveKitBridge(ws, "default")
+    msg = {
+        "event": "start",
+        "start": {"stream_sid": "MZ16", "media_format": {"sample_rate": "16000"}},
+    }
+
+    asyncio.run(bridge._on_start(msg))
+
+    assert bridge._sample_rate == 16000
+    assert bridge._stream_sid == "MZ16"
+
+
+def test_on_start_defaults_rate_when_format_missing():
+    ws = FakeWS()
+    bridge = ExotelLiveKitBridge(ws, "default")
+
+    asyncio.run(bridge._on_start({"event": "start", "start": {"stream_sid": "MZ"}}))
+
+    assert bridge._sample_rate == 8000
+
+
 def test_send_media_failure_marks_closed():
     """A failed send flips _closed (so forwarding stops) but does not raise."""
     ws = FakeWS(send_raises=OSError("broken pipe"))

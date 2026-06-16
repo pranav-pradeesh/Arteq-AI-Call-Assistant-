@@ -41,6 +41,12 @@ EXOTEL_NUM_CHANNELS = 1          # mono
 EXOTEL_BYTES_PER_SAMPLE = 2      # 16-bit signed PCM
 EXOTEL_BYTES_PER_SEC = EXOTEL_SAMPLE_RATE * EXOTEL_NUM_CHANNELS * EXOTEL_BYTES_PER_SAMPLE  # 16000
 
+# Sample rates Exotel can negotiate (via the applet URL's ?sample-rate param).
+# Exotel streams 16 kHz by default and only downsamples to 8 kHz when the URL
+# carries ?sample-rate=8000, so the bridge must honour whatever the start event
+# declares rather than assuming 8 kHz.
+SUPPORTED_SAMPLE_RATES = (8000, 16000, 24000)
+
 # Outgoing chunk constraints (bytes).
 CHUNK_MULTIPLE = 320
 MIN_CHUNK_BYTES = 3200           # ≈100 ms
@@ -112,6 +118,24 @@ def parse_start(msg: dict[str, Any]) -> StreamStart:
         custom_parameters={str(k): str(v) for k, v in params.items()},
         media_format=media_format,
     )
+
+
+def sample_rate_from_start(start: StreamStart, default: int = EXOTEL_SAMPLE_RATE) -> int:
+    """Return the PCM sample rate Exotel declared in the ``start`` media_format.
+
+    Exotel streams 16 kHz by default and only sends 8 kHz when the applet URL
+    carries ``?sample-rate=8000``, so the bridge must use the negotiated rate for
+    both the LiveKit source and the audio it streams back — assuming 8 kHz when
+    Exotel is actually sending 16 kHz garbles audio in both directions. Falls
+    back to ``default`` when the format is absent or unrecognised.
+    """
+    fmt = start.media_format or {}
+    raw = fmt.get("sample_rate") or fmt.get("sampleRate") or fmt.get("rate")
+    try:
+        rate = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return rate if rate in SUPPORTED_SAMPLE_RATES else default
 
 
 def decode_media(msg: dict[str, Any]) -> bytes:
@@ -217,6 +241,7 @@ __all__ = [
     "EXOTEL_NUM_CHANNELS",
     "EXOTEL_BYTES_PER_SAMPLE",
     "EXOTEL_BYTES_PER_SEC",
+    "SUPPORTED_SAMPLE_RATES",
     "CHUNK_MULTIPLE",
     "MIN_CHUNK_BYTES",
     "MAX_CHUNK_BYTES",
@@ -225,6 +250,7 @@ __all__ = [
     "event_type",
     "extract_stream_sid",
     "parse_start",
+    "sample_rate_from_start",
     "decode_media",
     "extract_dtmf",
     "chunk_pcm",
