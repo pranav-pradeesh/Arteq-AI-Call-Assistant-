@@ -140,25 +140,24 @@ def test_flush_pcm_pads_to_multiple():
 
 def test_build_media_event_shape():
     pcm = b"\xab\xcd" * 16
-    raw = ex.build_media_event("MZ1", pcm, chunk=3, seq=3)
-    msg = json.loads(raw)
-    assert msg["event"] == "media"
-    assert msg["stream_sid"] == "MZ1"
-    assert msg["media"]["chunk"] == 3
-    assert msg["sequence_number"] == 3
-    assert base64.b64decode(msg["media"]["payload"]) == pcm
+    msg = json.loads(ex.build_media_event("MZ1", pcm))
+    # Minimal frame, camelCase streamSid, no chunk/sequence_number/timestamp —
+    # Exotel rejects (and closes on) anything else.
+    assert msg == {
+        "event": "media",
+        "streamSid": "MZ1",
+        "media": {"payload": base64.b64encode(pcm).decode("ascii")},
+    }
 
 
 def test_build_clear_event_shape():
     msg = json.loads(ex.build_clear_event("MZ2"))
-    assert msg == {"event": "clear", "stream_sid": "MZ2"}
+    assert msg == {"event": "clear", "streamSid": "MZ2"}
 
 
 def test_build_mark_event_shape():
-    msg = json.loads(ex.build_mark_event("MZ3", "greeting-done", seq=7))
-    assert msg["event"] == "mark"
-    assert msg["mark"]["name"] == "greeting-done"
-    assert msg["sequence_number"] == 7
+    msg = json.loads(ex.build_mark_event("MZ3", "greeting-done"))
+    assert msg == {"event": "mark", "streamSid": "MZ3", "mark": {"name": "greeting-done"}}
 
 
 def test_parse_message_malformed():

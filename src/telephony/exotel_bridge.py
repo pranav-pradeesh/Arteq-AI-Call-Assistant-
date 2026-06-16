@@ -45,7 +45,6 @@ class ExotelLiveKitBridge:
         self._room: Any = None
         self._source: Any = None          # rtc.AudioSource (Exotel → LiveKit)
         self._forward_tasks: list[asyncio.Task] = []
-        self._seq = 0
         self._closed = False               # stop forwarding (peer gone or call ending)
         self._torndown = False             # idempotency guard for _teardown
         self._forwarding = False           # guard: only one agent→Exotel stream
@@ -288,12 +287,9 @@ class ExotelLiveKitBridge:
     async def _send_media(self, pcm: bytes) -> None:
         if self._closed or not self._stream_sid:
             return
-        self._seq += 1
         try:
             async with self._send_lock:
-                await self._ws.send_text(
-                    ex.build_media_event(self._stream_sid, pcm, chunk=self._seq, seq=self._seq)
-                )
+                await self._ws.send_text(ex.build_media_event(self._stream_sid, pcm))
             self._last_agent_audio = asyncio.get_running_loop().time()
             self._out_frames += 1
         except Exception as exc:

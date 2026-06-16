@@ -21,9 +21,11 @@ Messages FROM Exotel:  connected → start → media* → (dtmf) → stop
 Messages TO Exotel  :  media (audio back), mark (playback checkpoint),
                        clear (flush buffered playback — used for barge-in)
 
-Note on casing: the Voicebot applet uses snake_case ``stream_sid``; some Exotel
-flows / the pipecat client use camelCase ``streamSid``. We accept both on the
-way in and emit snake_case on the way out (matching the Voicebot applet).
+Note on casing: Exotel sends ``stream_sid`` (snake) or ``streamSid`` (camel)
+depending on the flow, so we accept both on the way in. On the way out we emit
+camelCase ``streamSid`` to match working bidirectional clients (e.g. pipecat) —
+Exotel keys playback on ``streamSid`` and drops the connection if the outbound
+``media`` frame doesn't match, so the casing matters here.
 
 Reference: https://developer.exotel.com/docs/agentstream/developer-guide
 """
@@ -200,19 +202,21 @@ def _normalize_frame_bytes(frame_bytes: int) -> int:
     return max(MIN_CHUNK_BYTES, frame_bytes)
 
 
-def build_media_event(stream_sid: str, pcm: bytes, *, chunk: int = 0, seq: int = 0) -> str:
-    """Build a ``media`` event (audio back to the caller) as a JSON string."""
+def build_media_event(stream_sid: str, pcm: bytes) -> str:
+    """Build a ``media`` event (audio back to the caller) as a JSON string.
+
+    Mirrors the minimal frame that working Exotel bidirectional clients (e.g.
+    pipecat's serializer) send: camelCase ``streamSid`` and nothing but
+    ``media.payload``. Exotel keys outbound playback on ``streamSid`` and rejects
+    frames carrying extra fields (``chunk`` / ``sequence_number`` / ``timestamp``)
+    by closing the socket after the first one, so we keep the frame minimal.
+    """
     payload = base64.b64encode(pcm).decode("ascii")
-    msg: dict[str, Any] = {
+    return json.dumps({
         "event": "media",
-        "stream_sid": stream_sid,
+        "streamSid": stream_sid,
         "media": {"payload": payload},
-    }
-    if chunk:
-        msg["media"]["chunk"] = chunk
-    if seq:
-        msg["sequence_number"] = seq
-    return json.dumps(msg)
+    })
 
 
 def build_clear_event(stream_sid: str) -> str:
@@ -221,19 +225,16 @@ def build_clear_event(stream_sid: str) -> str:
     Sent on barge-in so the caller's interruption stops our queued audio
     immediately instead of after the already-buffered speech finishes.
     """
-    return json.dumps({"event": "clear", "stream_sid": stream_sid})
+    return json.dumps({"event": "clear", "streamSid": stream_sid})
 
 
-def build_mark_event(stream_sid: str, name: str, *, seq: int = 0) -> str:
+def build_mark_event(stream_sid: str, name: str) -> str:
     """Build a ``mark`` event — a playback checkpoint Exotel echoes back."""
-    msg: dict[str, Any] = {
+    return json.dumps({
         "event": "mark",
-        "stream_sid": stream_sid,
+        "streamSid": stream_sid,
         "mark": {"name": name},
-    }
-    if seq:
-        msg["sequence_number"] = seq
-    return json.dumps(msg)
+    })
 
 
 __all__ = [
