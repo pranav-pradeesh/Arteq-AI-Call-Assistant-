@@ -199,7 +199,7 @@ function TenantFormModal({
       saving={saveMutation.isPending}
       wide
     >
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
         <Field label="Name *">
           <Input required value={form.name} onChange={(e) => set("name", e.target.value)} />
         </Field>

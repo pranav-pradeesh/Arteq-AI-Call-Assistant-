@@ -87,9 +87,9 @@ export function EmptyState({ title, hint }: { title: string; hint?: string }) {
 
 export function PageHeader({ title, action }: { title: string; action?: React.ReactNode }) {
   return (
-    <div className="mb-4 flex items-center justify-between">
+    <div className="mb-4 flex flex-wrap items-center justify-between gap-2">
       <h1 className="text-lg font-semibold text-gray-900">{title}</h1>
-      {action}
+      {action && <div className="flex flex-wrap items-center gap-2">{action}</div>}
     </div>
   );
 }
