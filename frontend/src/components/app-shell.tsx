@@ -7,12 +7,15 @@ import { signOut, useSession } from "next-auth/react";
 import {
   LayoutDashboard, Phone, MessageSquareText, BarChart3, CalendarCheck, PhoneCall,
   Radio, Settings, Building2, Stethoscope, HelpCircle, Receipt, Siren, BookOpen,
-  Network, Users, Boxes, LogOut, PlusCircle, Menu, X,
+  Network, Users, Boxes, LogOut, PlusCircle, Menu, X, Lock,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCurrentHospital } from "./providers";
 import { Reveal } from "./reveal";
+import { TrialBanner } from "./trial-banner";
 import { cn } from "@/lib/utils";
+
+const TRIAL_BLOCKED_PATHS = new Set(["/calls", "/qa", "/analytics", "/appointments", "/callbacks", "/knowledge"]);
 
 type Item = { href: string; label: string; icon: React.ElementType };
 const SECTIONS: { title: string; items: Item[]; superAdminOnly?: boolean }[] = [
@@ -83,8 +86,8 @@ function HospitalSwitcher() {
 type Section = (typeof SECTIONS)[number];
 
 function NavContent({
-  sections, pathname, onNavigate,
-}: { sections: Section[]; pathname: string; onNavigate?: () => void }) {
+  sections, pathname, onNavigate, blockedPaths,
+}: { sections: Section[]; pathname: string; onNavigate?: () => void; blockedPaths?: Set<string> }) {
   return (
     <>
       <div className="flex h-14 items-center gap-2 px-5 font-semibold">
@@ -98,7 +101,13 @@ function NavContent({
             {s.items.map((it) => {
               const active = pathname === it.href;
               const Icon = it.icon;
-              return (
+              const isBlocked = blockedPaths?.has(it.href);
+              return isBlocked ? (
+                <div key={it.href} className="flex items-center gap-2.5 rounded-md px-2 py-1.5 text-sm text-gray-400 cursor-not-allowed opacity-60">
+                  <Icon className="h-4 w-4" /> {it.label}
+                  <Lock className="h-3 w-3 ml-auto" />
+                </div>
+              ) : (
                 <Link
                   key={it.href}
                   href={it.href}
@@ -129,11 +138,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const sections = SECTIONS.filter((s) => !s.superAdminOnly || role === "super_admin");
   const [mobileOpen, setMobileOpen] = React.useState(false);
 
+  const { hospitalId } = useCurrentHospital();
+  const { data: trialStatus } = useQuery({
+    queryKey: ["trial-status", hospitalId],
+    queryFn: () => hospitalId ? api.getTrialStatus(hospitalId) : Promise.resolve(null),
+    enabled: !!hospitalId,
+    staleTime: 60_000, // refresh every minute
+  });
+  const isTrial = trialStatus?.is_trial ?? false;
+  const blockedPaths = isTrial ? TRIAL_BLOCKED_PATHS : undefined;
+
   return (
     <div className="flex h-dvh overflow-hidden">
       {/* Desktop sidebar — fixed full height, scrolls independently if nav is long */}
       <aside className="hidden w-60 shrink-0 overflow-y-auto border-r border-gray-200 bg-white lg:block">
-        <NavContent sections={sections} pathname={pathname} />
+        <NavContent sections={sections} pathname={pathname} blockedPaths={blockedPaths} />
       </aside>
 
       {/* Mobile drawer */}
@@ -147,7 +166,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             >
               <X className="h-4 w-4" />
             </button>
-            <NavContent sections={sections} pathname={pathname} onNavigate={() => setMobileOpen(false)} />
+            <NavContent sections={sections} pathname={pathname} onNavigate={() => setMobileOpen(false)} blockedPaths={blockedPaths} />
           </aside>
         </div>
       )}
@@ -171,8 +190,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             </button>
           </div>
         </header>
+        {isTrial && trialStatus && (
+          <TrialBanner daysRemaining={trialStatus.trial_days_remaining} />
+        )}
         <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
-          <Reveal>{children}</Reveal>
+          {isTrial && TRIAL_BLOCKED_PATHS.has(pathname) ? (
+            <div className="flex flex-col items-center justify-center h-full gap-4 text-center py-20">
+              <Lock className="h-12 w-12 text-gray-300" />
+              <h2 className="text-xl font-semibold text-gray-700">Available after trial</h2>
+              <p className="text-gray-500 max-w-md">
+                This feature is available with a full subscription. Contact support to upgrade your account.
+              </p>
+            </div>
+          ) : (
+            <Reveal>{children}</Reveal>
+          )}
         </main>
       </div>
     </div>
