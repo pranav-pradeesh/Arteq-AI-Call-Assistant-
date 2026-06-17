@@ -162,6 +162,17 @@ class Settings(BaseSettings):
     CAMPAIGN_RESUME_ENABLED: bool = True
     CAMPAIGN_RESUME_INTERVAL_SECONDS: int = 600
 
+    # Vobiz — SIP trunk provider (replaces Plivo/Exotel for telephony)
+    VOBIZ_API_KEY: str = ""
+    VOBIZ_API_SECRET: str = ""
+    VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
+    VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
+    LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID: str = "" # set after POST /admin/sip/vobiz/setup
+
+    # Doctor availability scheduler
+    DOCTOR_AVAIL_ENABLED: bool = True
+    DOCTOR_AVAIL_INTERVAL_SECONDS: int = 600      # poll every 10 min
+
     # Patient recognition
     PATIENT_RECOGNITION_ENABLED: bool = True
 

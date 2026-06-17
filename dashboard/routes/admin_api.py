@@ -1115,26 +1115,32 @@ async def telephony_status(hospital_id: str = ""):
     exotel_subdomain = bool(getattr(settings, "EXOTEL_SUBDOMAIN", ""))
     exotel_trunk_id = bool(getattr(settings, "LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID", ""))
     exotel_webhook_token = bool(getattr(settings, "EXOTEL_WEBHOOK_TOKEN", ""))
+    vobiz_key = bool(getattr(settings, "VOBIZ_API_KEY", ""))
+    vobiz_secret = bool(getattr(settings, "VOBIZ_API_SECRET", ""))
+    vobiz_phone = bool(getattr(settings, "VOBIZ_PHONE_NUMBER", ""))
+    vobiz_trunk = bool(getattr(settings, "LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID", ""))
     sarvam = bool(getattr(settings, "SARVAM_API_KEY", ""))
     groq = bool(getattr(settings, "GROQ_API_KEY", ""))
 
-    hospital_plivo_number = ""
+    hospital_did = ""
     if hospital_id:
         try:
             pool = await _db()
             async with pool.acquire() as conn:
                 row = await conn.fetchrow(
-                    "SELECT plivo_number FROM hospitals WHERE id=$1", hospital_id
+                    "SELECT plivo_number, vobiz_phone_number FROM hospitals WHERE id=$1", hospital_id
                 )
             if row:
-                hospital_plivo_number = row["plivo_number"] or ""
+                hospital_did = row["vobiz_phone_number"] or row["plivo_number"] or ""
         except Exception:
             pass
 
     livekit_ok = lk_url and lk_key and lk_secret
     plivo_ok = plivo_id and plivo_token and plivo_number
     exotel_ok = exotel_key and exotel_token and exotel_phone and exotel_subdomain
-    sip_ready = livekit_ok and sip_outbound and sip_host
+    vobiz_ok = vobiz_key and vobiz_secret and vobiz_phone and vobiz_trunk
+    carrier_ok = vobiz_ok or plivo_ok or exotel_ok
+    sip_ready = livekit_ok and sip_host and (sip_outbound or vobiz_trunk)
     voice_ready = sarvam and groq
 
     return {
@@ -1146,12 +1152,19 @@ async def telephony_status(hospital_id: str = ""):
             "sip_outbound_trunk": sip_outbound,
             "sip_host": sip_host,
         },
+        "vobiz": {
+            "configured": vobiz_ok,
+            "api_key": vobiz_key,
+            "api_secret": vobiz_secret,
+            "phone_number": vobiz_phone,
+            "sip_trunk_id": vobiz_trunk,
+        },
         "plivo": {
             "configured": plivo_ok,
             "auth_id": plivo_id,
             "auth_token": plivo_token,
             "phone_number": plivo_number,
-            "hospital_did": hospital_plivo_number or None,
+            "hospital_did": hospital_did or None,
         },
         "exotel": {
             "configured": exotel_ok,
@@ -1168,10 +1181,10 @@ async def telephony_status(hospital_id: str = ""):
             "groq_llm": groq,
         },
         "overall": {
-            "sip_calls_ready": sip_ready and (plivo_ok or exotel_ok),
+            "sip_calls_ready": sip_ready and carrier_ok,
             "voice_pipeline_ready": voice_ready,
-            "inbound_ready": sip_ready and (plivo_ok or exotel_ok) and bool(hospital_plivo_number),
-            "outbound_ready": sip_ready and (plivo_ok or exotel_ok),
+            "inbound_ready": sip_ready and carrier_ok and bool(hospital_did),
+            "outbound_ready": sip_ready and carrier_ok,
         },
         "missing": [
             k for k, v in {
@@ -2326,6 +2339,284 @@ async def list_whatsapp(hospital_id: str, limit: int = 100):
         }
         for r in rows
     ]
+
+
+# ── Trial / Subscription ──────────────────────────────────────────────────────
+
+@router.get("/hospitals/{hospital_id}/trial-status", dependencies=[Depends(_require_auth)])
+async def get_trial_status(hospital_id: str):
+    """Return trial/subscription status for a hospital."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT subscription_status, trial_started_at, trial_expires_at, activated_at
+               FROM hospitals WHERE id = $1""",
+            hospital_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    now = datetime.now(timezone.utc)
+    expires = row["trial_expires_at"]
+    days_remaining = None
+    if row["subscription_status"] == "trial" and expires:
+        delta = (expires.replace(tzinfo=timezone.utc) if expires.tzinfo is None else expires) - now
+        days_remaining = max(0, delta.days)
+    return {
+        "subscription_status": row["subscription_status"],
+        "trial_started_at": row["trial_started_at"].isoformat() if row["trial_started_at"] else None,
+        "trial_expires_at": expires.isoformat() if expires else None,
+        "trial_days_remaining": days_remaining,
+        "activated_at": row["activated_at"].isoformat() if row["activated_at"] else None,
+        "is_trial": row["subscription_status"] == "trial",
+        "is_expired": row["subscription_status"] == "expired" or (
+            row["subscription_status"] == "trial" and days_remaining == 0
+        ),
+    }
+
+
+class ActivateBody(BaseModel):
+    plan: Optional[str] = "active"
+
+
+@router.post("/hospitals/{hospital_id}/activate", dependencies=[Depends(_require_super)])
+async def activate_hospital(hospital_id: str, body: ActivateBody):
+    """Activate a hospital's subscription (super_admin only)."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT id FROM hospitals WHERE id=$1", hospital_id)
+        if not row:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        await conn.execute(
+            """UPDATE hospitals
+               SET subscription_status=$1, activated_at=NOW()
+               WHERE id=$2""",
+            body.plan or "active", hospital_id,
+        )
+    _invalidate(hospital_id)
+    return {"status": "activated", "subscription_status": body.plan or "active"}
+
+
+# ── Vobiz SIP Provisioning ────────────────────────────────────────────────────
+
+@router.post("/sip/vobiz/setup", dependencies=[Depends(_require_super)])
+async def setup_vobiz(request: Request):
+    """One-time Vobiz SIP trunk creation.
+
+    Creates the outbound trunk and, for every hospital with a vobiz_phone_number,
+    creates the inbound trunk + dispatch rule. Returns trunk IDs — save
+    LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID to environment after this call.
+    """
+    from src.services.vobiz_sip import setup_vobiz_outbound_trunk, setup_hospital_inbound_vobiz
+
+    outbound_trunk_id = await setup_vobiz_outbound_trunk()
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hospitals = await conn.fetch(
+            "SELECT id, slug, vobiz_phone_number FROM hospitals WHERE active=true AND vobiz_phone_number IS NOT NULL"
+        )
+
+    inbound_results = []
+    for h in hospitals:
+        trunk_id, rule_id = await setup_hospital_inbound_vobiz(h["slug"], h["vobiz_phone_number"])
+        if trunk_id:
+            async with pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE hospitals SET vobiz_inbound_trunk_id=$1, vobiz_outbound_trunk_id=$2 WHERE id=$3",
+                    trunk_id, outbound_trunk_id, h["id"],
+                )
+            inbound_results.append({
+                "hospital_id": str(h["id"]),
+                "slug": h["slug"],
+                "trunk_id": trunk_id,
+                "dispatch_rule_id": rule_id,
+            })
+
+    return {
+        "outbound_trunk_id": outbound_trunk_id,
+        "message": "Set LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID to the outbound_trunk_id above",
+        "hospitals_configured": inbound_results,
+    }
+
+
+@router.get("/sip/vobiz/status")
+async def vobiz_sip_status():
+    """Check Vobiz SIP configuration completeness."""
+    api_key = bool(getattr(settings, "VOBIZ_API_KEY", ""))
+    api_secret = bool(getattr(settings, "VOBIZ_API_SECRET", ""))
+    phone = bool(getattr(settings, "VOBIZ_PHONE_NUMBER", ""))
+    trunk = bool(getattr(settings, "LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID", ""))
+    ok = all([api_key, api_secret, phone, trunk])
+    return {
+        "configured": ok,
+        "vobiz_api_key": api_key,
+        "vobiz_api_secret": api_secret,
+        "vobiz_phone_number": phone,
+        "outbound_trunk_id": trunk,
+    }
+
+
+# ── Doctor Availability ───────────────────────────────────────────────────────
+
+VALID_AVAILABILITY_STATUSES = {"available", "busy", "delayed", "unavailable", "on_leave"}
+
+
+class DoctorAvailabilityBody(BaseModel):
+    status: str                    # 'available'|'busy'|'delayed'|'unavailable'|'on_leave'
+    note: Optional[str] = None
+
+
+@router.get(
+    "/hospitals/{hospital_id}/doctors/{doctor_id}/availability",
+    dependencies=[Depends(_require_auth)],
+)
+async def get_doctor_availability(hospital_id: str, doctor_id: str):
+    """Return current availability status for a doctor plus recent event history."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        doctor = await conn.fetchrow(
+            "SELECT id, name, availability_status FROM doctors WHERE id=$1 AND hospital_id=$2",
+            doctor_id, hospital_id,
+        )
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+        events = await conn.fetch(
+            """SELECT id, status, note, changed_by, changed_at
+               FROM doctor_availability_events
+               WHERE doctor_id=$1 ORDER BY changed_at DESC LIMIT 20""",
+            doctor_id,
+        )
+    return {
+        "doctor_id": doctor_id,
+        "name": doctor["name"],
+        "availability_status": doctor["availability_status"],
+        "recent_events": [
+            {
+                "id": str(e["id"]),
+                "status": e["status"],
+                "note": e["note"],
+                "changed_by": e["changed_by"],
+                "changed_at": e["changed_at"].isoformat() if e["changed_at"] else None,
+            }
+            for e in events
+        ],
+    }
+
+
+@router.put(
+    "/hospitals/{hospital_id}/doctors/{doctor_id}/availability",
+    dependencies=[Depends(_require_auth)],
+)
+async def set_doctor_availability(
+    hospital_id: str,
+    doctor_id: str,
+    body: DoctorAvailabilityBody,
+    payload: dict = Depends(_require_auth),
+):
+    """Update doctor availability and trigger patient notifications if needed.
+
+    When status is 'delayed' or 'unavailable', appointment-day patients for this
+    doctor who haven't been notified yet will be called by the doctor_availability_loop
+    on its next pass (within 10 minutes). The loop reads the doctor's current
+    availability_status column, so updating it here is sufficient.
+    """
+    status = body.status.lower()
+    if status not in VALID_AVAILABILITY_STATUSES:
+        raise HTTPException(
+            status_code=422,
+            detail=f"Invalid status. Must be one of: {', '.join(sorted(VALID_AVAILABILITY_STATUSES))}",
+        )
+
+    actor = payload.get("sub", "staff")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        doctor = await conn.fetchrow(
+            "SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2",
+            doctor_id, hospital_id,
+        )
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found")
+
+        await conn.execute(
+            "UPDATE doctors SET availability_status=$1 WHERE id=$2",
+            status, doctor_id,
+        )
+        await conn.execute(
+            """INSERT INTO doctor_availability_events
+                   (id, doctor_id, hospital_id, status, note, changed_by)
+               VALUES ($1, $2, $3, $4, $5, $6)""",
+            str(uuid.uuid4()), doctor_id, hospital_id, status, body.note, actor,
+        )
+
+        # Count today's appointments affected (for informational response)
+        affected = await conn.fetchval(
+            """SELECT COUNT(*) FROM appointments
+               WHERE doctor_id=$1
+                 AND DATE(slot_time AT TIME ZONE 'Asia/Kolkata') = CURRENT_DATE
+                 AND status IN ('booked', 'confirmed')
+                 AND doctor_availability_notified = false""",
+            doctor_id,
+        )
+
+    return {
+        "doctor_id": doctor_id,
+        "name": doctor["name"],
+        "availability_status": status,
+        "affected_appointments_today": affected,
+        "note": "Patients will be called by the availability loop within 10 minutes"
+        if status != "available" else "Status updated",
+    }
+
+
+# ── Appointment Events (audit trail) ─────────────────────────────────────────
+
+@router.get(
+    "/hospitals/{hospital_id}/appointments/{appointment_id}/events",
+    dependencies=[Depends(_require_auth)],
+)
+async def get_appointment_events(hospital_id: str, appointment_id: str):
+    """Return the full audit trail for one appointment."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        appt = await conn.fetchrow(
+            """SELECT id, patient_name, patient_phone, slot_time, status, workflow_status,
+                      confirmation_attempts, reminder_attempts, doctor_availability_attempts
+               FROM appointments WHERE id=$1 AND hospital_id=$2""",
+            appointment_id, hospital_id,
+        )
+        if not appt:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+        events = await conn.fetch(
+            """SELECT id, event_type, old_status, new_status, note, actor, created_at
+               FROM appointment_events
+               WHERE appointment_id=$1 ORDER BY created_at ASC""",
+            appointment_id,
+        )
+    return {
+        "appointment_id": appointment_id,
+        "patient_name": appt["patient_name"],
+        "patient_phone": appt["patient_phone"],
+        "slot_time": appt["slot_time"].isoformat() if appt["slot_time"] else None,
+        "status": appt["status"],
+        "workflow_status": appt["workflow_status"],
+        "attempts": {
+            "confirmation": appt["confirmation_attempts"],
+            "reminder": appt["reminder_attempts"],
+            "doctor_availability": appt["doctor_availability_attempts"],
+        },
+        "events": [
+            {
+                "id": str(e["id"]),
+                "event_type": e["event_type"],
+                "old_status": e["old_status"],
+                "new_status": e["new_status"],
+                "note": e["note"],
+                "actor": e["actor"],
+                "created_at": e["created_at"].isoformat() if e["created_at"] else None,
+            }
+            for e in events
+        ],
+    }
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
