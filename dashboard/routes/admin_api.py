@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -844,7 +846,7 @@ async def list_calls(hospital_id: str, limit: int = 50):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT call_id, caller, started_at, ended_at, total_turns,
-                      latency_avg_ms, intents, outcome
+                      latency_avg_ms, intents, outcome, recording_url
                FROM call_logs WHERE hospital_id=$1
                ORDER BY started_at DESC LIMIT $2""",
             hospital_id, min(limit, 200),
@@ -859,9 +861,36 @@ async def list_calls(hospital_id: str, limit: int = 50):
             "latency_avg_ms": r["latency_avg_ms"] or 0,
             "intents": _maybe_json(r["intents"]) or [],
             "outcome": r["outcome"] or "unknown",
+            "recording_url": r["recording_url"] or None,
         }
         for r in rows
     ]
+
+
+@router.get("/hospitals/{hospital_id}/calls/{call_id}", dependencies=[Depends(_require_hospital_access)])
+async def get_call(hospital_id: str, call_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT call_id, caller, started_at, ended_at, total_turns,
+                      latency_avg_ms, intents, outcome, transcript, recording_url
+               FROM call_logs WHERE hospital_id=$1 AND call_id=$2""",
+            hospital_id, call_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {
+        "call_id": row["call_id"],
+        "caller": row["caller"] or "unknown",
+        "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+        "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+        "total_turns": row["total_turns"] or 0,
+        "latency_avg_ms": row["latency_avg_ms"] or 0,
+        "intents": _maybe_json(row["intents"]) or [],
+        "outcome": row["outcome"] or "unknown",
+        "transcript": _maybe_json(row["transcript"]) or [],
+        "recording_url": row["recording_url"] or None,
+    }
 
 
 @router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_hospital_access)])
@@ -1061,6 +1090,12 @@ async def telephony_status(hospital_id: str = ""):
     plivo_id = bool(getattr(settings, "PLIVO_AUTH_ID", ""))
     plivo_token = bool(getattr(settings, "PLIVO_AUTH_TOKEN", ""))
     plivo_number = bool(getattr(settings, "PLIVO_PHONE_NUMBER", ""))
+    exotel_key = bool(getattr(settings, "EXOTEL_API_KEY", ""))
+    exotel_token = bool(getattr(settings, "EXOTEL_API_TOKEN", ""))
+    exotel_phone = bool(getattr(settings, "EXOTEL_PHONE_NUMBER", ""))
+    exotel_subdomain = bool(getattr(settings, "EXOTEL_SUBDOMAIN", ""))
+    exotel_trunk_id = bool(getattr(settings, "LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID", ""))
+    exotel_webhook_token = bool(getattr(settings, "EXOTEL_WEBHOOK_TOKEN", ""))
     sarvam = bool(getattr(settings, "SARVAM_API_KEY", ""))
     groq = bool(getattr(settings, "GROQ_API_KEY", ""))
 
@@ -1079,6 +1114,7 @@ async def telephony_status(hospital_id: str = ""):
 
     livekit_ok = lk_url and lk_key and lk_secret
     plivo_ok = plivo_id and plivo_token and plivo_number
+    exotel_ok = exotel_key and exotel_token and exotel_phone and exotel_subdomain
     sip_ready = livekit_ok and sip_outbound and sip_host
     voice_ready = sarvam and groq
 
@@ -1098,16 +1134,25 @@ async def telephony_status(hospital_id: str = ""):
             "phone_number": plivo_number,
             "hospital_did": hospital_plivo_number or None,
         },
+        "exotel": {
+            "configured": exotel_ok,
+            "api_key": exotel_key,
+            "api_token": exotel_token,
+            "phone_number": exotel_phone,
+            "subdomain": exotel_subdomain,
+            "sip_trunk_id": exotel_trunk_id,
+            "webhook_token": exotel_webhook_token,
+        },
         "voice_ai": {
             "configured": voice_ready,
             "sarvam_stt_tts": sarvam,
             "groq_llm": groq,
         },
         "overall": {
-            "sip_calls_ready": sip_ready and plivo_ok,
+            "sip_calls_ready": sip_ready and (plivo_ok or exotel_ok),
             "voice_pipeline_ready": voice_ready,
-            "inbound_ready": sip_ready and plivo_ok and bool(hospital_plivo_number),
-            "outbound_ready": sip_ready and plivo_ok,
+            "inbound_ready": sip_ready and (plivo_ok or exotel_ok) and bool(hospital_plivo_number),
+            "outbound_ready": sip_ready and (plivo_ok or exotel_ok),
         },
         "missing": [
             k for k, v in {
@@ -1880,6 +1925,388 @@ async def deactivate_tenant_route(slug: str):
     if not ok:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"slug": slug, "active": False}
+
+
+# ── Patient Intake Workflow ───────────────────────────────────────────────────
+# Front Desk section: Patients, Bookings & Tokens, WhatsApp feed.
+# All routes enforce the same hospital-scoped tenant check as the core routes.
+
+
+def _generate_patient_id(date_str: str, seq: int) -> str:
+    return f"P-{date_str}-{seq:03d}"
+
+
+def _generate_token_code() -> str:
+    return f"TKN-{random.randint(1000, 9999)}"
+
+
+async def _log_whatsapp(conn, hospital_id: str, phone: str, patient_name: str, body: str) -> str:
+    wa_id = f"wa-{uuid.uuid4().hex[:8]}"
+    await conn.execute(
+        """INSERT INTO whatsapp_messages (id, hospital_id, phone, patient_name, body)
+           VALUES ($1, $2, $3, $4, $5)""",
+        wa_id, hospital_id, phone, patient_name, body,
+    )
+    return wa_id
+
+
+class PatientBody(BaseModel):
+    name: str
+    phone: str
+
+
+@router.get("/hospitals/{hospital_id}/patients", dependencies=[Depends(_require_hospital_access)])
+async def list_patients(hospital_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, hospital_id, name, phone, created_at
+               FROM patients WHERE hospital_id=$1 ORDER BY created_at DESC""",
+            hospital_id,
+        )
+    return [
+        {
+            "id": r["id"],
+            "hospital_id": str(r["hospital_id"]),
+            "name": r["name"],
+            "phone": r["phone"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/hospitals/{hospital_id}/patients", dependencies=[Depends(_require_hospital_access)])
+async def create_patient(hospital_id: str, body: PatientBody):
+    if not body.name or not body.phone:
+        raise HTTPException(status_code=400, detail="name and phone are required")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        date_str = datetime.now(timezone.utc).strftime("%y%m%d")
+        seq = (await conn.fetchval(
+            "SELECT COUNT(*) FROM patients WHERE hospital_id=$1 "
+            "AND DATE(created_at AT TIME ZONE 'UTC') = CURRENT_DATE",
+            hospital_id,
+        ) or 0) + 1
+        patient_id = _generate_patient_id(date_str, seq)
+
+        await conn.execute(
+            """INSERT INTO patients (id, hospital_id, name, phone)
+               VALUES ($1, $2, $3, $4)""",
+            patient_id, hospital_id, body.name, body.phone,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+
+        # Log WhatsApp welcome
+        welcome_body = (
+            f"Hi {body.name}, welcome to {hosp_name}! "
+            f"Your patient ID is {patient_id}. "
+            "We're glad to have you with us."
+        )
+        await _log_whatsapp(conn, hospital_id, body.phone, body.name, welcome_body)
+
+        # Log outbound welcome call intent (actual scheduling handled by the AI layer)
+        call_id = f"welcome-{patient_id}"
+        await conn.execute(
+            """INSERT INTO call_logs (hospital_id, call_id, caller, started_at, outcome)
+               VALUES ($1, $2, $3, NOW(), 'outbound_welcome_queued')
+               ON CONFLICT (call_id) DO NOTHING""",
+            hospital_id, call_id, body.phone,
+        )
+
+        row = await conn.fetchrow(
+            "SELECT id, hospital_id, name, phone, created_at FROM patients WHERE id=$1",
+            patient_id,
+        )
+
+    return {
+        "id": row["id"],
+        "hospital_id": str(row["hospital_id"]),
+        "name": row["name"],
+        "phone": row["phone"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+# ── Bookings ──────────────────────────────────────────────────────────────────
+
+class BookingBody(BaseModel):
+    patient_id: str
+    slot: str                      # ISO8601 datetime
+    payment_mode: str              # "pay_now" | "pay_later"
+    amount_paise: int = 0
+
+
+class BookingStatusBody(BaseModel):
+    status: str
+
+
+def _booking_row(r) -> dict:
+    token = None
+    if r["token_code"]:
+        token = {"code": r["token_code"], "active": r["token_active"]}
+    return {
+        "id": r["id"],
+        "hospital_id": str(r["hospital_id"]),
+        "patient_id": r["patient_id"],
+        "patient_name": r["patient_name"] or "",
+        "patient_phone": r["patient_phone"] or "",
+        "slot": r["slot"].isoformat() if r["slot"] else None,
+        "payment_mode": r["payment_mode"],
+        "status": r["status"],
+        "amount_paise": r["amount_paise"],
+        "token": token,
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    }
+
+
+_BOOKING_SELECT = """
+    SELECT b.id, b.hospital_id, b.patient_id,
+           p.name AS patient_name, p.phone AS patient_phone,
+           b.slot, b.payment_mode, b.status, b.amount_paise,
+           b.token_code, b.token_active, b.created_at
+    FROM bookings b
+    LEFT JOIN patients p ON p.id = b.patient_id
+"""
+
+
+@router.get("/hospitals/{hospital_id}/bookings", dependencies=[Depends(_require_hospital_access)])
+async def list_bookings(hospital_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            _BOOKING_SELECT + "WHERE b.hospital_id=$1 ORDER BY b.created_at DESC",
+            hospital_id,
+        )
+    return [_booking_row(r) for r in rows]
+
+
+@router.post("/hospitals/{hospital_id}/bookings", dependencies=[Depends(_require_hospital_access)])
+async def create_booking(hospital_id: str, body: BookingBody):
+    if body.payment_mode not in ("pay_now", "pay_later"):
+        raise HTTPException(status_code=400, detail="payment_mode must be pay_now or pay_later")
+
+    try:
+        slot_dt = datetime.fromisoformat(body.slot.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="slot must be a valid ISO8601 datetime")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        patient = await conn.fetchrow(
+            "SELECT name, phone FROM patients WHERE id=$1 AND hospital_id=$2",
+            body.patient_id, hospital_id,
+        )
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found in this hospital")
+
+        booking_id = f"appt-{secrets.token_hex(3)}"
+        token_code = None
+        token_active = False
+        status = "pending_payment"
+
+        if body.payment_mode == "pay_later":
+            status = "awaiting_confirmation"
+            token_code = _generate_token_code()
+
+        await conn.execute(
+            """INSERT INTO bookings
+               (id, hospital_id, patient_id, slot, payment_mode, status, amount_paise,
+                token_code, token_active)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+            booking_id, hospital_id, body.patient_id, slot_dt,
+            body.payment_mode, status, body.amount_paise, token_code, token_active,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+
+        # Send WhatsApp for pay_later (token issued)
+        if body.payment_mode == "pay_later" and token_code:
+            wa_body = (
+                f"Hi {patient['name']}, your appointment at {hosp_name} "
+                f"on {slot_dt.strftime('%d %b %Y at %I:%M %p')} has been booked. "
+                f"Your token is {token_code} (inactive until confirmed). "
+                "We'll activate it closer to your appointment."
+            )
+            await _log_whatsapp(conn, hospital_id, patient["phone"], patient["name"], wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.put(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/status",
+    dependencies=[Depends(_require_hospital_access)],
+)
+async def update_booking_status(hospital_id: str, booking_id: str, body: BookingStatusBody):
+    allowed_statuses = {"confirmed", "cancelled", "pending_payment", "awaiting_confirmation", "completed"}
+    if body.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(allowed_statuses))}")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        await conn.execute(
+            "UPDATE bookings SET status=$1 WHERE id=$2 AND hospital_id=$3",
+            body.status, booking_id, hospital_id,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if body.status == "confirmed" and phone:
+            wa_body = (
+                f"Hi {name}, your payment for the appointment at {hosp_name} "
+                f"on {slot_str} has been received. Your booking is confirmed!"
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+        elif body.status == "cancelled" and phone:
+            wa_body = (
+                f"Hi {name}, your appointment at {hosp_name} "
+                f"on {slot_str} has been cancelled. "
+                "Please contact us if you have any questions."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.post(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/change-token",
+    dependencies=[Depends(_require_hospital_access)],
+)
+async def change_booking_token(hospital_id: str, booking_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        new_token = _generate_token_code()
+        await conn.execute(
+            "UPDATE bookings SET token_code=$1 WHERE id=$2 AND hospital_id=$3",
+            new_token, booking_id, hospital_id,
+        )
+
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if phone:
+            wa_body = (
+                f"Hi {name}, your token for the appointment at {hosp_name} "
+                f"on {slot_str} has been updated. Your new token is {new_token}."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.post(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/confirm-call",
+    dependencies=[Depends(_require_hospital_access)],
+)
+async def booking_confirm_call(hospital_id: str, booking_id: str):
+    """Simulate the ~1-week-prior AI confirmation call: confirms the booking,
+    activates the token, logs the call, and sends a WhatsApp notification."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        await conn.execute(
+            "UPDATE bookings SET status='confirmed', token_active=true WHERE id=$1 AND hospital_id=$2",
+            booking_id, hospital_id,
+        )
+
+        # Log the AI confirmation call
+        call_id = f"confirm-{booking_id}"
+        await conn.execute(
+            """INSERT INTO call_logs (hospital_id, call_id, caller, started_at, outcome)
+               VALUES ($1, $2, $3, NOW(), 'outbound_confirmation')
+               ON CONFLICT (call_id) DO NOTHING""",
+            hospital_id, call_id, existing["patient_phone"] or "",
+        )
+
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        token_code = existing["token_code"] or ""
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if phone:
+            wa_body = (
+                f"Hi {name}, your appointment at {hosp_name} on {slot_str} is confirmed! "
+                f"Your token {token_code} is now active. Please arrive 10 minutes early."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+# ── WhatsApp Feed ─────────────────────────────────────────────────────────────
+
+@router.get("/hospitals/{hospital_id}/whatsapp", dependencies=[Depends(_require_hospital_access)])
+async def list_whatsapp(hospital_id: str, limit: int = 100):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, hospital_id, phone, patient_name, body, at
+               FROM whatsapp_messages WHERE hospital_id=$1
+               ORDER BY at DESC LIMIT $2""",
+            hospital_id, min(limit, 500),
+        )
+    return [
+        {
+            "id": r["id"],
+            "hospital_id": str(r["hospital_id"]),
+            "phone": r["phone"],
+            "patient_name": r["patient_name"] or "",
+            "body": r["body"],
+            "at": r["at"].isoformat() if r["at"] else None,
+        }
+        for r in rows
+    ]
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
