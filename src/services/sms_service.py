@@ -131,6 +131,53 @@ class SMSService:
         )
         return await self._send(phone, message)
 
+    async def send_appointment_reminder(
+        self,
+        phone: str,
+        hospital_name: str,
+        patient_name: str,
+        doctor_name: str,
+        date: str,
+        time: str,
+    ) -> bool:
+        """Send appointment reminder (day before or same day)."""
+        message = (
+            f"Reminder — {hospital_name}\n"
+            f"Patient: {patient_name}\n"
+            f"Doctor: Dr. {doctor_name}\n"
+            f"Date: {date}\n"
+            f"Time: {time}\n"
+            "Please arrive 10 minutes early. Arya."
+        )
+        return await self._send(phone, message)
+
+    async def send_doctor_availability(
+        self,
+        phone: str,
+        hospital_name: str,
+        patient_name: str,
+        doctor_name: str,
+        date: str,
+        status: str,
+    ) -> bool:
+        """Notify patient of doctor availability status on appointment day.
+
+        status: 'available' | 'delayed' | 'unavailable'
+        """
+        _STATUS_MSG = {
+            "available":   f"Dr. {doctor_name} is available and ready to see you today.",
+            "delayed":     f"Dr. {doctor_name} is running slightly delayed today. Please wait at the OPD.",
+            "unavailable": f"Dr. {doctor_name} is unfortunately unavailable today. Please contact {hospital_name} to reschedule.",
+        }
+        body = _STATUS_MSG.get(status, f"Doctor availability update from {hospital_name}.")
+        message = (
+            f"{hospital_name}\n"
+            f"Patient: {patient_name}\n"
+            f"{body}\n"
+            "Arya."
+        )
+        return await self._send(phone, message)
+
     async def send_callback_confirmation(
         self,
         phone: str,

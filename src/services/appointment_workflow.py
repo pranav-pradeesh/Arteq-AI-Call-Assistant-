@@ -17,6 +17,7 @@ Outbound calls are placed via Vobiz SIP through LiveKit.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, time
 from typing import Any
@@ -117,6 +118,79 @@ async def _dial_vobiz(
     except Exception as exc:
         logger.error("workflow_dial_failed", error=str(exc))
         return ""
+
+
+# ── SMS/WhatsApp fire-and-forget helpers ──────────────────────────────────────
+
+async def _send_reminder_sms(appt: dict, slot_local) -> None:
+    """Send SMS/WhatsApp reminder as a backup to the outbound reminder call."""
+    phone = appt.get("patient_phone", "")
+    if not phone:
+        return
+    try:
+        from src.services.whatsapp_service import get_messenger
+        hospital_name = appt.get("hospital_name") or "the hospital"
+        await get_messenger().send_appointment_reminder(
+            phone=phone,
+            hospital_name=hospital_name,
+            patient_name=appt.get("patient_name") or "Patient",
+            doctor_name=appt.get("doctor_name") or "",
+            date=slot_local.strftime("%d %B %Y") if slot_local else "",
+            time=slot_local.strftime("%I:%M %p") if slot_local else "",
+        )
+    except Exception as exc:
+        logger.warning("reminder_sms_failed", error=str(exc))
+
+
+async def _send_doctor_availability_sms(appt: dict, doctor_status: str) -> None:
+    """Send SMS/WhatsApp doctor-availability update as backup to the outbound call."""
+    phone = appt.get("patient_phone", "")
+    if not phone:
+        return
+    try:
+        from src.services.whatsapp_service import get_messenger
+        hospital_name = appt.get("hospital_name") or "the hospital"
+        slot = appt.get("slot_time")
+        slot_local = slot.astimezone(INDIA_TZ) if slot and slot.tzinfo else (
+            INDIA_TZ.localize(slot) if slot else None
+        )
+        await get_messenger().send_doctor_availability(
+            phone=phone,
+            hospital_name=hospital_name,
+            patient_name=appt.get("patient_name") or "Patient",
+            doctor_name=appt.get("doctor_name") or "",
+            date=slot_local.strftime("%d %B %Y") if slot_local else "",
+            status=doctor_status,
+        )
+    except Exception as exc:
+        logger.warning("doctor_availability_sms_failed", error=str(exc))
+
+
+async def _send_cancellation_sms(conn, appointment_id: str, hospital_id: str) -> None:
+    """Send cancellation SMS/WhatsApp after workflow engine cancels an appointment."""
+    try:
+        row = await conn.fetchrow(
+            """SELECT patient_phone, patient_name, doctor_name, slot_time
+               FROM appointments WHERE id = $1""",
+            appointment_id,
+        )
+        if not row or not row["patient_phone"]:
+            return
+        from src.services.whatsapp_service import get_messenger
+        hospital_name = "the hospital"
+        slot = row["slot_time"]
+        slot_local = slot.astimezone(INDIA_TZ) if slot and slot.tzinfo else (
+            INDIA_TZ.localize(slot) if slot else None
+        )
+        await get_messenger().send_appointment_cancellation(
+            phone=row["patient_phone"],
+            hospital_name=hospital_name,
+            patient_name=row["patient_name"] or "Patient",
+            doctor_name=row["doctor_name"] or "",
+            date=slot_local.strftime("%d %B %Y") if slot_local else "",
+        )
+    except Exception as exc:
+        logger.warning("cancellation_sms_failed", error=str(exc))
 
 
 # ── Confirmation workflow ──────────────────────────────────────────────────────
@@ -224,6 +298,8 @@ async def place_reminder_call(
                 "UPDATE appointments SET reminder_sent = true WHERE id = $1", appt_id
             )
             await update_workflow_status(conn, appt_id, hospital_id, "reminder_sent")
+            # Fire-and-forget SMS backup notification
+            asyncio.ensure_future(_send_reminder_sms(appt, slot_local))
         await log_appointment_event(
             conn, appt_id, hospital_id,
             event_type="call_attempted" if room else "call_missed",
@@ -286,6 +362,8 @@ async def place_doctor_availability_call(
             )
             await update_workflow_status(conn, appt_id, hospital_id, new_wf_status,
                                          note=f"doctor status: {doctor_status}")
+            # SMS backup notification
+            asyncio.ensure_future(_send_doctor_availability_sms(appt, doctor_status))
         await log_appointment_event(
             conn, appt_id, hospital_id,
             event_type="call_attempted" if room else "call_missed",
@@ -323,3 +401,5 @@ async def cancel_appointment(
         note=note,
         actor=actor,
     )
+    # Fire-and-forget cancellation SMS — fetch appointment data first
+    asyncio.ensure_future(_send_cancellation_sms(conn, appointment_id, hospital_id))
