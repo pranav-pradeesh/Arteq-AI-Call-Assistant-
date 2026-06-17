@@ -471,6 +471,21 @@ _DTMF = {
     "#": "thank you goodbye",
 }
 
+# Phrases that mean "say it again" in English, Malayalam, Hindi, Tamil.
+# Matched (as substring) against the lowercase caller utterance to replay
+# the last agent TTS without a new LLM round-trip.
+_REPEAT_PATTERNS = [
+    "repeat", "say again", "what did you say", "didn't hear", "couldn't hear",
+    "pardon", "come again", "one more time", "repeat that", "say that again",
+    "what was that", "didn't catch", "couldn't catch",
+    # Malayalam
+    "വീണ്ടും", "ആവർത്തി", "കേട്ടില്ല", "മനസ്സിലായില്ല", "പറഞ്ഞത്", "ഒന്നുകൂടി",
+    # Hindi
+    "दोबारा", "फिर से", "समझ नहीं", "सुना नहीं",
+    # Tamil
+    "மீண்டும்", "திரும்ப", "கேட்கவில்லை",
+]
+
 
 class _GroqLLM(openai.LLM):
     """Groq LLM that injects anti-repetition penalties on every turn.
@@ -737,7 +752,7 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
 SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
 
-LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+LANGUAGE: Default to the hospital's configured language. Detect the caller's language from their FIRST message and stay in that language for the entire call — do NOT switch just because one word slipped into another language. Only switch if the caller explicitly says 'speak in English', 'please speak Malayalam', or similar. Reply in the matching script: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
 
@@ -965,13 +980,45 @@ class HospitalVoiceAgent(Agent):
             return
 
         # Remember the caller's language (script-detected) so the live backchannel
-        # murmurs in their language, not always Malayalam. Callers rarely switch
-        # language mid-call, so the previous turn's detection is a safe predictor.
-        if stripped:
+        # murmurs in their language, not always Malayalam. Lock language on first
+        # real detection — only update on an explicit language-switch request so
+        # a stray "okay" (English) doesn't flip a Malayalam caller to English.
+        if stripped and len(stripped) >= 3:  # ignore noise/DTMF
             try:
-                self.session.userdata["caller_lang"] = _detect_tts_lang(stripped, self._agent_language)
+                detected = _detect_tts_lang(stripped, self._agent_language)
+                ud = self.session.userdata
+                if not ud.get("lang_locked"):
+                    if detected != self._agent_language:
+                        ud["caller_lang"] = detected
+                        ud["lang_locked"] = True
+                    elif len(stripped) > 5:  # enough content to be confident
+                        ud["caller_lang"] = detected
+                        ud["lang_locked"] = True
+                else:
+                    # Only update language on an explicit switch request
+                    low = stripped.lower()
+                    switch_phrases = [
+                        "speak english", "in english", "english please", "speak in english",
+                        "speak malayalam", "malayalam please", "in malayalam",
+                        "speak hindi", "hindi please", "in hindi",
+                        "speak tamil", "tamil please",
+                    ]
+                    if any(p in low for p in switch_phrases):
+                        ud["caller_lang"] = detected
+                        # keep lang_locked = True, just updated target
             except Exception:
                 pass
+
+        # Detect repeat-utterance requests and replay last agent utterance
+        low_stripped = stripped.lower() if stripped else ""
+        last_utterance = self.session.userdata.get("last_agent_utterance", "")
+
+        if (last_utterance and stripped and len(stripped) < 60 and
+                any(p in low_stripped for p in _REPEAT_PATTERNS)):
+            # Replay last utterance without going to LLM
+            asyncio.create_task(self.session.say(last_utterance, allow_interruptions=True))
+            new_message.content = []  # suppress LLM call for this turn
+            return
 
         # DTMF: single digit → remap to natural language phrase
         if stripped in _DTMF:
@@ -1019,18 +1066,31 @@ class HospitalVoiceAgent(Agent):
         text the instant it is provably outside a tool tag, and only hold back
         the minimal tail that could still be the start of one. TTS therefore
         starts on the first words while the LLM is still generating the rest.
+
+        The full cleaned text is stored in session.userdata["last_agent_utterance"]
+        so the repeat-utterance handler in on_user_turn_completed can replay it
+        without a new LLM round-trip.
         """
         async def _clean():
+            full_text = ""
             buf = ""
             async for chunk in text:
                 buf += chunk
                 buf = _TOOL_SYNTAX_COMPLETE_RE.sub("", buf)   # drop closed blocks
                 emit, buf = _split_safe(buf)                   # hold only tag-prefix tail
                 if emit:
+                    full_text += emit
                     yield emit
             tail = _strip_tool_syntax(buf)                     # flush any unterminated tail
             if tail:
+                full_text += tail
                 yield tail
+            # Store the full spoken text so repeat-utterance can replay it
+            if full_text.strip():
+                try:
+                    self.session.userdata["last_agent_utterance"] = full_text.strip()
+                except Exception:
+                    pass
 
         async for frame in Agent.default.tts_node(self, _clean(), model_settings):
             yield frame
@@ -1534,6 +1594,68 @@ async def entrypoint(ctx: JobContext) -> None:
 
     _watchdog = asyncio.create_task(_duration_watchdog())
     session.on("close", lambda e=None: _watchdog.cancel())
+
+    # ── Inactivity watchdog: prompt after 20s silence, hang up after 40s ─────
+    _INACTIVITY_PROMPT_S = float(os.getenv("INACTIVITY_PROMPT_S", "20"))
+    _INACTIVITY_HANGUP_S = float(os.getenv("INACTIVITY_HANGUP_S", "40"))
+
+    async def _inactivity_watchdog() -> None:
+        last_turn = call_started_at
+        prompted = False
+        while True:
+            await asyncio.sleep(5.0)
+            # Check how long since last user message
+            try:
+                msgs = session.history.messages()
+                user_msgs = [m for m in msgs if getattr(m, "role", "") == "user"]
+                if user_msgs:
+                    last_msg = user_msgs[-1]
+                    ts = getattr(last_msg, "created_at", None) or getattr(last_msg, "timestamp", None)
+                    if ts:
+                        if hasattr(ts, "timestamp"):
+                            last_turn = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
+                        else:
+                            last_turn = ts
+            except Exception:
+                pass
+
+            silence_s = (datetime.now(timezone.utc) - last_turn).total_seconds()
+
+            if not prompted and silence_s >= _INACTIVITY_PROMPT_S:
+                prompted = True
+                try:
+                    lang = session_data.get("caller_lang", agent_language)
+                    _SILENCE_PROMPTS = {
+                        "ml-IN": "നിങ്ങൾ അവിടെ ഉണ്ടോ? ഒന്നും കേൾക്കുന്നില്ല.",
+                        "en-IN": "Are you still there? I can't hear you.",
+                        "hi-IN": "क्या आप वहाँ हैं? मुझे कुछ सुनाई नहीं दे रहा।",
+                        "ta-IN": "நீங்கள் அங்கே இருக்கிறீர்களா? எதுவும் கேட்கவில்லை.",
+                    }
+                    prompt_text = _SILENCE_PROMPTS.get(lang, _SILENCE_PROMPTS["en-IN"])
+                    await session.say(prompt_text, allow_interruptions=True)
+                except Exception:
+                    pass
+
+            if silence_s >= _INACTIVITY_HANGUP_S:
+                try:
+                    lang = session_data.get("caller_lang", agent_language)
+                    _SILENCE_FAREWELLS = {
+                        "ml-IN": "ശ്രദ്ധിക്കുക, ഞാൻ കോൾ അവസാനിപ്പിക്കുന്നു. നന്ദി!",
+                        "en-IN": "I'll end the call now. Thank you for calling, goodbye!",
+                        "hi-IN": "मैं कॉल समाप्त कर रहा हूँ। धन्यवाद, अलविदा!",
+                        "ta-IN": "அழைப்பை முடிக்கிறேன். அழைத்தமைக்கு நன்றி, வணக்கம்!",
+                    }
+                    farewell = _SILENCE_FAREWELLS.get(lang, _SILENCE_FAREWELLS["en-IN"])
+                    await session.say(farewell, allow_interruptions=False)
+                    await asyncio.sleep(5.0)
+                    from src.services.livekit_sip import delete_room
+                    await delete_room(room_name)
+                except Exception as exc:
+                    _log.warning("inactivity_hangup_failed room=%s err=%s", room_name, exc)
+                break
+
+    _inactivity_task = asyncio.create_task(_inactivity_watchdog())
+    session.on("close", lambda e=None: _inactivity_task.cancel())
 
 
 def prewarm(proc) -> None:
