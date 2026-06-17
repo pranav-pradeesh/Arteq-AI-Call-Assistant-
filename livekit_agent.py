@@ -725,10 +725,37 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
         if call_type == "confirmation":
             outbound_block = (
                 f"\nOUTBOUND CONFIRMATION CALL:\n"
-                f"You are calling to confirm {pname}'s appointment with Dr. {dname} "
+                f"You are calling to confirm {pname}'s EXISTING appointment with Dr. {dname} "
                 f"on {date} at {ttime}.\n"
                 "First sentence: state the appointment and ask if they can attend.\n"
-                "If YES → use book_appointment to confirm. If NO → offer to reschedule.\n"
+                "If YES → call confirm_appointment (this confirms the existing booking — "
+                "do NOT call book_appointment, that would create a duplicate).\n"
+                "If they want a different time → use reschedule_appointment.\n"
+                "If they can't make it at all → use cancel_appointment.\n"
+            )
+        elif call_type == "doctor_availability":
+            dstatus = outbound_context.get("doctor_status", "")
+            if dstatus == "unavailable":
+                avail_line = (
+                    f"Dr. {dname} is UNAVAILABLE today. Apologise, explain the doctor "
+                    "cannot see them, and offer to reschedule with reschedule_appointment."
+                )
+            elif dstatus == "delayed":
+                avail_line = (
+                    f"Dr. {dname} is running DELAYED today. Let them know there will be a "
+                    "wait and ask if they still wish to come or prefer to reschedule."
+                )
+            else:
+                avail_line = (
+                    f"Dr. {dname} is AVAILABLE and on schedule today. Reassure them their "
+                    f"appointment at {ttime} is on, and ask if they have any questions."
+                )
+            outbound_block = (
+                f"\nOUTBOUND DOCTOR-AVAILABILITY CALL:\n"
+                f"You are calling {pname} on the day of their appointment with Dr. {dname}"
+                f"{(' on ' + date) if date else ''}.\n"
+                f"{avail_line}\n"
+                "Keep it brief and clear.\n"
             )
         elif call_type == "reminder":
             outbound_block = (
@@ -845,6 +872,22 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"This is a reminder of your appointment with Dr. {dname} on {date}. "
                 "Do you have any questions?"
+            )
+        elif call_type == "doctor_availability":
+            dstatus = outbound_context.get("doctor_status", "")
+            if dstatus == "unavailable":
+                return (
+                    f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
+                    f"Unfortunately Dr. {dname} is unavailable today. May I help you reschedule?"
+                )
+            elif dstatus == "delayed":
+                return (
+                    f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
+                    f"Dr. {dname} is running a little late today. Would you still like to come in?"
+                )
+            return (
+                f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
+                f"Dr. {dname} is available as scheduled. Do you have any questions?"
             )
         elif call_type == "callback":
             return f"Hello {pname}, this is {hosp_name} calling. How can I help you today?"
@@ -1385,6 +1428,14 @@ async def entrypoint(ctx: JobContext) -> None:
         "intents":             [],   # appended by tools via _mark_intent
         "sensory_events":      [],   # acoustic [SENSORY:...] tags per turn
     }
+    # Surface outbound-call context (appointment_id, names, slot) to the tools so
+    # confirm_appointment / reschedule act on the RIGHT existing appointment.
+    if outbound_context:
+        for _k in ("appointment_id", "patient_name", "doctor_name",
+                   "appointment_date", "appointment_time", "call_type"):
+            _v = outbound_context.get(_k)
+            if _v:
+                session_data[_k] = _v
 
     # ── Start session ─────────────────────────────────────────────────────────
     agent = HospitalVoiceAgent(

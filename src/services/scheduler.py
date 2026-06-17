@@ -89,7 +89,7 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
     _PENDING = """
         SELECT a.id, a.patient_phone, a.patient_name, a.slot_time,
                a.hospital_id, a.reminder_attempts,
-               d.name AS doctor_name, h.slug AS slug
+               d.name AS doctor_name, h.slug AS slug, h.name AS hospital_name
         FROM appointments a
         LEFT JOIN doctors  d ON a.doctor_id   = d.id
         LEFT JOIN hospitals h ON h.id = a.hospital_id
@@ -203,7 +203,7 @@ async def doctor_availability_loop(interval_seconds: int = 600) -> None:
                a.doctor_availability_notified,
                d.name AS doctor_name,
                d.availability_status AS doctor_status,
-               h.slug AS slug
+               h.slug AS slug, h.name AS hospital_name
         FROM appointments a
         LEFT JOIN doctors   d ON a.doctor_id = d.id
         LEFT JOIN hospitals h ON h.id        = a.hospital_id

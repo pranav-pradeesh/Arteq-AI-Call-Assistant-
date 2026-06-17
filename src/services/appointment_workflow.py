@@ -166,27 +166,27 @@ async def _send_doctor_availability_sms(appt: dict, doctor_status: str) -> None:
         logger.warning("doctor_availability_sms_failed", error=str(exc))
 
 
-async def _send_cancellation_sms(conn, appointment_id: str, hospital_id: str) -> None:
-    """Send cancellation SMS/WhatsApp after workflow engine cancels an appointment."""
+async def _send_cancellation_sms(data: dict) -> None:
+    """Send cancellation SMS/WhatsApp after workflow engine cancels an appointment.
+
+    Takes a plain dict snapshotted while the DB connection was still held — the
+    caller must NOT pass a live `conn`, because this runs as a detached task
+    after the `async with pool.acquire()` block has returned the connection.
+    """
+    phone = data.get("patient_phone")
+    if not phone:
+        return
     try:
-        row = await conn.fetchrow(
-            """SELECT patient_phone, patient_name, doctor_name, slot_time
-               FROM appointments WHERE id = $1""",
-            appointment_id,
-        )
-        if not row or not row["patient_phone"]:
-            return
         from src.services.whatsapp_service import get_messenger
-        hospital_name = "the hospital"
-        slot = row["slot_time"]
+        slot = data.get("slot_time")
         slot_local = slot.astimezone(INDIA_TZ) if slot and slot.tzinfo else (
             INDIA_TZ.localize(slot) if slot else None
         )
         await get_messenger().send_appointment_cancellation(
-            phone=row["patient_phone"],
-            hospital_name=hospital_name,
-            patient_name=row["patient_name"] or "Patient",
-            doctor_name=row["doctor_name"] or "",
+            phone=phone,
+            hospital_name=data.get("hospital_name") or "the hospital",
+            patient_name=data.get("patient_name") or "Patient",
+            doctor_name=data.get("doctor_name") or "",
             date=slot_local.strftime("%d %B %Y") if slot_local else "",
         )
     except Exception as exc:
@@ -229,6 +229,7 @@ async def place_confirmation_call(
     )
     context = {
         "call_type": "confirmation",
+        "appointment_id": appt_id,
         "patient_name": appt.get("patient_name") or "",
         "doctor_name": appt.get("doctor_name") or "",
         "appointment_date": slot_local.strftime("%d %B %Y") if slot_local else "",
@@ -279,6 +280,7 @@ async def place_reminder_call(
     )
     context = {
         "call_type": "reminder",
+        "appointment_id": appt_id,
         "patient_name": appt.get("patient_name") or "",
         "doctor_name": appt.get("doctor_name") or "",
         "appointment_date": slot_local.strftime("%Y-%m-%d") if slot_local else "",
@@ -338,11 +340,18 @@ async def place_doctor_availability_call(
     }
     new_wf_status = workflow_map.get(doctor_status, "doctor_available")
 
+    slot = appt.get("slot_time")
+    slot_local = slot.astimezone(INDIA_TZ) if slot and slot.tzinfo else (
+        INDIA_TZ.localize(slot) if slot else None
+    )
     context = {
         "call_type": "doctor_availability",
+        "appointment_id": appt_id,
         "patient_name": appt.get("patient_name") or "",
         "doctor_name": appt.get("doctor_name") or "",
         "doctor_status": doctor_status,
+        "appointment_date": slot_local.strftime("%d %B %Y") if slot_local else "",
+        "appointment_time": slot_local.strftime("%I:%M %p") if slot_local else "",
         "hospital_id": hospital_id,
     }
 
@@ -387,10 +396,14 @@ async def cancel_appointment(
     All future confirmation / reminder / doctor-availability loops skip
     cancelled appointments because their status filter excludes 'cancelled'.
     """
-    await conn.execute(
+    # Snapshot the data we need for the SMS while the connection is still held,
+    # then hand a plain dict to the detached task — the conn is released the
+    # moment the caller's `async with pool.acquire()` block exits.
+    row = await conn.fetchrow(
         """UPDATE appointments
            SET status = 'cancelled', workflow_status = 'cancelled', workflow_updated_at = NOW()
-           WHERE id = $1""",
+           WHERE id = $1
+           RETURNING patient_phone, patient_name, doctor_name, slot_time""",
         appointment_id,
     )
     await log_appointment_event(
@@ -401,5 +414,6 @@ async def cancel_appointment(
         note=note,
         actor=actor,
     )
-    # Fire-and-forget cancellation SMS — fetch appointment data first
-    asyncio.ensure_future(_send_cancellation_sms(conn, appointment_id, hospital_id))
+    # Fire-and-forget cancellation SMS using the snapshot (never the live conn).
+    if row:
+        asyncio.ensure_future(_send_cancellation_sms(dict(row)))

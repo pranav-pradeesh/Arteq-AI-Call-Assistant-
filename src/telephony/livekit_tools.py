@@ -867,6 +867,57 @@ try:
 
 
     @function_tool
+    async def confirm_appointment(context: RunContext) -> str:
+        """Confirm the EXISTING appointment this outbound call is about, when the
+        caller says yes / they will attend. Use this ONLY on an outbound
+        confirmation call — do NOT use book_appointment, which would create a
+        duplicate. Marks the appointment confirmed and texts the patient."""
+        _mark_intent(context, "confirm_appointment")
+        appt_id      = _ud(context, "appointment_id", "")
+        hospital_id  = _ud(context, "hospital_id", "")
+        caller_phone = _ud(context, "caller_phone", "")
+        hospital_name = _ud(context, "hospital_name", "the hospital")
+
+        if not appt_id:
+            # No appointment context — fall back gracefully rather than booking.
+            logger.warning("tool_confirm_no_appt_id")
+            return "I've noted your confirmation. Thank you."
+
+        try:
+            from src.db.queries import confirm_appointment_by_id
+            ok = await confirm_appointment_by_id(str(appt_id), hospital_id)
+            if not ok:
+                logger.warning("tool_confirm_not_found", appt_id=appt_id)
+                return "I couldn't find that appointment — please contact the front desk to confirm."
+        except Exception as exc:
+            logger.error("tool_confirm_failed", error=str(exc))
+            return "I've noted your confirmation. Thank you."
+
+        # Fire-and-forget confirmation SMS so the patient has it in writing.
+        dname = _ud(context, "doctor_name", "") or _ud(context, "appt_doctor_name", "")
+        adate = _ud(context, "appointment_date", "")
+        atime = _ud(context, "appointment_time", "")
+        if caller_phone:
+            async def _confirm_sms():
+                try:
+                    from src.services.whatsapp_service import get_messenger
+                    await get_messenger().send_appointment_confirmation(
+                        phone=caller_phone,
+                        hospital_name=hospital_name,
+                        patient_name=_ud(context, "patient_name", "") or "Patient",
+                        doctor_name=dname,
+                        date=adate,
+                        time=atime,
+                    )
+                except Exception as exc:
+                    logger.warning("tool_confirm_sms_failed", error=str(exc))
+            asyncio.create_task(_confirm_sms())
+
+        logger.info("tool_confirm_appointment", appt_id=appt_id)
+        return "Your appointment is confirmed. We've sent you a confirmation message. See you then!"
+
+
+    @function_tool
     async def end_call(context: RunContext, farewell: str = "") -> str:
         """End the call. Call this the moment the caller signals they are done —
         "ok thanks", "that's all", "goodbye", "ശരി നന്ദി", "മതി" — or after you
@@ -895,6 +946,7 @@ try:
     # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
+        confirm_appointment,
         check_availability,
         reschedule_appointment,
         cancel_appointment,
@@ -910,6 +962,7 @@ try:
     # Reduced tool set for clinic tier (no transfer, no complex routing)
     CLINIC_TOOLS = [
         book_appointment,
+        confirm_appointment,
         check_availability,
         reschedule_appointment,
         cancel_appointment,

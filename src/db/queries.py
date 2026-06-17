@@ -670,6 +670,47 @@ async def cancel_appointment_by_id(appointment_id: str, hospital_id: str) -> boo
     return result.split()[-1] != "0"
 
 
+async def confirm_appointment_by_id(appointment_id: str, hospital_id: str = "") -> bool:
+    """Mark an EXISTING appointment confirmed by the patient — used by the outbound
+    confirmation call when the caller says yes. Does NOT create a new appointment.
+
+    Sets status + workflow_status to 'confirmed', flags confirmation_sent so the
+    scheduler stops calling, and writes a workflow audit event. Idempotent."""
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if hospital_id:
+            result = await conn.execute(
+                "UPDATE appointments SET status='confirmed', workflow_status='confirmed', "
+                "confirmation_sent=true, workflow_updated_at=NOW(), updated_at=NOW() "
+                "WHERE id=$1 AND hospital_id=$2",
+                _uuid_mod.UUID(appointment_id),
+                hospital_id,
+            )
+        else:
+            result = await conn.execute(
+                "UPDATE appointments SET status='confirmed', workflow_status='confirmed', "
+                "confirmation_sent=true, workflow_updated_at=NOW(), updated_at=NOW() "
+                "WHERE id=$1",
+                _uuid_mod.UUID(appointment_id),
+            )
+        ok = result.split()[-1] != "0"
+        if ok:
+            try:
+                await conn.execute(
+                    "INSERT INTO appointment_events "
+                    "(id, appointment_id, hospital_id, event_type, new_status, note, actor) "
+                    "VALUES ($1, $2, $3, 'status_change', 'confirmed', "
+                    "'patient confirmed on outbound call', 'patient')",
+                    str(_uuid_mod.uuid4()),
+                    appointment_id,
+                    hospital_id or None,
+                )
+            except Exception as _exc:  # audit is best-effort, never blocks the confirm
+                import logging
+                logging.debug(f"confirm audit event skipped: {_exc}")
+    return ok
+
+
 async def reschedule_appointment_by_id(
     appointment_id: str, new_slot_time: datetime, hospital_id: str = ""
 ) -> bool:
