@@ -2,14 +2,18 @@
 import * as React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { Appointment, AppointmentStatus, AppointmentEvent } from "@/lib/types";
+import type { Appointment, AppointmentStatus, AppointmentWorkflowStatus } from "@/lib/types";
 import { fmtDateTime } from "@/lib/utils";
 import {
-  PageHeader, Badge, Button, Select, Label, Spinner,
+  PageHeader, Badge, Button, Select, Label, Spinner, EmptyState,
 } from "@/components/ui";
+import { Modal } from "@/components/modal";
 import { DataTable, ColumnDef } from "@/components/data-table";
 import { RequireHospital } from "@/components/require-hospital";
 import { useToast } from "@/components/providers";
+
+const EM_DASH = String.fromCharCode(8212);
+const ELLIPSIS = String.fromCharCode(8230);
 
 const ALL_STATUSES: AppointmentStatus[] = [
   "pending", "booked", "confirmed", "cancelled", "rescheduled", "requested",
@@ -22,48 +26,60 @@ function statusTone(s: AppointmentStatus): "green" | "red" | "yellow" | "gray" {
   return "gray";
 }
 
-function workflowTone(s: string): "green" | "red" | "yellow" | "blue" | "gray" {
+function workflowTone(s: AppointmentWorkflowStatus): "green" | "red" | "yellow" | "gray" {
   if (s === "confirmed" || s === "doctor_available") return "green";
-  if (s === "cancelled" || s === "missed" || s === "doctor_unavailable") return "red";
-  if (s === "doctor_delayed") return "yellow";
-  if (s === "reminder_sent") return "blue";
+  if (s === "missed" || s === "doctor_unavailable" || s === "cancelled") return "red";
+  if (s === "reminder_sent" || s === "doctor_delayed" || s === "pending") return "yellow";
   return "gray";
 }
 
-function EventsModal({ hospitalId, appt, onClose }: {
-  hospitalId: string; appt: Appointment; onClose: () => void;
+function humanize(s: string): string {
+  return s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
+function EventsModal({
+  hospitalId, appointment, onClose,
+}: {
+  hospitalId: string;
+  appointment: Appointment | null;
+  onClose: () => void;
 }) {
-  const { data: events = [], isLoading } = useQuery<AppointmentEvent[]>({
-    queryKey: ["appt-events", hospitalId, appt.id],
-    queryFn: () => api.getAppointmentEvents(hospitalId, appt.id),
+  const open = appointment !== null;
+  const { data = [], isLoading, isError } = useQuery({
+    queryKey: ["appointment-events", hospitalId, appointment?.id],
+    queryFn: () => api.listAppointmentEvents(hospitalId, appointment!.id),
+    enabled: open,
   });
+
+  const sorted = React.useMemo(
+    () =>
+      [...data].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ),
+    [data],
+  );
+
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="bg-white rounded-lg shadow-xl w-full max-w-md max-h-[80vh] flex flex-col">
-        <div className="flex items-center justify-between px-5 py-4 border-b">
-          <h2 className="font-semibold text-sm">Appointment events — {appt.patient_name}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">✕</button>
-        </div>
-        <div className="overflow-y-auto flex-1 px-5 py-4">
-          {isLoading ? (
-            <div className="flex justify-center py-8"><Spinner className="h-5 w-5" /></div>
-          ) : events.length === 0 ? (
-            <p className="text-sm text-gray-400 text-center py-8">No events recorded yet.</p>
-          ) : (
-            <ol className="relative border-l border-gray-200 space-y-4 ml-2">
-              {events.map((ev) => (
-                <li key={ev.id} className="ml-4">
-                  <div className="absolute -left-1.5 h-3 w-3 rounded-full bg-gray-300 border border-white" />
-                  <p className="text-xs font-medium text-gray-700">{ev.event_type.replace(/_/g, " ")}</p>
-                  {ev.detail && <p className="text-xs text-gray-500 mt-0.5">{ev.detail}</p>}
-                  <p className="text-xs text-gray-400 mt-0.5">{fmtDateTime(ev.created_at)}</p>
-                </li>
-              ))}
-            </ol>
-          )}
-        </div>
-      </div>
-    </div>
+    <Modal open={open} onClose={onClose} title="Appointment timeline">
+      {isLoading ? (
+        <div className="flex justify-center py-12"><Spinner className="h-6 w-6" /></div>
+      ) : isError ? (
+        <EmptyState title={`Events not available yet ${EM_DASH} ships with the workflow backend`} />
+      ) : sorted.length === 0 ? (
+        <EmptyState title="No events yet" />
+      ) : (
+        <ol className="space-y-4">
+          {sorted.map((ev) => (
+            <li key={ev.id} className="relative border-l-2 border-gray-200 pl-4">
+              <span className="absolute -left-[5px] top-1.5 h-2 w-2 rounded-full bg-brand-500" />
+              <div className="text-sm font-medium text-gray-900">{humanize(ev.event_type)}</div>
+              {ev.detail && <div className="mt-0.5 text-sm text-gray-600">{ev.detail}</div>}
+              <div className="mt-0.5 text-xs text-gray-400">{fmtDateTime(ev.created_at)}</div>
+            </li>
+          ))}
+        </ol>
+      )}
+    </Modal>
   );
 }
 
@@ -71,7 +87,7 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
   const toast = useToast();
   const qc = useQueryClient();
   const [statusFilter, setStatusFilter] = React.useState<AppointmentStatus | "">("");
-  const [eventsAppt, setEventsAppt] = React.useState<Appointment | null>(null);
+  const [eventsFor, setEventsFor] = React.useState<Appointment | null>(null);
 
   const { data = [], isLoading } = useQuery({
     queryKey: ["appointments", hospitalId, statusFilter],
@@ -92,18 +108,18 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
     {
       header: "Patient",
       accessorKey: "patient_name",
-      cell: ({ row }) => row.original.patient_name ?? <span className="text-gray-400">—</span>,
+      cell: ({ row }) => row.original.patient_name ?? <span className="text-gray-400">{EM_DASH}</span>,
     },
     {
       header: "Phone",
       accessorKey: "patient_phone",
-      cell: ({ row }) => row.original.patient_phone ?? <span className="text-gray-400">—</span>,
+      cell: ({ row }) => row.original.patient_phone ?? <span className="text-gray-400">{EM_DASH}</span>,
     },
     {
       header: "Slot",
       accessorKey: "slot_time",
       cell: ({ row }) =>
-        row.original.slot_time ? fmtDateTime(row.original.slot_time) : <span className="text-gray-400">—</span>,
+        row.original.slot_time ? fmtDateTime(row.original.slot_time) : <span className="text-gray-400">{EM_DASH}</span>,
     },
     {
       header: "Status",
@@ -115,7 +131,7 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
             <Badge tone={statusTone(appt.status)}>{appt.status}</Badge>
             {appt.workflow_status && (
               <Badge tone={workflowTone(appt.workflow_status)} className="text-xs">
-                {appt.workflow_status.replace(/_/g, " ")}
+                {humanize(appt.workflow_status)}
               </Badge>
             )}
             {appt.reminder_sent && (
@@ -135,7 +151,14 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
         const appt = row.original;
         const busy = updateMutation.isPending;
         return (
-          <div className="flex gap-1.5 flex-wrap">
+          <div className="flex gap-1.5">
+            <Button
+              variant="outline"
+              className="px-2 py-1 text-xs"
+              onClick={() => setEventsFor(appt)}
+            >
+              View events
+            </Button>
             {appt.status !== "confirmed" && (
               <Button
                 variant="outline"
@@ -156,13 +179,6 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
                 Cancel
               </Button>
             )}
-            <Button
-              variant="ghost"
-              className="px-2 py-1 text-xs"
-              onClick={() => setEventsAppt(appt)}
-            >
-              Events
-            </Button>
           </div>
         );
       },
@@ -191,17 +207,15 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
         <DataTable
           columns={columns}
           data={data}
-          searchPlaceholder="Search patient…"
+          searchPlaceholder={`Search patient${ELLIPSIS}`}
           emptyTitle="No appointments found"
         />
       )}
-      {eventsAppt && (
-        <EventsModal
-          hospitalId={hospitalId}
-          appt={eventsAppt}
-          onClose={() => setEventsAppt(null)}
-        />
-      )}
+      <EventsModal
+        hospitalId={hospitalId}
+        appointment={eventsFor}
+        onClose={() => setEventsFor(null)}
+      />
     </div>
   );
 }

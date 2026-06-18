@@ -2,17 +2,23 @@
 import * as React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { Doctor, Department, Schedule, AvailabilityStatus, DoctorAvailability } from "@/lib/types";
+import type { Doctor, Department, Schedule, DoctorAvailability } from "@/lib/types";
 import { RequireHospital } from "@/components/require-hospital";
 import { DataTable, type ColumnDef } from "@/components/data-table";
 import { FormModal } from "@/components/modal";
 import {
   PageHeader, Button, Field, Input, Select, Badge, Card, CardHeader, CardBody,
 } from "@/components/ui";
-import { useToast } from "@/components/providers";
+import { useToast, useReadOnly } from "@/components/providers";
 import { DOW_LABELS, dowLabel, fmtDateTime } from "@/lib/utils";
 
-const AVAIL_LABELS: Record<AvailabilityStatus, string> = {
+// ── Availability helpers ─────────────────────────────────────────────────────
+
+const AVAILABILITY_STATUSES: DoctorAvailability[] = [
+  "available", "busy", "delayed", "unavailable", "on_leave",
+];
+
+const AVAILABILITY_LABELS: Record<DoctorAvailability, string> = {
   available: "Available",
   busy: "Busy",
   delayed: "Delayed",
@@ -20,7 +26,7 @@ const AVAIL_LABELS: Record<AvailabilityStatus, string> = {
   on_leave: "On Leave",
 };
 
-const AVAIL_TONE: Record<AvailabilityStatus, "green" | "yellow" | "red" | "gray"> = {
+const AVAILABILITY_TONES: Record<DoctorAvailability, "green" | "yellow" | "red" | "gray"> = {
   available: "green",
   busy: "yellow",
   delayed: "yellow",
@@ -28,68 +34,91 @@ const AVAIL_TONE: Record<AvailabilityStatus, "green" | "yellow" | "red" | "gray"
   on_leave: "gray",
 };
 
-function AvailabilityPanel({ doctor, hospitalId, onClose }: {
-  doctor: Doctor; hospitalId: string; onClose: () => void;
-}) {
+// ── Availability Cell ────────────────────────────────────────────────────────
+
+function AvailabilityCell({ hospitalId, doctor }: { hospitalId: string; doctor: Doctor }) {
   const toast = useToast();
   const qc = useQueryClient();
-  const { data, isLoading } = useQuery<DoctorAvailability>({
-    queryKey: ["doctor-avail", hospitalId, doctor.id],
-    queryFn: () => api.getDoctorAvailability(hospitalId, doctor.id),
-  });
-  const mut = useMutation({
-    mutationFn: (status: string) => api.updateDoctorAvailability(hospitalId, doctor.id, status),
+  const readOnly = useReadOnly();
+  const [historyOpen, setHistoryOpen] = React.useState(false);
+
+  const status: DoctorAvailability = doctor.availability_status ?? "available";
+
+  const setMut = useMutation({
+    mutationFn: (next: DoctorAvailability) =>
+      api.setDoctorAvailability(hospitalId, doctor.id, next),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["doctors", hospitalId] });
-      qc.invalidateQueries({ queryKey: ["doctor-avail", hospitalId, doctor.id] });
+      qc.invalidateQueries({ queryKey: ["doctor-availability", hospitalId, doctor.id] });
       toast("Availability updated", "ok");
     },
     onError: (e: Error) => toast(e.message, "err"),
   });
+
+  const { data: history, isLoading: historyLoading } = useQuery({
+    queryKey: ["doctor-availability", hospitalId, doctor.id],
+    queryFn: () => api.getDoctorAvailability(hospitalId, doctor.id),
+    enabled: historyOpen,
+  });
+
+  const events = history?.events ?? [];
+  const sortedEvents = React.useMemo(
+    () =>
+      [...events].sort(
+        (a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime(),
+      ),
+    [events],
+  );
+
   return (
-    <Card className="mt-4 border border-gray-200 shadow-sm">
-      <CardHeader className="flex items-center justify-between py-3 px-4">
-        <span className="font-medium text-sm">Dr. {doctor.name} — Availability</span>
-        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xs">Close</button>
-      </CardHeader>
-      <CardBody className="px-4 pb-4 space-y-4">
-        <Field label="Set status">
-          <Select
-            value={data?.availability_status ?? "available"}
-            onChange={(e) => mut.mutate(e.target.value)}
-            disabled={mut.isPending}
-          >
-            {(Object.keys(AVAIL_LABELS) as AvailabilityStatus[]).map((s) => (
-              <option key={s} value={s}>{AVAIL_LABELS[s]}</option>
-            ))}
-          </Select>
-        </Field>
-        {isLoading ? (
-          <p className="text-xs text-gray-400">Loading history…</p>
-        ) : (
-          <div>
-            <p className="text-xs font-medium text-gray-500 mb-2">Recent changes</p>
-            {(data?.recent_events ?? []).length === 0 ? (
-              <p className="text-xs text-gray-400">No changes recorded yet.</p>
-            ) : (
-              <ul className="space-y-1">
-                {data!.recent_events.map((ev) => (
-                  <li key={ev.id} className="flex items-center gap-2 text-xs">
-                    <Badge tone={AVAIL_TONE[ev.status]}>{AVAIL_LABELS[ev.status]}</Badge>
-                    <span className="text-gray-400">{fmtDateTime(ev.created_at)}</span>
-                    {ev.note && <span className="text-gray-500">— {ev.note}</span>}
-                  </li>
-                ))}
-              </ul>
-            )}
-          </div>
-        )}
-      </CardBody>
-    </Card>
+    <div className="space-y-1.5">
+      <div className="flex items-center gap-2">
+        <Badge tone={AVAILABILITY_TONES[status]}>{AVAILABILITY_LABELS[status]}</Badge>
+        <Select
+          value={status}
+          disabled={readOnly || setMut.isPending}
+          onChange={(e) => setMut.mutate(e.target.value as DoctorAvailability)}
+          className="text-xs"
+        >
+          {AVAILABILITY_STATUSES.map((s) => (
+            <option key={s} value={s}>
+              {AVAILABILITY_LABELS[s]}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <Button
+        variant="ghost"
+        className="text-xs"
+        onClick={() => setHistoryOpen((o) => !o)}
+      >
+        {historyOpen ? "Hide history" : "Availability history"}
+      </Button>
+      {historyOpen && (
+        <div className="rounded border border-gray-100 bg-gray-50 p-2 text-xs">
+          {historyLoading ? (
+            <p className="text-gray-400">Loading…</p>
+          ) : sortedEvents.length === 0 ? (
+            <p className="text-gray-400">No availability history.</p>
+          ) : (
+            <ul className="space-y-1">
+              {sortedEvents.map((ev) => (
+                <li key={ev.id} className="flex items-center justify-between gap-2">
+                  <Badge tone={AVAILABILITY_TONES[ev.status]}>
+                    {AVAILABILITY_LABELS[ev.status]}
+                  </Badge>
+                  <span className="text-gray-400">{fmtDateTime(ev.created_at)}</span>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
-// ── Doctor form ──────────────────────────────────────────────────────────────
+// ── Doctor form ─────────────────────────────────────────────────────────────
 
 type DoctorForm = {
   name: string;
@@ -290,7 +319,6 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   const [editing, setEditing] = React.useState<Doctor | null>(null);
   const [form, setForm] = React.useState<DoctorForm>(BLANK_DOC);
   const [schedDoctor, setSchedDoctor] = React.useState<Doctor | null>(null);
-  const [availDoctor, setAvailDoctor] = React.useState<Doctor | null>(null);
 
   function openCreate() {
     setEditing(null);
@@ -338,8 +366,8 @@ function Inner({ hospitalId }: { hospitalId: string }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["doctors", hospitalId] });
       toast("Doctor deleted", "ok");
-    },
-    onError: (e: Error) => toast(e.message, "err"),
+ // synctest
+Error: (e: Error) => toast(e.message, "err"),
   });
 
   const columns: ColumnDef<Doctor>[] = [
@@ -370,6 +398,13 @@ function Inner({ hospitalId }: { hospitalId: string }) {
       },
     },
     {
+      header: "Availability",
+      id: "availability",
+      cell: ({ row }) => (
+        <AvailabilityCell hospitalId={hospitalId} doctor={row.original} />
+      ),
+    },
+    {
       header: "Status",
       accessorKey: "active",
       cell: ({ row }) => (
@@ -377,14 +412,6 @@ function Inner({ hospitalId }: { hospitalId: string }) {
           {row.original.active ? "Active" : "Inactive"}
         </Badge>
       ),
-    },
-    {
-      header: "Availability",
-      id: "availability",
-      cell: ({ row }) => {
-        const s = (row.original.availability_status ?? "available") as AvailabilityStatus;
-        return <Badge tone={AVAIL_TONE[s]}>{AVAIL_LABELS[s]}</Badge>;
-      },
     },
     {
       header: "Actions",
@@ -396,13 +423,6 @@ function Inner({ hospitalId }: { hospitalId: string }) {
           </Button>
           <Button variant="outline" onClick={() => setSchedDoctor(row.original)} className="text-xs">
             Schedules
-          </Button>
-          <Button
-            variant="outline"
-            className="text-xs"
-            onClick={() => setAvailDoctor(availDoctor?.id === row.original.id ? null : row.original)}
-          >
-            Availability
           </Button>
           <Button
             variant="danger"
@@ -436,14 +456,6 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         searchPlaceholder="Search doctors…"
         emptyTitle="No doctors yet"
       />
-
-      {availDoctor && (
-        <AvailabilityPanel
-          doctor={availDoctor}
-          hospitalId={hospitalId}
-          onClose={() => setAvailDoctor(null)}
-        />
-      )}
 
       {/* Doctor create/edit modal */}
       <FormModal
