@@ -42,6 +42,13 @@ export interface Schedule {
   active: boolean;
 }
 
+export type DoctorAvailability =
+  | "available"
+  | "busy"
+  | "delayed"
+  | "unavailable"
+  | "on_leave";
+
 export interface Doctor {
   id: string;
   hospital_id: string;
@@ -51,7 +58,22 @@ export interface Doctor {
   specialty?: string | null;
   qualifications?: string | null;
   active: boolean;
+  availability_status?: DoctorAvailability | null;
   schedules?: Schedule[];
+}
+
+export interface DoctorAvailabilityEvent {
+  id: string;
+  doctor_id: string;
+  hospital_id?: string | null;
+  status: DoctorAvailability;
+  note?: string | null;
+  created_at: string;
+}
+
+export interface DoctorAvailabilityInfo {
+  availability_status: DoctorAvailability;
+  events: DoctorAvailabilityEvent[];
 }
 
 export interface BillingItem {
@@ -95,6 +117,26 @@ export type AppointmentStatus =
   | "rescheduled"
   | "requested";
 
+// Workflow engine state (scheduler-driven confirmation/reminder/availability calls).
+export type AppointmentWorkflowStatus =
+  | "pending"
+  | "confirmed"
+  | "missed"
+  | "cancelled"
+  | "reminder_sent"
+  | "doctor_available"
+  | "doctor_delayed"
+  | "doctor_unavailable";
+
+export interface AppointmentEvent {
+  id: string;
+  appointment_id: string;
+  hospital_id?: string | null;
+  event_type: string; // e.g. "confirmation_call_placed", "confirmed", "missed", "reminder_sent"
+  detail?: string | null;
+  created_at: string;
+}
+
 export interface Appointment {
   id: string;
   hospital_id: string;
@@ -106,6 +148,9 @@ export interface Appointment {
   notes?: string | null;
   call_id?: string | null;
   status: AppointmentStatus;
+  workflow_status?: AppointmentWorkflowStatus | null;
+  doctor_availability_attempts?: number | null;
+  doctor_availability_notified?: boolean | null;
   reminder_sent: boolean;
   confirmation_sent: boolean;
   followup_sent: boolean;
@@ -223,9 +268,9 @@ export interface Tenant {
 
 export interface TelephonyStatus {
   overall: { sip_calls_ready: boolean };
-  // Carrier blocks. Exotel is the active carrier; `plivo` is the legacy block
-  // the backend still returns until its /telephony/status is renamed. The
-  // Telephony page renders whichever carrier block(s) the backend sends.
+  // Carrier blocks. The Telephony page renders whichever carrier block(s) the
+  // backend sends (Vobiz is the current primary; Exotel/Plivo may also appear).
+  vobiz?: Record<string, boolean>;
   exotel?: Record<string, boolean>;
   plivo?: Record<string, boolean>;
   livekit?: Record<string, boolean>;
@@ -289,4 +334,15 @@ export interface WhatsAppMessage {
   patient_name?: string | null;
   body: string;
   at: string; // ISO datetime
+}
+
+// ── Trial / subscription (migrations 017) ──────────────────────────────────
+export type SubscriptionStatus = "trial" | "active" | "expired";
+
+export interface TrialStatus {
+  subscription_status: SubscriptionStatus;
+  trial_started_at?: string | null;
+  trial_expires_at?: string | null;
+  activated_at?: string | null;
+  days_remaining?: number | null;
 }

@@ -1,8 +1,9 @@
 "use client";
 import * as React from "react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { SessionProvider, useSession } from "next-auth/react";
-import { setAuthToken } from "@/lib/api";
+import { setAuthToken, api } from "@/lib/api";
+import type { TrialStatus } from "@/lib/types";
 
 // Keeps the in-module API token in sync with the NextAuth session.
 function AuthTokenSync() {
@@ -25,6 +26,29 @@ type HospitalState = {
 };
 const HospitalCtx = React.createContext<HospitalState>({ hospitalId: null, setHospitalId: () => {} });
 export const useCurrentHospital = () => React.useContext(HospitalCtx);
+
+// ── Trial / read-only ───────────────────────────────────────────
+// readOnly is true when the selected hospital's trial has expired AND the user
+// is not a super_admin (Arteq staff keep full access to activate/manage).
+type ReadOnlyState = { readOnly: boolean; trial: TrialStatus | null };
+const ReadOnlyCtx = React.createContext<ReadOnlyState>({ readOnly: false, trial: null });
+export const useReadOnly = () => React.useContext(ReadOnlyCtx).readOnly;
+export const useTrialStatus = () => React.useContext(ReadOnlyCtx).trial;
+
+function ReadOnlyProvider({ children }: { children: React.ReactNode }) {
+  const { hospitalId } = useCurrentHospital();
+  const { data: session } = useSession();
+  const role = (session?.user as { role?: string } | undefined)?.role;
+  const { data: trial = null } = useQuery({
+    queryKey: ["trial-status", hospitalId],
+    queryFn: () => api.trialStatus(hospitalId as string),
+    enabled: !!hospitalId,
+    retry: false,
+  });
+  const readOnly =
+    !!trial && trial.subscription_status === "expired" && role !== "super_admin";
+  return <ReadOnlyCtx.Provider value={{ readOnly, trial }}>{children}</ReadOnlyCtx.Provider>;
+}
 
 export function Providers({ children }: { children: React.ReactNode }) {
   const [client] = React.useState(
@@ -54,7 +78,7 @@ export function Providers({ children }: { children: React.ReactNode }) {
       <AuthTokenSync />
       <ToastCtx.Provider value={notify}>
         <HospitalCtx.Provider value={{ hospitalId, setHospitalId }}>
-          {children}
+          <ReadOnlyProvider>{children}</ReadOnlyProvider>
           <div className="fixed bottom-4 right-4 z-[100] space-y-2">
             {notices.map((n) => (
               <div

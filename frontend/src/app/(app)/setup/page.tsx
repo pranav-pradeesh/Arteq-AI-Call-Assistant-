@@ -5,6 +5,7 @@ import { api } from "@/lib/api";
 import { PageHeader, Button, Card, CardHeader, CardBody, Badge, Spinner, EmptyState } from "@/components/ui";
 import { RequireHospital } from "@/components/require-hospital";
 import { useToast } from "@/components/providers";
+import { useSession } from "next-auth/react";
 
 function prettifyKey(key: string): string {
   return key
@@ -34,6 +35,28 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
     plivo_number: string;
     bsnl_forward_code?: string;
   } | null>(null);
+
+  const { data: session } = useSession();
+  const role = (session?.user as { role?: string })?.role;
+
+  const [vobizResult, setVobizResult] = React.useState<
+    ({ outbound_trunk_id?: string } & Record<string, unknown>) | null
+  >(null);
+
+  const vobizStatusQuery = useQuery({
+    queryKey: ["vobiz-status"],
+    queryFn: () => api.vobizStatus(),
+  });
+
+  const vobizMutation = useMutation({
+    mutationFn: () => api.vobizSetup(),
+    onSuccess: (result) => {
+      setVobizResult(result);
+      vobizStatusQuery.refetch();
+      toast("Vobiz SIP setup completed successfully");
+    },
+    onError: (e: Error) => toast(e.message, "err"),
+  });
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["setup", hospitalId],
@@ -109,6 +132,73 @@ function SetupInner({ hospitalId }: { hospitalId: string }) {
           {provisionMutation.isPending && <Spinner />} Provision Phone Number
         </Button>
       </div>
+
+      <Card className="mt-6">
+        <CardHeader>
+          <span className="text-sm font-semibold text-gray-700">Vobiz SIP</span>
+        </CardHeader>
+        <CardBody className="space-y-4">
+          <div>
+            <p className="mb-2 text-xs font-medium text-gray-500">Config Completeness</p>
+            {vobizStatusQuery.isLoading ? (
+              <div className="flex items-center gap-2 text-sm text-gray-400">
+                <Spinner /> Loading...
+              </div>
+            ) : vobizStatusQuery.isError || !vobizStatusQuery.data ? (
+              <p className="text-xs text-gray-400">Vobiz status unavailable</p>
+            ) : Object.keys(vobizStatusQuery.data).length === 0 ? (
+              <p className="text-sm text-gray-400">No status available.</p>
+            ) : (
+              <ul className="space-y-2">
+                {Object.entries(vobizStatusQuery.data).map(([key, val]) => {
+                  const isBool = typeof val === "boolean";
+                  return (
+                    <li key={key} className="flex items-center gap-3 text-sm">
+                      {isBool ? (
+                        <span className="text-base">{val ? "✅" : "❌"}</span>
+                      ) : null}
+                      <span className="text-gray-700">{prettifyKey(key)}</span>
+                      {!isBool ? (
+                        <span className="font-mono text-xs text-gray-500">
+                          {String(val)}
+                        </span>
+                      ) : null}
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+
+          {role === "super_admin" && (
+            <div>
+              <Button
+                onClick={() => vobizMutation.mutate()}
+                disabled={vobizMutation.isPending}
+              >
+                {vobizMutation.isPending && <Spinner />} Run Vobiz SIP setup
+              </Button>
+            </div>
+          )}
+
+          {vobizResult && (
+            <div>
+              <p className="mb-1 text-xs font-medium text-gray-500">Outbound Trunk ID</p>
+              <div className="flex items-center gap-3">
+                <code className="font-mono text-sm text-gray-800">
+                  {vobizResult.outbound_trunk_id ?? "(none returned)"}
+                </code>
+                {vobizResult.outbound_trunk_id && (
+                  <CopyButton text={vobizResult.outbound_trunk_id} />
+                )}
+              </div>
+              <p className="mt-1 text-xs text-gray-400">
+                Add this as LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID in the backend env, then restart.
+              </p>
+            </div>
+          )}
+        </CardBody>
+      </Card>
 
       {provisionResult && (
         <Card>
