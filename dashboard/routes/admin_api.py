@@ -480,7 +480,8 @@ async def list_doctors(hospital_id: str):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT d.id, d.name, d.name_ml, d.specialty, d.qualifications,
-                      d.active, dep.name as dept_name, dep.id as dept_id,
+                      d.active, d.availability_status,
+                      dep.name as dept_name, dep.id as dept_id,
                       json_agg(json_build_object(
                           'id', s.id,
                           'dow', s.day_of_week,
@@ -495,7 +496,7 @@ async def list_doctors(hospital_id: str):
                LEFT JOIN schedules s ON s.doctor_id = d.id
                WHERE d.hospital_id=$1
                GROUP BY d.id, d.name, d.name_ml, d.specialty, d.qualifications,
-                        d.active, dep.name, dep.id
+                        d.active, d.availability_status, dep.name, dep.id
                ORDER BY d.name""",
             hospital_id,
         )
@@ -509,6 +510,7 @@ async def list_doctors(hospital_id: str):
             "dept_name": r["dept_name"] or "",
             "dept_id": str(r["dept_id"]) if r["dept_id"] else "",
             "active": r["active"],
+            "availability_status": r["availability_status"] or "available",
             "schedules": _maybe_json(r["schedules"]) or [],
         }
         for r in rows
@@ -946,7 +948,9 @@ async def list_appointments(hospital_id: str, status: str = "", limit: int = 50)
         if status:
             rows = await conn.fetch(
                 """SELECT a.id, a.patient_name, a.patient_phone, a.slot_time,
-                          a.status, a.notes, a.created_at,
+                          a.status, a.workflow_status, a.notes, a.created_at,
+                          a.reminder_sent, a.confirmation_sent, a.followup_sent,
+                          a.doctor_id, a.dept_id,
                           d.name AS doctor_name, dep.name AS dept_name
                    FROM appointments a
                    LEFT JOIN doctors d ON a.doctor_id = d.id
@@ -959,7 +963,9 @@ async def list_appointments(hospital_id: str, status: str = "", limit: int = 50)
         else:
             rows = await conn.fetch(
                 """SELECT a.id, a.patient_name, a.patient_phone, a.slot_time,
-                          a.status, a.notes, a.created_at,
+                          a.status, a.workflow_status, a.notes, a.created_at,
+                          a.reminder_sent, a.confirmation_sent, a.followup_sent,
+                          a.doctor_id, a.dept_id,
                           d.name AS doctor_name, dep.name AS dept_name
                    FROM appointments a
                    LEFT JOIN doctors d ON a.doctor_id = d.id
@@ -974,11 +980,16 @@ async def list_appointments(hospital_id: str, status: str = "", limit: int = 50)
             "id": str(r["id"]),
             "patient_name": r["patient_name"] or "",
             "patient_phone": r["patient_phone"] or "",
-            # Frontend expects appointment_date (ISO date) + appointment_time (HH:MM[:SS]);
-            # both are derived from the single slot_time column.
+            "slot_time": r["slot_time"].isoformat() if r["slot_time"] else None,
             "appointment_date": r["slot_time"].date().isoformat() if r["slot_time"] else None,
             "appointment_time": r["slot_time"].strftime("%H:%M:%S") if r["slot_time"] else None,
             "status": r["status"] or "requested",
+            "workflow_status": r["workflow_status"] or None,
+            "reminder_sent": bool(r["reminder_sent"]),
+            "confirmation_sent": bool(r["confirmation_sent"]),
+            "followup_sent": bool(r["followup_sent"]),
+            "doctor_id": str(r["doctor_id"]) if r["doctor_id"] else None,
+            "dept_id": str(r["dept_id"]) if r["dept_id"] else None,
             "notes": r["notes"] or "",
             "doctor_name": r["doctor_name"] or "",
             "dept_name": r["dept_name"] or "",
