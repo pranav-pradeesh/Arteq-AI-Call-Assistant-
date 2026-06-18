@@ -1,0 +1,52 @@
+name: Sync Frontend from Upstream
+
+# Mirrors the frontend/ directory from the upstream dashboard repo
+# (Mhd-Hayyan/dashboard-next) into this repo. When upstream changes, this
+# commits the update to main — which triggers the Vercel auto-deploy.
+#
+# NOTE: frontend/ is treated as a mirror of upstream. Local edits to files
+# under frontend/ will be overwritten on the next sync. Make frontend changes
+# in the upstream repo, not here.
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'   # every 6 hours
+  workflow_dispatch:         # allow manual run from the Actions tab
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-frontend
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout this repo
+        uses: actions/checkout@v4
+
+      - name: Clone upstream dashboard
+        run: git clone --depth 1 https://github.com/Mhd-Hayyan/dashboard-next.git /tmp/upstream
+
+      - name: Mirror upstream into frontend/
+        run: |
+          rsync -a --delete \
+            --exclude '.git' \
+            --exclude '.env.local' \
+            --exclude 'node_modules' \
+            /tmp/upstream/ frontend/
+
+      - name: Commit and push if changed
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -n "$(git status --porcelain frontend/)" ]; then
+            git add frontend/
+            git commit -m "chore: sync frontend from Mhd-Hayyan/dashboard-next"
+            git push origin HEAD:main
+            echo "Synced upstream changes."
+          else
+            echo "No upstream changes."
+          fi

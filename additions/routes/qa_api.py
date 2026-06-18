@@ -34,7 +34,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ..deps import AuthDep, PoolDep, require_auth
+from ..deps import AuthDep, PoolDep, require_auth, require_hospital_access
 
 router = APIRouter(prefix="/admin", tags=["qa"])
 
@@ -134,6 +134,7 @@ def _row_to_str(value: Any) -> Optional[str]:
     "/hospitals/{hospital_id}/calls/{call_id}",
     response_model=CallDetail,
     summary="Full call detail with parsed transcript and intents",
+    dependencies=[Depends(require_hospital_access)],
 )
 async def get_call_detail(
     hospital_id: str,
@@ -205,6 +206,7 @@ async def get_call_detail(
     "/hospitals/{hospital_id}/feedback",
     response_model=List[FeedbackItem],
     summary="Post-call feedback with optional rating filter",
+    dependencies=[Depends(require_hospital_access)],
 )
 async def list_feedback(
     hospital_id: str,
@@ -290,6 +292,7 @@ async def list_feedback(
     "/hospitals/{hospital_id}/missed-questions",
     response_model=List[MissedQuestion],
     summary="Questions the agent could not answer, newest first",
+    dependencies=[Depends(require_hospital_access)],
 )
 async def list_missed_questions(
     hospital_id: str,

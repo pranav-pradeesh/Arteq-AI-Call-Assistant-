@@ -2,7 +2,7 @@
 Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
-  • Silero VAD → Sarvam STT (Saaras v3, 23 languages, codemix)
+  • Silero VAD → Sarvam STT (Saarika, transcribes in the caller's own language)
   • Groq LLaMA 70B (via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
@@ -35,7 +35,18 @@ _log = logging.getLogger("livekit.agents")
 import numpy as np
 from dotenv import load_dotenv
 from livekit import rtc
-from livekit.agents import Agent, AgentSession, JobContext, WorkerOptions, cli, APIConnectOptions, RoomInputOptions
+from livekit.agents import (
+    Agent,
+    AgentSession,
+    APIConnectOptions,
+    EndpointingOptions,
+    JobContext,
+    PreemptiveGenerationOptions,
+    TurnHandlingOptions,
+    WorkerOptions,
+    cli,
+)
+from livekit.agents.voice.room_io import AudioInputOptions, RoomOptions
 from livekit.agents.voice.agent_session import SessionConnectOptions
 from livekit.agents import llm as agents_llm  # ChatContext, ChatMessage types
 from livekit.plugins import noise_cancellation, openai, sarvam, silero
@@ -88,6 +99,11 @@ def _detect_tts_lang(text: str, fallback: str) -> str:
 def _voice_for_lang(lang: str, default: str) -> str:
     from src.tts_normalize import voice_for_lang
     return voice_for_lang(lang, default)
+
+
+def _split_mixed_script(text: str, fallback: str) -> list:
+    from src.tts_normalize import split_mixed_script
+    return split_mixed_script(text, fallback)
 
 
 # Deterministic safety net for English-in-English: Bulbul v3 speaks code-mixed
@@ -187,6 +203,14 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
                 output_emitter.push(chunk)
             return
 
+        # Mixed-script text (e.g. "Good morning! Welcome to Hospital, <native question>"):
+        # split into per-script segments and synthesize each with the correct lang so
+        # English words get English phonetics and native words get native phonetics.
+        segments = _split_mixed_script(text, lang)
+        if len(segments) > 1:
+            await self._run_multi(output_emitter, segments, speaker, rest_key)
+            return
+
         try:
             await self._run_ws(output_emitter, text, lang, speaker, ws_key)
         except Exception as exc:
@@ -211,7 +235,9 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             model="bulbul:v3",
             send_completion_event=True,
         ) as ws:
-            await ws.configure(target_language_code=lang, speaker=speaker)
+            # pace must be set here too — the WS streaming path is tried first, so
+            # without it the speed setting would only apply to the REST fallback.
+            await ws.configure(target_language_code=lang, speaker=speaker, pace=self._opts.pace)
             await ws.convert(text)
             await ws.flush()
 
@@ -236,12 +262,8 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             raise RuntimeError("WebSocket TTS: no audio chunks received")
         tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
 
-    async def _run_rest(
-        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
-    ) -> None:
-        """REST TTS fallback — waits for full synthesis before any audio plays."""
-        from src.cache.store import tts_cache, TTS_CACHE_TTL
-
+    async def _fetch_wav_bytes(self, text: str, lang: str, speaker: str) -> list:
+        """Fetch decoded WAV bytes from Sarvam REST for one text segment."""
         payload = {
             "target_language_code": lang,
             "text": text,
@@ -271,24 +293,79 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
                         message=f"Sarvam TTS API Error: {error_text}", status_code=res.status
                     )
                 response_json = await res.json()
-                request_id = response_json.get("request_id", "")
                 audios = response_json.get("audios", [])
                 if not audios or not isinstance(audios, list):
                     raise _APIConnErr("Sarvam TTS API response invalid: no audio data")
-                output_emitter.initialize(
-                    request_id=request_id or "unknown",
-                    sample_rate=self._tts.sample_rate,
-                    num_channels=self._tts.num_channels,
-                    mime_type="audio/wav",
-                )
-                decoded = [_b64.b64decode(b64) for b64 in audios]
-                for chunk in decoded:
-                    output_emitter.push(chunk)
-                tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
+                return [_b64.b64decode(b64) for b64 in audios]
         except asyncio.TimeoutError as e:
             raise _APITimeoutErr("Sarvam TTS API request timed out") from e
         except _aiohttp.ClientError as e:
             raise _APIConnErr(f"Sarvam TTS API connection error: {e}") from e
+
+    async def _run_rest(
+        self, output_emitter, text: str, lang: str, speaker: str, cache_key: str
+    ) -> None:
+        """REST TTS fallback — waits for full synthesis before any audio plays."""
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        decoded = await self._fetch_wav_bytes(text, lang, speaker)
+        output_emitter.initialize(
+            request_id="rest",
+            sample_rate=self._tts.sample_rate,
+            num_channels=self._tts.num_channels,
+            mime_type="audio/wav",
+        )
+        for chunk in decoded:
+            output_emitter.push(chunk)
+        tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
+
+    async def _run_multi(
+        self, output_emitter, segments: list, speaker: str, cache_key: str
+    ) -> None:
+        """Synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
+
+        Each segment is synthesized with its own language code so English words
+        use English phonetics and native-script words use native phonetics.
+        The joined PCM is pushed as a single seamless audio stream.
+        """
+        import io
+        import wave
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        all_pcm = b""
+        sr = nc = sw = None
+
+        for seg_text, seg_lang in segments:
+            seg_speaker = _voice_for_lang(seg_lang, speaker)
+            wav_chunks = await self._fetch_wav_bytes(seg_text, seg_lang, seg_speaker)
+            for wav_bytes in wav_chunks:
+                with io.BytesIO(wav_bytes) as buf:
+                    with wave.open(buf, "rb") as wf:
+                        if sr is None:
+                            sr = wf.getframerate()
+                            nc = wf.getnchannels()
+                            sw = wf.getsampwidth()
+                        all_pcm += wf.readframes(wf.getnframes())
+
+        if not all_pcm or sr is None:
+            raise _APIConnErr("Multi-segment TTS: no audio data received")
+
+        out = io.BytesIO()
+        with wave.open(out, "wb") as wf:
+            wf.setnchannels(nc)
+            wf.setsampwidth(sw)
+            wf.setframerate(sr)
+            wf.writeframes(all_pcm)
+        combined = out.getvalue()
+
+        output_emitter.initialize(
+            request_id="multi-seg",
+            sample_rate=self._tts.sample_rate,
+            num_channels=self._tts.num_channels,
+            mime_type="audio/wav",
+        )
+        output_emitter.push(combined)
+        tts_cache.set(cache_key, [combined], ttl=TTS_CACHE_TTL)
 
 
 # Bulbul v3 voice roster (Sarvam docs). v3 rejects pitch, loudness and
@@ -309,6 +386,14 @@ _SARVAM_COMPAT["bulbul:v3"] = {
     "female": [],
     "male": [],
 }
+
+
+# Talking speed for Bulbul TTS. `pace` is Sarvam's speed multiplier — 1.0 is the
+# natural default, higher is faster. Env-tunable via TTS_PACE; 1.3 makes Arya
+# speak a bit brisker without clipping clarity. Must be applied on BOTH the
+# WebSocket and REST paths (and every TTS instance) or the prewarm cache — whose
+# key includes pace — won't match the live voice.
+_TTS_PACE = float(os.getenv("TTS_PACE", "1.3"))
 
 
 class BulbulV3TTS(_SarvamTTS):
@@ -374,12 +459,16 @@ _AMBIENT_FRAME_SAMPLES = 320  # 20 ms at 16 kHz — standard WebRTC frame size
 # Pre-generate 5 s of softened white noise (fixed seed → deterministic across
 # worker restarts). A 7-sample boxcar smooths out the harshest high-frequency
 # content so it sounds closer to HVAC ventilation than raw hiss.
-# Amplitude 0.06 (6 % of int16 max) keeps it well below conversational speech.
+# Level is the fraction of int16 max (0.0–1.0) and is env-tunable via
+# AMBIENT_NOISE_LEVEL: lower = quieter background, 0 = silent line (track not
+# published at all). Default 0.02 (2 %) — subtle presence well under speech;
+# the original 0.06 was noticeably loud on a real call.
+_AMBIENT_LEVEL = min(max(float(os.getenv("AMBIENT_NOISE_LEVEL", "0.02")), 0.0), 1.0)
 _rng = np.random.default_rng(seed=0)
 _raw = _rng.standard_normal(5 * _AMBIENT_SAMPLE_RATE + 7).astype(np.float64)
 _raw = np.convolve(_raw, np.ones(7) / 7, mode="valid")
 _raw /= np.abs(_raw).max()
-_AMBIENT_BUF = (_raw * 0.06 * 32767).astype(np.int16)
+_AMBIENT_BUF = (_raw * _AMBIENT_LEVEL * 32767).astype(np.int16)
 del _raw, _rng
 
 _DTMF = {
@@ -446,7 +535,15 @@ def _build_llm(premium: bool = True):
 
     # premium retained for signature compat; both tiers now lead with 70b for
     # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
-    chain = [_groq("llama-3.3-70b-versatile"), _groq("llama-3.1-8b-instant")]
+    # Each Groq model has its OWN rate-limit bucket, so listing more models in
+    # GROQ_MODELS (comma-separated, best first) adds throughput headroom without
+    # a code change — the single biggest lever against the 429/413 rate-limit
+    # errors on Groq's free tier. The real fix for zero errors is a paid Groq
+    # tier (much higher TPM); this just spreads load until then.
+    models = [m.strip() for m in os.getenv(
+        "GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant"
+    ).split(",") if m.strip()]
+    chain = [_groq(m) for m in models]
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
     if sarvam_key:
@@ -649,11 +746,17 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
     return f"""You are the voice receptionist for {hosp_name}. You have NO personal name — never introduce yourself with one and never invent one. Identify only as {hosp_name}. If a caller asks who you are or your name, say you are the reception assistant at {hosp_name}.
 
+SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
+
 LANGUAGE: Default to the hospital's configured language. Reply in the same language and script as the caller's most recent message — Malayalam, English, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Punjabi, Odia, Marathi, or Manglish (Malayalam in Latin script). Never switch to English unless the caller spoke English first. Match script exactly: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
 
 SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
 
-MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?". Verbs take no gender suffix: "വന്നു" not "വന്നാൾ". Speak times as: "രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി" — never "10 AM" or "10:00 AM". For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
+MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?".
+TENSES — use natural everyday forms, no gender suffix: present "-ുന്നു" (ഞാൻ ബുക്ക് ചെയ്യുന്നു), past "-ി/-ു" (ബുക്ക് ചെയ്തു, വന്നു — never "വന്നാൾ"), future "-ും" (ബുക്ക് ചെയ്യും).
+SUFFIX SANDHI — when a word ending in the chillu "ൽ" takes a case suffix, the "ൽ" becomes "ലിന്" (never write "ൽ" + suffix directly): കാൽ → കാലിന്, മുക്കാൽ → മുക്കാലിന്, ഹോസ്പിറ്റൽ → ഹോസ്പിറ്റലിന്.
+TIME — speak the clock naturally and NEVER say the unit words "മണിക്കൂർ" (hour) or "മിനിറ്റ്" (minute). Use these forms: :00 (o'clock) = number + മണി ("ഒരു മണി" 1:00, "പത്ത് മണി" 10:00); :15 = "Xഏ കാൽ" ("10ഏ കാൽ" 10:15); :30 (half) = the "-ര" form ("ഒന്നര" 1:30, "രണ്ടര" 2:30, "പത്തര" 10:30); :45 = "Xഏ മുക്കാൽ" ("10ഏ മുക്കാൽ" 10:45); any other minute Y = "Xഏ Y" ("10ഏ 20" 10:20). Always add the part of day ("രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി", "വൈകുന്നേരം 5ഏ 20"). Never say "10 AM", "10:00", or "10 മണിക്കൂർ 30 മിനിറ്റ്".
+For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
 GRAMMAR (apply per reply language — speak like a real native, not a translation):
 Hindi/Marathi: "आप"/"तुम्ही" (formal). Verb agrees with subject gender; use masculine default if gender unknown. Times: "सुबह दस बजे"/"सकाळी दहा वाजता". Spoken questions tag "ना?" or end with "क्या?".
@@ -682,11 +785,13 @@ DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour
 
 ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request.
 
-NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor, NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in that department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
+NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor — AND that department/specialty is listed in the HOSPITAL section — NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in THAT SAME department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
-NEVER say a department or doctor listed in the HOSPITAL section is unavailable or does not exist. If the caller names a specialty (e.g. "a cardiology doctor"), pick a doctor from that department and proceed — do NOT reply "no doctor available". If they don't know any name, briefly list that department's doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
+MATCH THE EXACT DEPARTMENT/DOCTOR ASKED: Answer ONLY about the specific department, specialty, or doctor the caller named. NEVER substitute a different one — if they ask about Neurology, do NOT answer with Orthopedics; if they ask for Dr. A, do NOT offer Dr. B unless they ask. First decide whether what they named actually appears in the HOSPITAL section:
+ • IF IT IS LISTED: never say it is unavailable or does not exist. If they named a specialty (e.g. "a cardiology doctor"), pick a doctor from THAT department and proceed — do NOT reply "no doctor available". If they don't know a name, briefly list that department's own doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
+ • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Say plainly that the hospital does not have that department/specialty/doctor here, then offer to transfer to reception (transfer_to_department) or help with a department it does have.
 
-NEVER invent doctor names, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, transfer.
+NEVER invent doctor names, departments, specialties, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, do not make it up; say it is not available here and transfer.
 
 CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
 
@@ -778,10 +883,19 @@ class HospitalVoiceAgent(Agent):
         super().__init__(
             instructions=system_prompt,
             tools=tools,
+            # Saarika = Speech-to-Text (transcribes in the caller's OWN language and
+            # native script). Saaras = Speech-to-Text-TRANSLATE (rewrites everything
+            # to English) — that silently breaks this agent, because both the reply-
+            # language rules in the system prompt and _detect_tts_lang() decide the
+            # caller's language from the SCRIPT of the transcript. An English-only
+            # transcript makes Arya answer in English even to a Malayalam caller.
+            # Model + language are env-overridable so the version can be bumped or the
+            # language pinned (e.g. "ml-IN") without a code change. "unknown" lets one
+            # agent auto-detect every caller language; pin it if auto-detect is shaky.
             stt=sarvam.STT(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
-                model="saaras:v3",
-                language="unknown",
+                model=os.getenv("SARVAM_STT_MODEL", "saarika:v2.5"),
+                language=os.getenv("SARVAM_STT_LANGUAGE", "unknown"),
             ),
             # Reuse the worker-prewarmed VAD (loaded once in prewarm_fnc) so the
             # Silero model load is off the per-call critical path. Fall back to a
@@ -805,6 +919,7 @@ class HospitalVoiceAgent(Agent):
                 # speaker and 24000 Hz sample rate are enforced by BulbulV3TTS.
                 target_language_code=agent_language,
                 speaker="priya",
+                pace=_TTS_PACE,
             ),
         )
         self._greeting = greeting
@@ -990,22 +1105,34 @@ def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
 
 class _LatencyMeter:
     """Running average of perceived response latency — the time from the caller
-    finishing their turn to Arya's first audio. Built from the per-stage metrics
-    LiveKit emits on `metrics_collected`: end-of-utterance delay (VAD settle) +
-    LLM time-to-first-token + TTS time-to-first-byte. Each stage is averaged
-    independently (they don't all fire on every turn), then summed, so a missing
-    metric on one turn doesn't skew the total. Surfaced as latency_avg_ms on the
-    call log to catch a prod latency regression we can't otherwise see."""
+    finishing their turn to Arya's first audio. Built from the per-turn metrics
+    LiveKit now attaches to each conversation item (`ChatMessage.metrics`):
+    end-of-turn delay (VAD settle) + LLM time-to-first-token + TTS
+    time-to-first-byte. Each stage is averaged independently (they don't all fire
+    on every turn), then summed, so a missing metric on one turn doesn't skew the
+    total. Surfaced as latency_avg_ms on the call log to catch a prod latency
+    regression we can't otherwise see.
+
+    (Sourced from the `conversation_item_added` event since `metrics_collected`
+    was deprecated in livekit-agents 1.5 — the MetricsReport keys map 1:1 to the
+    old per-stage metric attributes.)"""
 
     def __init__(self) -> None:
         self._sum = {"eou": 0.0, "llm": 0.0, "tts": 0.0}
         self._cnt = {"eou": 0, "llm": 0, "tts": 0}
 
-    def on_metrics(self, ev) -> None:
-        m = getattr(ev, "metrics", ev)
-        # Duck-type by attribute: metric classes vary across plugin versions.
-        for attr, key in (("end_of_utterance_delay", "eou"), ("ttft", "llm"), ("ttfb", "tts")):
-            val = getattr(m, attr, None)
+    def on_item(self, ev) -> None:
+        item = getattr(ev, "item", None)
+        metrics = getattr(item, "metrics", None)
+        if not isinstance(metrics, dict):
+            return
+        # MetricsReport keys; map to the old end_of_utterance_delay/ttft/ttfb.
+        for mkey, key in (
+            ("end_of_turn_delay", "eou"),
+            ("llm_node_ttft", "llm"),
+            ("tts_node_ttfb", "tts"),
+        ):
+            val = metrics.get(mkey)
             if isinstance(val, (int, float)) and val > 0:
                 self._sum[key] += float(val)
                 self._cnt[key] += 1
@@ -1028,7 +1155,12 @@ async def _run_ambient_audio(room: rtc.Room) -> None:
     The LiveKit SIP gateway mixes all tracks from a participant before sending
     to PSTN, so this ambient sound is heard by the caller throughout. Task
     cancellation is the shutdown signal — finally block unpublishes cleanly.
+
+    AMBIENT_NOISE_LEVEL=0 disables it entirely — no track is published and the
+    caller hears a clean line.
     """
+    if _AMBIENT_LEVEL <= 0.0:
+        return
     source = rtc.AudioSource(_AMBIENT_SAMPLE_RATE, 1)
     track = rtc.LocalAudioTrack.create_audio_track("arteq-ambient", source)
     await room.local_participant.publish_track(track, rtc.TrackPublishOptions())
@@ -1071,6 +1203,7 @@ async def _prewarm_static_phrases(lang: str) -> None:
         api_key=os.getenv("SARVAM_API_KEY", ""),
         target_language_code=lang,
         speaker="priya",
+        pace=_TTS_PACE,
     )
     for phrase in phrases:
         try:
@@ -1092,6 +1225,7 @@ async def _prewarm_greeting_audio(text: str, lang: str) -> None:
             api_key=os.getenv("SARVAM_API_KEY", ""),
             target_language_code=lang,
             speaker="priya",
+            pace=_TTS_PACE,
         )
         stream = tts.synthesize(text)
         try:
@@ -1162,7 +1296,9 @@ async def entrypoint(ctx: JobContext) -> None:
     # Start synthesizing the greeting immediately so it is in the TTS cache
     # before on_enter fires. Runs in parallel with all remaining setup work.
     _prewarm_task = asyncio.create_task(_prewarm_greeting_audio(greeting, agent_language))
-    asyncio.create_task(_prewarm_static_phrases(agent_language))
+    # Hold a reference — a bare create_task() can be garbage-collected mid-await,
+    # cancelling the prewarm before the static phrases are cached.
+    _prewarm_static_task = asyncio.create_task(_prewarm_static_phrases(agent_language))
 
     # ── Tool set (tier baseline, then per-tenant feature gating) ───────────────
     from src.telephony.livekit_tools import ALL_TOOLS, CLINIC_TOOLS
@@ -1176,6 +1312,10 @@ async def entrypoint(ctx: JobContext) -> None:
     # ── Acoustic sensory layer ────────────────────────────────────────────────
     sensory = AcousticSensoryLayer()
 
+    # Per-track audio drain tasks. Tracked so they are cancelled on call end —
+    # otherwise each subscribed track leaks a task + AudioStream per call.
+    _drain_tasks: list[asyncio.Task] = []
+
     @ctx.room.on("track_subscribed")
     def _on_track(track, publication, participant):
         if track.kind != rtc.TrackKind.KIND_AUDIO:
@@ -1183,10 +1323,16 @@ async def entrypoint(ctx: JobContext) -> None:
         stream = rtc.AudioStream(track)
 
         async def _drain():
-            async for frame in stream:
-                sensory.feed(frame)
+            try:
+                async for frame in stream:
+                    sensory.feed(frame)
+            finally:
+                try:
+                    await stream.aclose()
+                except Exception:
+                    pass
 
-        asyncio.create_task(_drain())
+        _drain_tasks.append(asyncio.create_task(_drain()))
 
     # ── Session userdata (accessible inside tools via context.userdata) ───────
     session_data = {
@@ -1225,15 +1371,19 @@ async def entrypoint(ctx: JobContext) -> None:
     # steps so a turn can't chain many large LLM calls.
     session = AgentSession(
         userdata=session_data,
-        # Start the LLM the moment the caller pauses, before end-of-turn is fully
-        # confirmed, then keep or discard the draft once VAD settles. Removes most
-        # of the post-speech dead air, so replies feel near-instant.
-        preemptive_generation=True,
-        # Cut the post-speech wait before the LLM fires. Defaults are 0.5/6.0s;
-        # 0.2/3.0 makes Arya feel near-realtime. max stays 3.0 so a slow speaker
-        # who keeps talking past a pause still isn't cut off.
-        min_endpointing_delay=0.2,
-        max_endpointing_delay=3.0,
+        # Endpointing + preemptive generation moved under turn_handling in
+        # livekit-agents 1.5 (the flat kwargs are deprecated, removed in 2.0);
+        # this is the exact equivalent the SDK's own compat shim builds.
+        #   - preemptive_generation: start the LLM the moment the caller pauses,
+        #     before end-of-turn is confirmed, then keep/discard the draft once
+        #     VAD settles — removes most post-speech dead air.
+        #   - endpointing min/max delay: cut the post-speech wait before the LLM
+        #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
+        #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
+        turn_handling=TurnHandlingOptions(
+            endpointing=EndpointingOptions(min_delay=0.2, max_delay=3.0),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+        ),
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
             llm_conn_options=APIConnectOptions(max_retry=1, retry_interval=8.0),
@@ -1242,7 +1392,7 @@ async def entrypoint(ctx: JobContext) -> None:
 
     # Perceived-latency meter: averages EOU + LLM TTFT + TTS TTFB across the call.
     meter = _LatencyMeter()
-    session.on("metrics_collected", meter.on_metrics)
+    session.on("conversation_item_added", meter.on_item)
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
@@ -1250,6 +1400,8 @@ async def entrypoint(ctx: JobContext) -> None:
     async def _on_end_async(_event=None):
         if _ambient_task:
             _ambient_task.cancel()
+        for _t in _drain_tasks:
+            _t.cancel()
         try:
             ended_at = datetime.now(timezone.utc)
             total_turns = 0
@@ -1354,10 +1506,14 @@ async def entrypoint(ctx: JobContext) -> None:
         # reaches VAD or STT. BVCTelephony is the telephony-optimised variant —
         # trained on inbound SIP/PSTN audio so it performs better than the
         # generic BVC on compressed 8kHz phone-call streams.
-        # NOTE: livekit-agents 1.x takes this here via RoomInputOptions, NOT as
-        # an AgentSession kwarg — passing it to AgentSession() raises TypeError.
-        room_input_options=RoomInputOptions(
-            noise_cancellation=noise_cancellation.BVCTelephony(),
+        # Noise cancellation is configured on the room audio input. RoomInput/
+        # OutputOptions were deprecated in livekit-agents 1.5 (removed in 2.0) in
+        # favour of RoomOptions; the audio-input defaults are identical, so this
+        # is a behaviour-preserving swap.
+        room_options=RoomOptions(
+            audio_input=AudioInputOptions(
+                noise_cancellation=noise_cancellation.BVCTelephony(),
+            ),
         ),
     )
 

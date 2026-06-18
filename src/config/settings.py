@@ -30,14 +30,34 @@ class Settings(BaseSettings):
     PLIVO_PHONE_NUMBER: str = ""   # E.164 e.g. +918047XXXXXX
 
     # Exotel — Indian cloud telephony (alternative to Plivo)
-    EXOTEL_API_KEY: str = ""          # Account SID (shown in Exotel dashboard)
-    EXOTEL_API_TOKEN: str = ""        # API token
+    EXOTEL_API_KEY: str = ""          # API Key — HTTP Basic username
+    EXOTEL_API_TOKEN: str = ""        # API Token — HTTP Basic password
+    # Account SID — goes in the API URL path (…/v1/Accounts/<sid>/…). Newer
+    # Exotel accounts issue a SID (e.g. "arteqai3") distinct from the API Key;
+    # leave blank on older accounts where the API Key doubles as the SID.
+    EXOTEL_ACCOUNT_SID: str = ""
     EXOTEL_PHONE_NUMBER: str = ""     # Virtual Number / ExoPhone, E.164 +91XXXXXXXXXX
     EXOTEL_SUBDOMAIN: str = "api.exotel.com"  # or api.in.exotel.com for India region
     # Embed in webhook URL so only Exotel (who was given the URL) can trigger it.
     # Leave blank to skip token check (not recommended in production).
     EXOTEL_WEBHOOK_TOKEN: str = ""
     LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID: str = ""  # set after POST /admin/sip/exotel/setup
+
+    # Exotel transport for the conversation audio path:
+    #   "sip"       → forward the call to LiveKit over SIP (get_inbound_exoml)
+    #   "websocket" → Exotel Voicebot/AgentStream applet streams raw audio over a
+    #                 WebSocket which we bridge into a LiveKit room (get_voicebot_exoml).
+    # The WebSocket path runs no SIP trunk — Exotel speaks raw/slin 16-bit 8 kHz
+    # mono PCM (little-endian, base64) directly to /ws/exotel/stream/{token}/{slug}.
+    EXOTEL_TRANSPORT: str = "sip"
+    # Outgoing audio chunk size sent back to Exotel. Must be a multiple of 320
+    # bytes; Exotel requires min 3200 and max 100000 bytes per media frame.
+    # 3200 bytes = 100 ms of 8 kHz/16-bit/mono PCM.
+    EXOTEL_STREAM_CHUNK_BYTES: int = 3200
+    # Exotel App/flow id whose Voicebot applet streams to our WS, used to place
+    # outbound WebSocket-streamed calls via the Exotel Connect API. Leave blank
+    # if outbound-over-WebSocket is not used (SIP outbound still works).
+    EXOTEL_VOICEBOT_APP_ID: str = ""
 
     # WhatsApp (Plivo WhatsApp API). When enabled, patient notifications go via
     # WhatsApp and fall back to SMS if a send fails or WhatsApp is unconfigured.
@@ -82,7 +102,7 @@ class Settings(BaseSettings):
     # AI Brain
     DEFAULT_LANGUAGE: str = "ml-IN"
 
-    # Sarvam AI — STT (Saarika v2) + TTS (Bulbul v3)
+    # Sarvam AI — STT (Saarika, transcribes in caller's language) + TTS (Bulbul v3)
     SARVAM_API_KEY: str = ""
 
     # Groq AI — LLaMA brain

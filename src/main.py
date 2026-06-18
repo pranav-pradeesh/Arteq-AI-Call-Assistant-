@@ -17,7 +17,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -338,7 +338,7 @@ async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request)
     """
     from fastapi.responses import Response
     from src.api.security import exotel_webhook_authentic
-    from src.services.livekit_sip import get_inbound_exoml
+    from src.services.livekit_sip import get_inbound_exoml, get_voicebot_exoml
 
     if not exotel_webhook_authentic(request, token):
         logger.warning("exotel_token_rejected", tenant=tenant_slug)
@@ -347,8 +347,45 @@ async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request)
     form = await request.form()
     params = {k: str(v) for k, v in form.items()}
     to_number = params.get("To", settings.EXOTEL_PHONE_NUMBER)
-    xml = get_inbound_exoml(to_number=to_number)
+
+    # "websocket" transport streams the call audio over a WebSocket (Voicebot
+    # applet) which we bridge into a LiveKit room; "sip" forwards via ExoML.
+    if settings.EXOTEL_TRANSPORT == "websocket":
+        xml = get_voicebot_exoml(slug=tenant_slug, extra_params={"to": to_number})
+    else:
+        xml = get_inbound_exoml(to_number=to_number)
     return Response(content=xml, media_type="text/xml")
+
+
+# ── Exotel Voicebot WebSocket stream ──────────────────────────────────────────
+
+@app.websocket("/ws/exotel/stream/{token}/{tenant_slug}")
+async def exotel_stream_ws(websocket: WebSocket, token: str, tenant_slug: str):
+    """
+    Bidirectional Exotel Voicebot/AgentStream WebSocket endpoint.
+
+    Exotel connects here (URL from get_voicebot_exoml) and streams raw/slin
+    16-bit 8 kHz mono PCM audio. ExotelLiveKitBridge joins the LiveKit room and
+    relays audio both ways so the existing agent handles the conversation.
+
+    The `token` path segment is the same shared secret as the inbound webhook —
+    Exotel sends no signature header, so URL secrecy is the auth mechanism.
+    """
+    import hmac as _hmac
+
+    expected = settings.EXOTEL_WEBHOOK_TOKEN or ""
+    _is_prod = str(getattr(settings, "ENV", "dev")).lower() in ("production", "prod")
+    # Reject on token mismatch, and — in production — also when no token is
+    # configured (a blank token must not fail open on a public audio socket).
+    if (expected and not _hmac.compare_digest(token, expected)) or (not expected and _is_prod):
+        logger.warning("exotel_ws_token_rejected", tenant=tenant_slug)
+        await websocket.close(code=1008)
+        return
+
+    await websocket.accept()
+    from src.telephony.exotel_bridge import ExotelLiveKitBridge
+    bridge = ExotelLiveKitBridge(websocket, tenant_slug)
+    await bridge.run()
 
 
 # ── Outbound calls & SMS ──────────────────────────────────────────────────────

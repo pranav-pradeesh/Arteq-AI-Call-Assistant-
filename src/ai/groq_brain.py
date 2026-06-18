@@ -50,30 +50,33 @@ _LANG_NAMES = {
 }
 
 
-# Greetings identify the hospital only — the agent has no spoken name. Each is
-# written in natural, spoken (not literary) register for that language.
-_GREETING_TEMPLATES = {
-    "hi-IN": "नमस्ते! {hosp_name} में आपका स्वागत है। बताइए, मैं क्या मदद करूँ?",
-    "ta-IN": "வணக்கம்! {hosp_name}-க்கு வரவேற்கிறோம். நான் என்ன உதவி செய்யட்டும்?",
-    "te-IN": "నమస్కారం! {hosp_name}కి స్వాగతం. నేను మీకు ఎలా సహాయం చేయగలను?",
-    "kn-IN": "ನಮಸ್ಕಾರ! {hosp_name}ಗೆ ಸ್ವಾಗತ. ನಾನು ನಿಮಗೆ ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?",
-    "bn-IN": "নমস্কার! {hosp_name}-এ আপনাকে স্বাগতম। আমি কীভাবে সাহায্য করতে পারি?",
-    "gu-IN": "નમસ્તે! {hosp_name}માં આપનું સ્વાગત છે. હું શું મદદ કરી શકું?",
-    "pa-IN": "ਸਤ ਸ੍ਰੀ ਅਕਾਲ! {hosp_name} ਵਿੱਚ ਤੁਹਾਡਾ ਸੁਆਗਤ ਹੈ। ਮੈਂ ਕੀ ਮਦਦ ਕਰਾਂ?",
-    "en-IN":      "Hello! Welcome to {hosp_name}. How can I help you?",
-    "od-IN":      "ନମସ୍କାର! {hosp_name}-ରେ ଆପଣଙ୍କୁ ସ୍ୱାଗତ। ମୁଁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
-    "mr-IN":      "नमस्कार! {hosp_name}मध्ये आपले स्वागत आहे. मी आपली काय मदत करू?",
-    "manglish":   "Hello! {hosp_name}-lekku swagatham. Njan engane sahaayikkam?",
+# Native-language "how can I help?" tail — one per locale.
+# Greeting format for every language: "Good {time}! Welcome to {name}, {tail}"
+# English opener + name are Bulbul-pronounceable Latin; native tail matches caller.
+_HOW_CAN_I_HELP = {
+    "ml-IN":    "എങ്ങനെ സഹായിക്കാം?",
+    "hi-IN":    "मैं क्या मदद करूँ?",
+    "ta-IN":    "நான் என்ன உதவி செய்யட்டும்?",
+    "te-IN":    "నేను మీకు ఎలా సహాయం చేయగలను?",
+    "kn-IN":    "ನಾನು ಹೇಗೆ ಸಹಾಯ ಮಾಡಲಿ?",
+    "bn-IN":    "আমি কীভাবে সাহায্য করতে পারি?",
+    "gu-IN":    "હું શું મદદ કરી શકું?",
+    "pa-IN":    "ਮੈਂ ਕੀ ਮਦਦ ਕਰਾਂ?",
+    "en-IN":    "How can I help you?",
+    "od-IN":    "ମୁଁ କିପରି ସାହାଯ୍ୟ କରିପାରିବି?",
+    "mr-IN":    "मी आपली काय मदत करू?",
+    "manglish": "Njan engane sahaayikkam?",
 }
 
 
 def build_greeting_text(hosp_name: str, hour: int, lang: str = "ml-IN") -> str:
-    """Language-appropriate greeting that identifies the hospital only (no agent
-    name). Pure function so it can be pre-warmed."""
-    if lang in _GREETING_TEMPLATES:
-        return _GREETING_TEMPLATES[lang].format(hosp_name=hosp_name)
-    # Malayalam: time-of-day greeting (audio is identical per hour-bucket so it
-    # warms the TTS cache; every subsequent call in that hour is an instant hit).
+    """Consistent greeting across all languages: English time opener + English
+    'Welcome to {name}' + native-language 'how can I help?' tail.
+
+    The English portion is Bulbul-pronounceable without transliteration issues;
+    the native tail matches the caller's language. Hour-bucketing keeps the
+    audio cache-hit rate high — identical text within an hour → zero TTS latency.
+    """
     if 5 <= hour < 12:
         opener = "Good morning!"
     elif 12 <= hour < 17:
@@ -81,9 +84,9 @@ def build_greeting_text(hosp_name: str, hour: int, lang: str = "ml-IN") -> str:
     elif 17 <= hour < 21:
         opener = "Good evening!"
     else:
-        # 21:00–05:00 — "Good night!" is a farewell, not a call opener.
         opener = "Hello!"
-    return f"{opener} {hosp_name}-ലേക്ക് സ്വാഗതം. എങ്ങനെ സഹായിക്കാം?"
+    tail = _HOW_CAN_I_HELP.get(lang, _HOW_CAN_I_HELP["en-IN"])
+    return f"{opener} Welcome to {hosp_name}, {tail}"
 
 _MODEL_SMART = "llama-3.3-70b-versatile"
 _MODEL_FAST = "llama-3.1-8b-instant"

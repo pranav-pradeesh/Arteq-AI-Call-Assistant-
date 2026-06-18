@@ -22,13 +22,55 @@ _SCRIPT_RANGES = [
 ]
 
 
+def split_mixed_script(text: str, fallback: str) -> list:
+    """Split text at the first native-script character boundary only.
+
+    Returns [(latin_prefix, 'en-IN'), (rest, fallback)] when a Latin prefix
+    precedes native-script content, e.g. "Good morning! Welcome to <ML name>,
+    <ML question>". Returns a single-item list otherwise.
+
+    `fallback` must be the language already chosen by detect_tts_lang() for
+    the full text — this keeps the native portion in sync with the lang that
+    name_for_lang() used at prompt-build time and avoids double-detection.
+    """
+    if not text:
+        return []
+
+    first_native_idx = None
+    for i, ch in enumerate(text):
+        cp = ord(ch)
+        for code, lo, hi in _SCRIPT_RANGES:
+            if lo <= cp <= hi:
+                first_native_idx = i
+                break
+        if first_native_idx is not None:
+            break
+
+    if first_native_idx is None:
+        # Pure Latin — no split needed
+        return [(text, "en-IN")]
+
+    english_prefix = text[:first_native_idx].rstrip()
+    if not english_prefix:
+        # Starts with native script — no Latin prefix to separate
+        return [(text, fallback)]
+
+    return [(english_prefix, "en-IN"), (text[first_native_idx:], fallback)]
+
+
 def detect_tts_lang(text: str, fallback: str) -> str:
     """Pick target_language_code from the dominant Indic script in `text`.
 
-    Counts chars per script; the script with the most chars wins. Pure Latin
-    (no Indic chars) → returns `fallback` so Manglish tenants (fallback=ml-IN)
-    get Malayalam phonetics and English tenants (fallback=en-IN) are unchanged.
-    Empty/unknown → fallback.
+    Counts chars per script; the script with the most chars wins. For pure-Latin
+    text we must separate two cases that look identical character-wise:
+      • genuine ENGLISH ("Sorry, I can only help with the hospital.") → "en-IN",
+        so Bulbul uses English phonetics and the default English voice. Forcing
+        the Indic fallback here makes English come out Malayalam-accented in a
+        different voice — which sounds wrong on the call.
+      • romanized Indic / Manglish ("Doctor appointment venam paranjalo") → the
+        Indic `fallback` (e.g. ml-IN), so it keeps native phonetics.
+    We tell them apart with a list of distinctive romanized-Indic marker words
+    (no common English words, matched whole-word). Empty/unknown → fallback.
     """
     counts: dict[str, int] = {}
     for ch in text:
@@ -39,7 +81,38 @@ def detect_tts_lang(text: str, fallback: str) -> str:
                 break
     if counts:
         return max(counts, key=counts.get)
-    return fallback
+    # Pure Latin. If the tenant language is itself English there is nothing to
+    # decide. Otherwise: romanized-Indic markers → keep the Indic fallback
+    # (Manglish/Hinglish/Tanglish); no markers → treat as real English.
+    if fallback == "en-IN":
+        return "en-IN"
+    if _ROMANIZED_INDIC_RE.search(text):
+        return fallback
+    return "en-IN"
+
+
+# Distinctive romanized-Indic ("Manglish"/"Hinglish"/"Tanglish") marker words.
+# Whole-word, case-insensitive. Curated to avoid collisions with normal English
+# words so a genuine English reply is never misread as romanized Indic. These are
+# the high-frequency function words a caller/agent uses when typing an Indian
+# language in Latin script; one hit is enough to keep native phonetics.
+_ROMANIZED_INDIC_MARKERS = [
+    # Malayalam (Manglish)
+    "venam", "veenam", "venda", "vendaa", "undu", "undo", "illa", "aanu",
+    "aano", "alle", "ille", "ningal", "ningalkku", "ningalude", "njan",
+    "enikku", "enikk", "entha", "enthaanu", "evide", "eppo", "eppol",
+    "cheyyam", "cheyyamo", "cheyyumo", "cheyyanam", "kazhinju", "paranjalo",
+    "parayamo", "parayoo", "sahayam", "namaskaram", "mathiyo", "sheri",
+    # Hindi (Hinglish)
+    "chahiye", "mujhe", "kaise", "kahan", "namaste", "theek", "accha",
+    "nahin", "kripya", "hain", "kya",
+    # Tamil (Tanglish)
+    "venum", "irukku", "illai", "enna", "enga", "neenga", "pannunga",
+    "sollunga", "vanga",
+]
+_ROMANIZED_INDIC_RE = re.compile(
+    r"\b(?:" + "|".join(_ROMANIZED_INDIC_MARKERS) + r")\b", re.IGNORECASE
+)
 
 
 # Bulbul v3 speaker roster (Sarvam). All speakers are multilingual, so any voice
@@ -69,7 +142,10 @@ LANG_VOICE = {
     "gu-IN": "pooja",     # Gujarati
     "pa-IN": "simran",    # Punjabi
     "od-IN": "suhani",    # Odia
-    "en-IN": "tanya",     # English
+    # English deliberately has NO entry: it keeps the call's default speaker so
+    # the voice does not switch when the agent answers in English (a mid-call
+    # timbre change to a different speaker sounds off). English phonetics are
+    # already correct because detect_tts_lang() routes real English to en-IN.
 }
 
 

@@ -20,7 +20,7 @@ from typing import Annotated, Any, List, Optional
 
 from fastapi import APIRouter, Depends, Path
 
-from ..deps import PoolDep, require_auth
+from ..deps import PoolDep, require_auth, require_hospital_access
 
 router = APIRouter(prefix="/admin", tags=["monitoring"])
 
@@ -28,7 +28,7 @@ router = APIRouter(prefix="/admin", tags=["monitoring"])
 @router.get(
     "/hospitals/{hospital_id}/active-calls",
     summary="In-progress calls (polling v1)",
-    dependencies=[Depends(require_auth)],
+    dependencies=[Depends(require_auth), Depends(require_hospital_access)],
 )
 async def active_calls(
     pool: PoolDep,

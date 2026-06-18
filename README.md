@@ -50,7 +50,7 @@ CALLER (phone) ──► PLIVO DID ──► Plivo webhook ──► /api/v1/cal
                                           ┌──────────────┼──────────────┐
                                           ▼              ▼              ▼
                                      Silero VAD    Sarvam STT     Sarvam TTS
-                                     (turn det.)  (Saaras v3)   (Bulbul v3)
+                                     (turn det.)  (Saarika)     (Bulbul v3)
                                                        │
                                                        ▼
                                                Groq LLaMA 70B
@@ -77,7 +77,7 @@ Both share the same PostgreSQL database (Supabase).
 | Service | Purpose | Free tier |
 |---------|---------|-----------|
 | [LiveKit Cloud](https://cloud.livekit.io) | WebRTC rooms + SIP | Yes |
-| [Sarvam AI](https://app.sarvam.ai) | STT (Saaras v3) + TTS (Bulbul v3) | Trial credits |
+| [Sarvam AI](https://app.sarvam.ai) | STT (Saarika) + TTS (Bulbul v3) | Trial credits |
 | [Groq](https://console.groq.com) | LLaMA 70B LLM | Free (rate-limited) |
 | [Supabase](https://supabase.com) | PostgreSQL database | Free |
 
@@ -500,6 +500,35 @@ Telephony code fails gracefully when Plivo keys are absent. The agent works via 
 
 The Telephony tab in the admin dashboard shows exactly which env vars are missing and has a **Run SIP Setup** button that creates LiveKit trunks automatically once all keys are present.
 
+### Exotel — SIP or WebSocket streaming
+
+Exotel works as a carrier in two modes, selected by `EXOTEL_TRANSPORT`:
+
+- **`sip`** (default) — Exotel's webhook returns ExoML that SIP-forwards the call
+  to LiveKit, same as the Plivo flow above.
+- **`websocket`** — the webhook returns a **Voicebot applet** that opens a
+  bidirectional WebSocket to `/ws/exotel/stream/<token>/<slug>`. Exotel streams
+  the caller's audio as **raw/slin 16-bit 8 kHz mono PCM (little-endian, base64)**
+  and `ExotelLiveKitBridge` publishes it into a LiveKit room, then streams the
+  agent's reply back in the same format (frames are multiples of 320 bytes,
+  3200–100000 bytes each). The existing `arya` agent runs unchanged.
+
+```
+Patient -> ExoPhone -> Exotel webhook -> POST /api/v1/call/inbound/exotel/<token>/<slug>
+  -> Voicebot applet (EXOTEL_TRANSPORT=websocket)
+  -> Exotel opens WS -> /ws/exotel/stream/<token>/<slug>
+  -> ExotelLiveKitBridge joins room "{slug}-call-{uuid}" (dispatches the agent)
+  -> caller audio <-> LiveKit room <-> agent
+```
+
+**Outbound over WebSocket:** set `EXOTEL_VOICEBOT_APP_ID` to an Exotel App whose
+Voicebot applet points at the WS URL, then call `dial_outbound(..., carrier="exotel_ws")`.
+The room is pre-created (with context + agent dispatch) and its name is passed to
+Exotel via `CustomField`, which the bridge reads from the `start` event's
+`custom_parameters` to join the right room.
+
+Audio format reference: [Exotel AgentStream developer guide](https://developer.exotel.com/docs/agentstream/developer-guide).
+
 ---
 
 ## Cost Analysis
@@ -513,7 +542,7 @@ The Telephony tab in the admin dashboard shows exactly which env vars are missin
 | LiveKit agent session | ₹0.83 ($0.010) | livekit.io/pricing |
 | LiveKit SIP minutes | ₹0.25 ($0.003) | livekit.io/pricing |
 | Plivo India inbound DID | ₹0.33 ($0.0040) | plivo.com/voice/pricing/in |
-| Sarvam STT (Saaras v3) | ₹0.50 | docs.sarvam.ai/pricing |
+| Sarvam STT (Saarika) | ₹0.50 | docs.sarvam.ai/pricing |
 | Sarvam TTS (Bulbul v3) | ₹0.24 (~800 chars/min) | docs.sarvam.ai/pricing |
 | Groq llama-3.3-70b | ₹0.04 (~2K tokens/call) | groq.com/pricing |
 | **Total** | **~₹2.19/min** | |
@@ -562,7 +591,7 @@ If hospitals require HIPAA-compliant processing (patient data in voice transcrip
 
 | Component | Current | Better for scale | Do NOT use |
 |-----------|---------|-----------------|-----------|
-| STT | Sarvam Saaras v3 | Self-hosted IndicWhisper at 50K+ min | Deepgram (no Malayalam) |
+| STT | Sarvam Saarika | Self-hosted IndicWhisper at 50K+ min | Deepgram (no Malayalam) |
 | TTS | Sarvam Bulbul v3 | Self-hosted IndicTTS at 50K+ min | Deepgram Aura (no Malayalam) |
 | LLM | Groq llama-3.3-70b | Groq llama-3.1-8b (save ₹0.04/min) | Azure OpenAI (8x more expensive) |
 | Carrier | Plivo | Telnyx SIP for outbound | Twilio (2x DID cost, higher per-min) |

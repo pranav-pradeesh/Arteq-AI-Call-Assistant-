@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import re
+import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
@@ -46,16 +48,6 @@ DOW_FULL = {
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────────
-#
-# Two token shapes share DASHBOARD_JWT_SECRET:
-#   * legacy single-password login  → {"sub": "admin", "role": "super_admin"}
-#   * per-user RBAC login (additions/routes/users_api.py)
-#                                   → {"sub": <email>, "role": <role>}
-# Both are accepted everywhere; non-super roles are additionally scoped to the
-# hospitals listed for them in user_tenants (see _require_hospital_access).
-
-_RBAC_ROLES = {"super_admin", "tenant_admin", "viewer"}
-
 
 class LoginIn(BaseModel):
     password: str
@@ -66,22 +58,33 @@ def _create_token() -> str:
         minutes=getattr(settings, "DASHBOARD_JWT_EXPIRE_MINUTES", 720)
     )
     secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
-    return jwt.encode(
-        {"sub": "admin", "role": "super_admin", "exp": exp}, secret, algorithm=ALGORITHM
-    )
+    # Legacy single-password admin token — no role claim; "admin" sub is the sentinel.
+    return jwt.encode({"sub": "admin", "exp": exp}, secret, algorithm=ALGORITHM)
 
 
-def _decode_token(credentials: Optional[HTTPAuthorizationCredentials]) -> dict:
-    secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(credentials.credentials, secret, algorithms=[ALGORITHM])
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    if payload.get("sub") != "admin" and payload.get("role") not in _RBAC_ROLES:
-        raise HTTPException(status_code=401, detail="Invalid token")
-    return payload
+async def _resolve_scope(payload: dict) -> Optional[set[str]]:
+    """Return the set of hospital slugs this token may access.
+
+    ``None`` means *all hospitals* (super-admin or the legacy single-password
+    admin). A concrete set means tenant_admin / viewer restricted to those slugs.
+    """
+    if payload.get("sub") == "admin" and not payload.get("role"):
+        return None  # legacy single-password admin
+    if payload.get("role") == "super_admin":
+        return None
+    email = payload.get("sub", "")
+    if not email:
+        return set()
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT ut.tenant_slug
+                 FROM user_tenants ut
+                 JOIN users u ON u.id = ut.user_id
+                WHERE u.email = $1 AND u.active""",
+            email,
+        )
+    return {r["tenant_slug"] for r in rows}
 
 
 def _is_super(payload: dict) -> bool:
@@ -89,52 +92,74 @@ def _is_super(payload: dict) -> bool:
 
 
 async def _require_auth(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> dict:
-    return _decode_token(credentials)
+    """Validate the bearer token and (for hospital-scoped routes) the tenant scope.
+
+    Accepts BOTH token shapes:
+      * legacy single-password admin  → {"sub": "admin"}
+      * RBAC email/password user      → {"sub": <email>, "role": <role>}
+
+    If the matched route carries a ``hospital_id`` path/query parameter, a
+    tenant_admin / viewer must be assigned to that hospital (via user_tenants)
+    or the request is rejected with 403. super_admin and the legacy admin pass.
+    """
+    secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(credentials.credentials, secret, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Valid token: legacy admin (sub == "admin") OR any RBAC user (has a role claim).
+    if payload.get("sub") != "admin" and not payload.get("role"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+    # Per-hospital authorization: enforce tenant scope on hospital-scoped routes.
+    hospital_id = (
+        request.path_params.get("hospital_id")
+        or request.query_params.get("hospital_id")
+    )
+    if hospital_id:
+        allowed = await _resolve_scope(payload)
+        if allowed is not None:  # restricted user — must be assigned to this hospital
+            pool = await _db()
+            async with pool.acquire() as conn:
+                slug = await conn.fetchval(
+                    "SELECT slug FROM hospitals WHERE id = $1", hospital_id
+                )
+            if not slug or slug not in allowed:
+                raise HTTPException(status_code=403, detail="No access to this hospital")
+    return payload
 
 
 async def _require_super(
+    request: Request,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
 ) -> dict:
-    payload = _decode_token(credentials)
+    payload = await _require_auth(request, credentials)
     if not _is_super(payload):
         raise HTTPException(status_code=403, detail="super_admin role required")
     return payload
 
 
 async def _assert_hospital_access(payload: dict, hospital_id: str) -> None:
-    """403 unless the token's user may touch this hospital.
+    """Internal helper for routes that look up hospital_id dynamically (not in path).
 
-    super_admin (and the legacy single-password admin) pass unconditionally;
-    tenant_admin / viewer must have a user_tenants row linking their email to
-    the hospital's slug.
+    Uses _resolve_scope so the slug-set is computed once and cached when
+    called from within a single request context.
     """
     if _is_super(payload):
         return
-    email = payload.get("sub", "")
+    allowed = await _resolve_scope(payload)
+    if allowed is None:
+        return
     pool = await _db()
     async with pool.acquire() as conn:
-        allowed = await conn.fetchval(
-            """SELECT 1 FROM user_tenants ut
-               JOIN users u ON u.id = ut.user_id
-               JOIN hospitals h ON h.slug = ut.tenant_slug
-               WHERE u.email = $1 AND h.id = $2 AND u.active
-               LIMIT 1""",
-            email, hospital_id,
-        )
-    if not allowed:
+        slug = await conn.fetchval("SELECT slug FROM hospitals WHERE id = $1", hospital_id)
+    if not slug or slug not in allowed:
         raise HTTPException(status_code=403, detail="No access to this hospital")
-
-
-async def _require_hospital_access(
-    hospital_id: str,
-    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
-) -> dict:
-    """Auth + per-hospital scoping for routes carrying a hospital_id."""
-    payload = _decode_token(credentials)
-    await _assert_hospital_access(payload, hospital_id)
-    return payload
 
 
 @router.post("/login")
@@ -169,24 +194,20 @@ def _invalidate(hospital_id: str):
 
 @router.get("/hospitals")
 async def list_hospitals(payload: dict = Depends(_require_auth)):
+    allowed = await _resolve_scope(payload)
     pool = await _db()
     async with pool.acquire() as conn:
-        if _is_super(payload):
+        if allowed is None:  # super-admin / legacy admin: all hospitals
             rows = await conn.fetch(
                 "SELECT id, name, name_ml, address, phone, hours, active, "
                 "slug, plivo_number, tier, agent_name, agent_language FROM hospitals ORDER BY name"
             )
-        else:
-            # tenant_admin / viewer only see hospitals assigned via user_tenants
+        else:  # tenant_admin / viewer: only their assigned hospitals
             rows = await conn.fetch(
-                """SELECT h.id, h.name, h.name_ml, h.address, h.phone, h.hours, h.active,
-                          h.slug, h.plivo_number, h.tier, h.agent_name, h.agent_language
-                   FROM hospitals h
-                   JOIN user_tenants ut ON ut.tenant_slug = h.slug
-                   JOIN users u ON u.id = ut.user_id
-                   WHERE u.email = $1 AND u.active
-                   ORDER BY h.name""",
-                payload.get("sub", ""),
+                "SELECT id, name, name_ml, address, phone, hours, active, "
+                "slug, plivo_number, tier, agent_name, agent_language "
+                "FROM hospitals WHERE slug = ANY($1) ORDER BY name",
+                list(allowed),
             )
     return [
         {
@@ -208,7 +229,7 @@ async def list_hospitals(payload: dict = Depends(_require_auth)):
     ]
 
 
-@router.get("/hospitals/{hospital_id}", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
 async def get_hospital(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -287,7 +308,7 @@ async def create_hospital(body: HospitalUpdate):
     return {"id": new_id, "slug": slug, "tier": tier, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
 async def update_hospital(hospital_id: str, body: HospitalUpdate):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -373,7 +394,7 @@ async def delete_hospital(hospital_id: str):
 
 # ── Departments ───────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_auth)])
 async def list_departments(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -405,7 +426,7 @@ class DeptBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/departments", dependencies=[Depends(_require_auth)])
 async def create_department(hospital_id: str, body: DeptBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -422,7 +443,7 @@ async def create_department(hospital_id: str, body: DeptBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_auth)])
 async def update_department(hospital_id: str, dept_id: str, body: DeptBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -439,7 +460,7 @@ async def update_department(hospital_id: str, dept_id: str, body: DeptBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_hospital_access)])
+@router.delete("/hospitals/{hospital_id}/departments/{dept_id}", dependencies=[Depends(_require_auth)])
 async def delete_department(hospital_id: str, dept_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -453,7 +474,7 @@ async def delete_department(hospital_id: str, dept_id: str):
 
 # ── Doctors ───────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_auth)])
 async def list_doctors(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -503,7 +524,7 @@ class DoctorBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/doctors", dependencies=[Depends(_require_auth)])
 async def create_doctor(hospital_id: str, body: DoctorBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -522,7 +543,7 @@ async def create_doctor(hospital_id: str, body: DoctorBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_auth)])
 async def update_doctor(hospital_id: str, doctor_id: str, body: DoctorBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -540,7 +561,7 @@ async def update_doctor(hospital_id: str, doctor_id: str, body: DoctorBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_hospital_access)])
+@router.delete("/hospitals/{hospital_id}/doctors/{doctor_id}", dependencies=[Depends(_require_auth)])
 async def delete_doctor(hospital_id: str, doctor_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -598,7 +619,7 @@ async def delete_schedule(schedule_id: str, payload: dict = Depends(_require_aut
 
 # ── Billing ───────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_auth)])
 async def list_billing(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -630,7 +651,7 @@ class BillingBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/billing", dependencies=[Depends(_require_auth)])
 async def create_billing(hospital_id: str, body: BillingBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -647,7 +668,7 @@ async def create_billing(hospital_id: str, body: BillingBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_auth)])
 async def update_billing(hospital_id: str, item_id: str, body: BillingBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -664,7 +685,7 @@ async def update_billing(hospital_id: str, item_id: str, body: BillingBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_hospital_access)])
+@router.delete("/hospitals/{hospital_id}/billing/{item_id}", dependencies=[Depends(_require_auth)])
 async def delete_billing(hospital_id: str, item_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -678,7 +699,7 @@ async def delete_billing(hospital_id: str, item_id: str):
 
 # ── Emergency Contacts ────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_auth)])
 async def list_emergency(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -708,7 +729,7 @@ class EmergencyBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/emergency", dependencies=[Depends(_require_auth)])
 async def create_emergency(hospital_id: str, body: EmergencyBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -725,7 +746,7 @@ async def create_emergency(hospital_id: str, body: EmergencyBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_auth)])
 async def update_emergency(hospital_id: str, contact_id: str, body: EmergencyBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -741,7 +762,7 @@ async def update_emergency(hospital_id: str, contact_id: str, body: EmergencyBod
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_hospital_access)])
+@router.delete("/hospitals/{hospital_id}/emergency/{contact_id}", dependencies=[Depends(_require_auth)])
 async def delete_emergency(hospital_id: str, contact_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -755,7 +776,7 @@ async def delete_emergency(hospital_id: str, contact_id: str):
 
 # ── FAQs ──────────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_auth)])
 async def list_faqs(hospital_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -789,7 +810,7 @@ class FaqBody(BaseModel):
     active: Optional[bool] = True
 
 
-@router.post("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/faqs", dependencies=[Depends(_require_auth)])
 async def create_faq(hospital_id: str, body: FaqBody):
     new_id = str(uuid.uuid4())
     pool = await _db()
@@ -807,7 +828,7 @@ async def create_faq(hospital_id: str, body: FaqBody):
     return {"id": new_id, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_auth)])
 async def update_faq(hospital_id: str, faq_id: str, body: FaqBody):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -824,7 +845,7 @@ async def update_faq(hospital_id: str, faq_id: str, body: FaqBody):
     return {"status": "updated"}
 
 
-@router.delete("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_hospital_access)])
+@router.delete("/hospitals/{hospital_id}/faqs/{faq_id}", dependencies=[Depends(_require_auth)])
 async def delete_faq(hospital_id: str, faq_id: str):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -838,13 +859,13 @@ async def delete_faq(hospital_id: str, faq_id: str):
 
 # ── Call Logs ─────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/calls", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/calls", dependencies=[Depends(_require_auth)])
 async def list_calls(hospital_id: str, limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT call_id, caller, started_at, ended_at, total_turns,
-                      latency_avg_ms, intents, outcome
+                      latency_avg_ms, intents, outcome, recording_url
                FROM call_logs WHERE hospital_id=$1
                ORDER BY started_at DESC LIMIT $2""",
             hospital_id, min(limit, 200),
@@ -859,12 +880,39 @@ async def list_calls(hospital_id: str, limit: int = 50):
             "latency_avg_ms": r["latency_avg_ms"] or 0,
             "intents": _maybe_json(r["intents"]) or [],
             "outcome": r["outcome"] or "unknown",
+            "recording_url": r["recording_url"] or None,
         }
         for r in rows
     ]
 
 
-@router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/calls/{call_id}", dependencies=[Depends(_require_auth)])
+async def get_call(hospital_id: str, call_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        row = await conn.fetchrow(
+            """SELECT call_id, caller, started_at, ended_at, total_turns,
+                      latency_avg_ms, intents, outcome, transcript, recording_url
+               FROM call_logs WHERE hospital_id=$1 AND call_id=$2""",
+            hospital_id, call_id,
+        )
+    if not row:
+        raise HTTPException(status_code=404, detail="Call not found")
+    return {
+        "call_id": row["call_id"],
+        "caller": row["caller"] or "unknown",
+        "started_at": row["started_at"].isoformat() if row["started_at"] else None,
+        "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+        "total_turns": row["total_turns"] or 0,
+        "latency_avg_ms": row["latency_avg_ms"] or 0,
+        "intents": _maybe_json(row["intents"]) or [],
+        "outcome": row["outcome"] or "unknown",
+        "transcript": _maybe_json(row["transcript"]) or [],
+        "recording_url": row["recording_url"] or None,
+    }
+
+
+@router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_auth)])
 async def get_stats(hospital_id: str, days: int = 7):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -891,7 +939,7 @@ async def get_stats(hospital_id: str, days: int = 7):
 
 # ── Appointments ─────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/appointments", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/appointments", dependencies=[Depends(_require_auth)])
 async def list_appointments(hospital_id: str, status: str = "", limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -944,7 +992,7 @@ class ApptStatusBody(BaseModel):
     status: str
 
 
-@router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_auth)])
 async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptStatusBody):
     allowed = {"requested", "confirmed", "cancelled", "completed", "no_show"}
     if body.status not in allowed:
@@ -960,7 +1008,7 @@ async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptSt
 
 @router.post(
     "/hospitals/{hospital_id}/appointments/{appt_id}/confirm-payment",
-    dependencies=[Depends(_require_hospital_access)],
+    dependencies=[Depends(_require_auth)],
 )
 async def confirm_payment(hospital_id: str, appt_id: str):
     """Staff confirms an offline payment: activates the queue token and notifies
@@ -1008,7 +1056,7 @@ async def _hospital_name(hospital_id: str) -> str:
 
 # ── Callbacks ─────────────────────────────────────────────────────────────────
 
-@router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/callbacks", dependencies=[Depends(_require_auth)])
 async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
     pool = await _db()
     async with pool.acquire() as conn:
@@ -1061,6 +1109,12 @@ async def telephony_status(hospital_id: str = ""):
     plivo_id = bool(getattr(settings, "PLIVO_AUTH_ID", ""))
     plivo_token = bool(getattr(settings, "PLIVO_AUTH_TOKEN", ""))
     plivo_number = bool(getattr(settings, "PLIVO_PHONE_NUMBER", ""))
+    exotel_key = bool(getattr(settings, "EXOTEL_API_KEY", ""))
+    exotel_token = bool(getattr(settings, "EXOTEL_API_TOKEN", ""))
+    exotel_phone = bool(getattr(settings, "EXOTEL_PHONE_NUMBER", ""))
+    exotel_subdomain = bool(getattr(settings, "EXOTEL_SUBDOMAIN", ""))
+    exotel_trunk_id = bool(getattr(settings, "LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID", ""))
+    exotel_webhook_token = bool(getattr(settings, "EXOTEL_WEBHOOK_TOKEN", ""))
     sarvam = bool(getattr(settings, "SARVAM_API_KEY", ""))
     groq = bool(getattr(settings, "GROQ_API_KEY", ""))
 
@@ -1079,6 +1133,7 @@ async def telephony_status(hospital_id: str = ""):
 
     livekit_ok = lk_url and lk_key and lk_secret
     plivo_ok = plivo_id and plivo_token and plivo_number
+    exotel_ok = exotel_key and exotel_token and exotel_phone and exotel_subdomain
     sip_ready = livekit_ok and sip_outbound and sip_host
     voice_ready = sarvam and groq
 
@@ -1098,16 +1153,25 @@ async def telephony_status(hospital_id: str = ""):
             "phone_number": plivo_number,
             "hospital_did": hospital_plivo_number or None,
         },
+        "exotel": {
+            "configured": exotel_ok,
+            "api_key": exotel_key,
+            "api_token": exotel_token,
+            "phone_number": exotel_phone,
+            "subdomain": exotel_subdomain,
+            "sip_trunk_id": exotel_trunk_id,
+            "webhook_token": exotel_webhook_token,
+        },
         "voice_ai": {
             "configured": voice_ready,
             "sarvam_stt_tts": sarvam,
             "groq_llm": groq,
         },
         "overall": {
-            "sip_calls_ready": sip_ready and plivo_ok,
+            "sip_calls_ready": sip_ready and (plivo_ok or exotel_ok),
             "voice_pipeline_ready": voice_ready,
-            "inbound_ready": sip_ready and plivo_ok and bool(hospital_plivo_number),
-            "outbound_ready": sip_ready and plivo_ok,
+            "inbound_ready": sip_ready and (plivo_ok or exotel_ok) and bool(hospital_plivo_number),
+            "outbound_ready": sip_ready and (plivo_ok or exotel_ok),
         },
         "missing": [
             k for k, v in {
@@ -1125,7 +1189,7 @@ async def telephony_status(hospital_id: str = ""):
 
 # ── Cache Clear ───────────────────────────────────────────────────────────────
 
-@router.post("/hospitals/{hospital_id}/cache/clear", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/cache/clear", dependencies=[Depends(_require_auth)])
 async def clear_cache(hospital_id: str):
     _invalidate(hospital_id)
     return {"status": "cache_cleared", "hospital_id": hospital_id}
@@ -1295,7 +1359,7 @@ async def hospital_wizard(body: HospitalWizardIn):
     }
 
 
-@router.post("/hospitals/{hospital_id}/provision-number", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/provision-number", dependencies=[Depends(_require_auth)])
 async def provision_plivo_number(hospital_id: str):
     """Buy and configure a Plivo number for an existing hospital."""
     pool = await _db()
@@ -1339,7 +1403,7 @@ async def provision_plivo_number(hospital_id: str):
     }
 
 
-@router.get("/hospitals/{hospital_id}/setup-status", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/setup-status", dependencies=[Depends(_require_auth)])
 async def setup_status(hospital_id: str):
     """Check how complete a hospital's setup is — useful after wizard onboarding."""
     pool = await _db()
@@ -1548,7 +1612,7 @@ class HisConfigBody(BaseModel):
     timeout_seconds: Optional[int] = 8
 
 
-@router.get("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
 async def get_his_config(hospital_id: str):
     """Return HIS config for the hospital. Auth value is masked for security."""
     pool = await _db()
@@ -1565,7 +1629,7 @@ async def get_his_config(hospital_id: str):
     return cfg or {"enabled": False}
 
 
-@router.put("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_hospital_access)])
+@router.put("/hospitals/{hospital_id}/his-config", dependencies=[Depends(_require_auth)])
 async def update_his_config(hospital_id: str, body: HisConfigBody):
     """Save HIS config. Auth value of '••••••••' preserves the existing stored secret."""
     pool = await _db()
@@ -1615,7 +1679,7 @@ async def update_his_config(hospital_id: str, body: HisConfigBody):
     return {"status": "updated"}
 
 
-@router.get("/hospitals/{hospital_id}/his-status", dependencies=[Depends(_require_hospital_access)])
+@router.get("/hospitals/{hospital_id}/his-status", dependencies=[Depends(_require_auth)])
 async def get_his_status(hospital_id: str):
     """Return HIS connectivity status (reachable / not configured / etc.)."""
     try:
@@ -1625,7 +1689,7 @@ async def get_his_status(hospital_id: str):
         return {"configured": False, "enabled": False, "reachable": False, "error": str(exc)}
 
 
-@router.post("/hospitals/{hospital_id}/his-config/test", dependencies=[Depends(_require_hospital_access)])
+@router.post("/hospitals/{hospital_id}/his-config/test", dependencies=[Depends(_require_auth)])
 async def test_his_connection(hospital_id: str):
     """Ping the HIS endpoint to verify connectivity."""
     try:
@@ -1880,6 +1944,388 @@ async def deactivate_tenant_route(slug: str):
     if not ok:
         raise HTTPException(status_code=404, detail="Tenant not found")
     return {"slug": slug, "active": False}
+
+
+# ── Patient Intake Workflow ───────────────────────────────────────────────────
+# Front Desk section: Patients, Bookings & Tokens, WhatsApp feed.
+# All routes enforce the same hospital-scoped tenant check as the core routes.
+
+
+def _generate_patient_id(date_str: str, seq: int) -> str:
+    return f"P-{date_str}-{seq:03d}"
+
+
+def _generate_token_code() -> str:
+    return f"TKN-{random.randint(1000, 9999)}"
+
+
+async def _log_whatsapp(conn, hospital_id: str, phone: str, patient_name: str, body: str) -> str:
+    wa_id = f"wa-{uuid.uuid4().hex[:8]}"
+    await conn.execute(
+        """INSERT INTO whatsapp_messages (id, hospital_id, phone, patient_name, body)
+           VALUES ($1, $2, $3, $4, $5)""",
+        wa_id, hospital_id, phone, patient_name, body,
+    )
+    return wa_id
+
+
+class PatientBody(BaseModel):
+    name: str
+    phone: str
+
+
+@router.get("/hospitals/{hospital_id}/patients", dependencies=[Depends(_require_auth)])
+async def list_patients(hospital_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, hospital_id, name, phone, created_at
+               FROM patients WHERE hospital_id=$1 ORDER BY created_at DESC""",
+            hospital_id,
+        )
+    return [
+        {
+            "id": r["id"],
+            "hospital_id": str(r["hospital_id"]),
+            "name": r["name"],
+            "phone": r["phone"],
+            "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+        }
+        for r in rows
+    ]
+
+
+@router.post("/hospitals/{hospital_id}/patients", dependencies=[Depends(_require_auth)])
+async def create_patient(hospital_id: str, body: PatientBody):
+    if not body.name or not body.phone:
+        raise HTTPException(status_code=400, detail="name and phone are required")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        date_str = datetime.now(timezone.utc).strftime("%y%m%d")
+        seq = (await conn.fetchval(
+            "SELECT COUNT(*) FROM patients WHERE hospital_id=$1 "
+            "AND DATE(created_at AT TIME ZONE 'UTC') = CURRENT_DATE",
+            hospital_id,
+        ) or 0) + 1
+        patient_id = _generate_patient_id(date_str, seq)
+
+        await conn.execute(
+            """INSERT INTO patients (id, hospital_id, name, phone)
+               VALUES ($1, $2, $3, $4)""",
+            patient_id, hospital_id, body.name, body.phone,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+
+        # Log WhatsApp welcome
+        welcome_body = (
+            f"Hi {body.name}, welcome to {hosp_name}! "
+            f"Your patient ID is {patient_id}. "
+            "We're glad to have you with us."
+        )
+        await _log_whatsapp(conn, hospital_id, body.phone, body.name, welcome_body)
+
+        # Log outbound welcome call intent (actual scheduling handled by the AI layer)
+        call_id = f"welcome-{patient_id}"
+        await conn.execute(
+            """INSERT INTO call_logs (hospital_id, call_id, caller, started_at, outcome)
+               VALUES ($1, $2, $3, NOW(), 'outbound_welcome_queued')
+               ON CONFLICT (call_id) DO NOTHING""",
+            hospital_id, call_id, body.phone,
+        )
+
+        row = await conn.fetchrow(
+            "SELECT id, hospital_id, name, phone, created_at FROM patients WHERE id=$1",
+            patient_id,
+        )
+
+    return {
+        "id": row["id"],
+        "hospital_id": str(row["hospital_id"]),
+        "name": row["name"],
+        "phone": row["phone"],
+        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+    }
+
+
+# ── Bookings ──────────────────────────────────────────────────────────────────
+
+class BookingBody(BaseModel):
+    patient_id: str
+    slot: str                      # ISO8601 datetime
+    payment_mode: str              # "pay_now" | "pay_later"
+    amount_paise: int = 0
+
+
+class BookingStatusBody(BaseModel):
+    status: str
+
+
+def _booking_row(r) -> dict:
+    token = None
+    if r["token_code"]:
+        token = {"code": r["token_code"], "active": r["token_active"]}
+    return {
+        "id": r["id"],
+        "hospital_id": str(r["hospital_id"]),
+        "patient_id": r["patient_id"],
+        "patient_name": r["patient_name"] or "",
+        "patient_phone": r["patient_phone"] or "",
+        "slot": r["slot"].isoformat() if r["slot"] else None,
+        "payment_mode": r["payment_mode"],
+        "status": r["status"],
+        "amount_paise": r["amount_paise"],
+        "token": token,
+        "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+    }
+
+
+_BOOKING_SELECT = """
+    SELECT b.id, b.hospital_id, b.patient_id,
+           p.name AS patient_name, p.phone AS patient_phone,
+           b.slot, b.payment_mode, b.status, b.amount_paise,
+           b.token_code, b.token_active, b.created_at
+    FROM bookings b
+    LEFT JOIN patients p ON p.id = b.patient_id
+"""
+
+
+@router.get("/hospitals/{hospital_id}/bookings", dependencies=[Depends(_require_auth)])
+async def list_bookings(hospital_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            _BOOKING_SELECT + "WHERE b.hospital_id=$1 ORDER BY b.created_at DESC",
+            hospital_id,
+        )
+    return [_booking_row(r) for r in rows]
+
+
+@router.post("/hospitals/{hospital_id}/bookings", dependencies=[Depends(_require_auth)])
+async def create_booking(hospital_id: str, body: BookingBody):
+    if body.payment_mode not in ("pay_now", "pay_later"):
+        raise HTTPException(status_code=400, detail="payment_mode must be pay_now or pay_later")
+
+    try:
+        slot_dt = datetime.fromisoformat(body.slot.replace("Z", "+00:00"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail="slot must be a valid ISO8601 datetime")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        patient = await conn.fetchrow(
+            "SELECT name, phone FROM patients WHERE id=$1 AND hospital_id=$2",
+            body.patient_id, hospital_id,
+        )
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found in this hospital")
+
+        booking_id = f"appt-{secrets.token_hex(3)}"
+        token_code = None
+        token_active = False
+        status = "pending_payment"
+
+        if body.payment_mode == "pay_later":
+            status = "awaiting_confirmation"
+            token_code = _generate_token_code()
+
+        await conn.execute(
+            """INSERT INTO bookings
+               (id, hospital_id, patient_id, slot, payment_mode, status, amount_paise,
+                token_code, token_active)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
+            booking_id, hospital_id, body.patient_id, slot_dt,
+            body.payment_mode, status, body.amount_paise, token_code, token_active,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+
+        # Send WhatsApp for pay_later (token issued)
+        if body.payment_mode == "pay_later" and token_code:
+            wa_body = (
+                f"Hi {patient['name']}, your appointment at {hosp_name} "
+                f"on {slot_dt.strftime('%d %b %Y at %I:%M %p')} has been booked. "
+                f"Your token is {token_code} (inactive until confirmed). "
+                "We'll activate it closer to your appointment."
+            )
+            await _log_whatsapp(conn, hospital_id, patient["phone"], patient["name"], wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.put(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/status",
+    dependencies=[Depends(_require_auth)],
+)
+async def update_booking_status(hospital_id: str, booking_id: str, body: BookingStatusBody):
+    allowed_statuses = {"confirmed", "cancelled", "pending_payment", "awaiting_confirmation", "completed"}
+    if body.status not in allowed_statuses:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(allowed_statuses))}")
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        await conn.execute(
+            "UPDATE bookings SET status=$1 WHERE id=$2 AND hospital_id=$3",
+            body.status, booking_id, hospital_id,
+        )
+
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if body.status == "confirmed" and phone:
+            wa_body = (
+                f"Hi {name}, your payment for the appointment at {hosp_name} "
+                f"on {slot_str} has been received. Your booking is confirmed!"
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+        elif body.status == "cancelled" and phone:
+            wa_body = (
+                f"Hi {name}, your appointment at {hosp_name} "
+                f"on {slot_str} has been cancelled. "
+                "Please contact us if you have any questions."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.post(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/change-token",
+    dependencies=[Depends(_require_auth)],
+)
+async def change_booking_token(hospital_id: str, booking_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        new_token = _generate_token_code()
+        await conn.execute(
+            "UPDATE bookings SET token_code=$1 WHERE id=$2 AND hospital_id=$3",
+            new_token, booking_id, hospital_id,
+        )
+
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if phone:
+            wa_body = (
+                f"Hi {name}, your token for the appointment at {hosp_name} "
+                f"on {slot_str} has been updated. Your new token is {new_token}."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+@router.post(
+    "/hospitals/{hospital_id}/bookings/{booking_id}/confirm-call",
+    dependencies=[Depends(_require_auth)],
+)
+async def booking_confirm_call(hospital_id: str, booking_id: str):
+    """Simulate the ~1-week-prior AI confirmation call: confirms the booking,
+    activates the token, logs the call, and sends a WhatsApp notification."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        existing = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1 AND b.hospital_id=$2",
+            booking_id, hospital_id,
+        )
+        if not existing:
+            raise HTTPException(status_code=404, detail="Booking not found")
+
+        await conn.execute(
+            "UPDATE bookings SET status='confirmed', token_active=true WHERE id=$1 AND hospital_id=$2",
+            booking_id, hospital_id,
+        )
+
+        # Log the AI confirmation call
+        call_id = f"confirm-{booking_id}"
+        await conn.execute(
+            """INSERT INTO call_logs (hospital_id, call_id, caller, started_at, outcome)
+               VALUES ($1, $2, $3, NOW(), 'outbound_confirmation')
+               ON CONFLICT (call_id) DO NOTHING""",
+            hospital_id, call_id, existing["patient_phone"] or "",
+        )
+
+        phone = existing["patient_phone"] or ""
+        name = existing["patient_name"] or ""
+        token_code = existing["token_code"] or ""
+        hosp_name = await conn.fetchval("SELECT name FROM hospitals WHERE id=$1", hospital_id) or "the hospital"
+        slot = existing["slot"]
+        slot_str = slot.strftime("%d %b %Y at %I:%M %p") if slot else "your appointment"
+
+        if phone:
+            wa_body = (
+                f"Hi {name}, your appointment at {hosp_name} on {slot_str} is confirmed! "
+                f"Your token {token_code} is now active. Please arrive 10 minutes early."
+            )
+            await _log_whatsapp(conn, hospital_id, phone, name, wa_body)
+
+        row = await conn.fetchrow(
+            _BOOKING_SELECT + "WHERE b.id=$1",
+            booking_id,
+        )
+
+    return _booking_row(row)
+
+
+# ── WhatsApp Feed ─────────────────────────────────────────────────────────────
+
+@router.get("/hospitals/{hospital_id}/whatsapp", dependencies=[Depends(_require_auth)])
+async def list_whatsapp(hospital_id: str, limit: int = 100):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, hospital_id, phone, patient_name, body, at
+               FROM whatsapp_messages WHERE hospital_id=$1
+               ORDER BY at DESC LIMIT $2""",
+            hospital_id, min(limit, 500),
+        )
+    return [
+        {
+            "id": r["id"],
+            "hospital_id": str(r["hospital_id"]),
+            "phone": r["phone"],
+            "patient_name": r["patient_name"] or "",
+            "body": r["body"],
+            "at": r["at"].isoformat() if r["at"] else None,
+        }
+        for r in rows
+    ]
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
