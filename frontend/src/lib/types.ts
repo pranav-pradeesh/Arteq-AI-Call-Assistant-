@@ -42,6 +42,26 @@ export interface Schedule {
   active: boolean;
 }
 
+export type AvailabilityStatus =
+  | "available"
+  | "busy"
+  | "delayed"
+  | "unavailable"
+  | "on_leave";
+
+export interface DoctorAvailabilityEvent {
+  id: string;
+  doctor_id: string;
+  status: AvailabilityStatus;
+  note: string | null;
+  created_at: string;
+}
+
+export interface DoctorAvailability {
+  availability_status: AvailabilityStatus;
+  recent_events: DoctorAvailabilityEvent[];
+}
+
 export interface Doctor {
   id: string;
   hospital_id: string;
@@ -51,6 +71,7 @@ export interface Doctor {
   specialty?: string | null;
   qualifications?: string | null;
   active: boolean;
+  availability_status?: AvailabilityStatus | null;
   schedules?: Schedule[];
 }
 
@@ -95,6 +116,24 @@ export type AppointmentStatus =
   | "rescheduled"
   | "requested";
 
+export type WorkflowStatus =
+  | "pending"
+  | "confirmed"
+  | "missed"
+  | "cancelled"
+  | "reminder_sent"
+  | "doctor_available"
+  | "doctor_delayed"
+  | "doctor_unavailable";
+
+export interface AppointmentEvent {
+  id: string;
+  appointment_id: string;
+  event_type: string;
+  detail: string | null;
+  created_at: string;
+}
+
 export interface Appointment {
   id: string;
   hospital_id: string;
@@ -106,6 +145,7 @@ export interface Appointment {
   notes?: string | null;
   call_id?: string | null;
   status: AppointmentStatus;
+  workflow_status?: WorkflowStatus | null;
   reminder_sent: boolean;
   confirmation_sent: boolean;
   followup_sent: boolean;
@@ -223,9 +263,8 @@ export interface Tenant {
 
 export interface TelephonyStatus {
   overall: { sip_calls_ready: boolean };
-  // Carrier blocks. Exotel is the active carrier; `plivo` is the legacy block
-  // the backend still returns until its /telephony/status is renamed. The
-  // Telephony page renders whichever carrier block(s) the backend sends.
+  // Carrier blocks. The Telephony page renders whichever blocks the backend sends.
+  vobiz?: Record<string, boolean | string>;
   exotel?: Record<string, boolean>;
   plivo?: Record<string, boolean>;
   livekit?: Record<string, boolean>;

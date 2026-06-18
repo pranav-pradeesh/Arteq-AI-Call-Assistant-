@@ -2,7 +2,7 @@
 import * as React from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
-import type { Doctor, Department, Schedule } from "@/lib/types";
+import type { Doctor, Department, Schedule, AvailabilityStatus, DoctorAvailability } from "@/lib/types";
 import { RequireHospital } from "@/components/require-hospital";
 import { DataTable, type ColumnDef } from "@/components/data-table";
 import { FormModal } from "@/components/modal";
@@ -10,7 +10,84 @@ import {
   PageHeader, Button, Field, Input, Select, Badge, Card, CardHeader, CardBody,
 } from "@/components/ui";
 import { useToast } from "@/components/providers";
-import { DOW_LABELS, dowLabel } from "@/lib/utils";
+import { DOW_LABELS, dowLabel, fmtDateTime } from "@/lib/utils";
+
+const AVAIL_LABELS: Record<AvailabilityStatus, string> = {
+  available: "Available",
+  busy: "Busy",
+  delayed: "Delayed",
+  unavailable: "Unavailable",
+  on_leave: "On Leave",
+};
+
+const AVAIL_TONE: Record<AvailabilityStatus, "green" | "yellow" | "red" | "gray"> = {
+  available: "green",
+  busy: "yellow",
+  delayed: "yellow",
+  unavailable: "red",
+  on_leave: "gray",
+};
+
+function AvailabilityPanel({ doctor, hospitalId, onClose }: {
+  doctor: Doctor; hospitalId: string; onClose: () => void;
+}) {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const { data, isLoading } = useQuery<DoctorAvailability>({
+    queryKey: ["doctor-avail", hospitalId, doctor.id],
+    queryFn: () => api.getDoctorAvailability(hospitalId, doctor.id),
+  });
+  const mut = useMutation({
+    mutationFn: (status: string) => api.updateDoctorAvailability(hospitalId, doctor.id, status),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["doctors", hospitalId] });
+      qc.invalidateQueries({ queryKey: ["doctor-avail", hospitalId, doctor.id] });
+      toast("Availability updated", "ok");
+    },
+    onError: (e: Error) => toast(e.message, "err"),
+  });
+  return (
+    <Card className="mt-4 border border-gray-200 shadow-sm">
+      <CardHeader className="flex items-center justify-between py-3 px-4">
+        <span className="font-medium text-sm">Dr. {doctor.name} — Availability</span>
+        <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xs">Close</button>
+      </CardHeader>
+      <CardBody className="px-4 pb-4 space-y-4">
+        <Field label="Set status">
+          <Select
+            value={data?.availability_status ?? "available"}
+            onChange={(e) => mut.mutate(e.target.value)}
+            disabled={mut.isPending}
+          >
+            {(Object.keys(AVAIL_LABELS) as AvailabilityStatus[]).map((s) => (
+              <option key={s} value={s}>{AVAIL_LABELS[s]}</option>
+            ))}
+          </Select>
+        </Field>
+        {isLoading ? (
+          <p className="text-xs text-gray-400">Loading history…</p>
+        ) : (
+          <div>
+            <p className="text-xs font-medium text-gray-500 mb-2">Recent changes</p>
+            {(data?.recent_events ?? []).length === 0 ? (
+              <p className="text-xs text-gray-400">No changes recorded yet.</p>
+            ) : (
+              <ul className="space-y-1">
+                {data!.recent_events.map((ev) => (
+                  <li key={ev.id} className="flex items-center gap-2 text-xs">
+                    <Badge tone={AVAIL_TONE[ev.status]}>{AVAIL_LABELS[ev.status]}</Badge>
+                    <span className="text-gray-400">{fmtDateTime(ev.created_at)}</span>
+                    {ev.note && <span className="text-gray-500">— {ev.note}</span>}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}
 
 // ── Doctor form ──────────────────────────────────────────────────────────────
 
@@ -213,6 +290,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   const [editing, setEditing] = React.useState<Doctor | null>(null);
   const [form, setForm] = React.useState<DoctorForm>(BLANK_DOC);
   const [schedDoctor, setSchedDoctor] = React.useState<Doctor | null>(null);
+  const [availDoctor, setAvailDoctor] = React.useState<Doctor | null>(null);
 
   function openCreate() {
     setEditing(null);
@@ -301,6 +379,14 @@ function Inner({ hospitalId }: { hospitalId: string }) {
       ),
     },
     {
+      header: "Availability",
+      id: "availability",
+      cell: ({ row }) => {
+        const s = (row.original.availability_status ?? "available") as AvailabilityStatus;
+        return <Badge tone={AVAIL_TONE[s]}>{AVAIL_LABELS[s]}</Badge>;
+      },
+    },
+    {
       header: "Actions",
       id: "actions",
       cell: ({ row }) => (
@@ -310,6 +396,13 @@ function Inner({ hospitalId }: { hospitalId: string }) {
           </Button>
           <Button variant="outline" onClick={() => setSchedDoctor(row.original)} className="text-xs">
             Schedules
+          </Button>
+          <Button
+            variant="outline"
+            className="text-xs"
+            onClick={() => setAvailDoctor(availDoctor?.id === row.original.id ? null : row.original)}
+          >
+            Availability
           </Button>
           <Button
             variant="danger"
@@ -343,6 +436,14 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         searchPlaceholder="Search doctors…"
         emptyTitle="No doctors yet"
       />
+
+      {availDoctor && (
+        <AvailabilityPanel
+          doctor={availDoctor}
+          hospitalId={hospitalId}
+          onClose={() => setAvailDoctor(null)}
+        />
+      )}
 
       {/* Doctor create/edit modal */}
       <FormModal

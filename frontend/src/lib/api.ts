@@ -193,6 +193,16 @@ export const api = {
     post<Booking>(`/hospitals/${hid}/bookings/${id}/confirm-call`),
   listWhatsApp: (hid: string) => get<WhatsAppMessage[]>(`/hospitals/${hid}/whatsapp`),
 
+  // ── Doctor availability ───────────────────────────────
+  getDoctorAvailability: (hid: string, did: string) =>
+    get<import("./types").DoctorAvailability>(`/hospitals/${hid}/doctors/${did}/availability`),
+  updateDoctorAvailability: (hid: string, did: string, status: string) =>
+    put<import("./types").DoctorAvailability>(`/hospitals/${hid}/doctors/${did}/availability`, { status }),
+
+  // ── Appointment events ────────────────────────────────
+  getAppointmentEvents: (hid: string, aid: string) =>
+    get<import("./types").AppointmentEvent[]>(`/hospitals/${hid}/appointments/${aid}/events`),
+
   // ── Trial status ──────────────────────────────────────
   getTrialStatus: (hid: string) => get<{ subscription_status: string; trial_days_remaining: number; is_trial: boolean; is_expired: boolean }>(`/hospitals/${hid}/trial-status`),
 
