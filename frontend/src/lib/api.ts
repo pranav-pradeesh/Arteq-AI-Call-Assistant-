@@ -11,6 +11,7 @@ import type {
   TelephonyStatus, SetupStatus, HisConfig, AnalyticsPoint, AnalyticsSummary,
   CallFeedback, MissedQuestion, User,
   Patient, Booking, BookingStatus, PaymentMode, WhatsAppMessage,
+  TrialStatus, DoctorAvailability, DoctorAvailabilityInfo, AppointmentEvent,
 } from "./types";
 
 import { getSession } from "next-auth/react";
@@ -142,6 +143,23 @@ export const api = {
   provisionNumber: (hid: string) => post<{ plivo_number: string; bsnl_forward_code?: string }>(`/hospitals/${hid}/provision-number`),
   runSipSetup: () => post<Record<string, unknown>>("/sip/setup"),
   clearCache: (hid: string) => post<void>(`/hospitals/${hid}/cache/clear`),
+  // Vobiz SIP (migrations 021 + vobiz_sip service)
+  vobizSetup: () => post<{ outbound_trunk_id?: string } & Record<string, unknown>>("/sip/vobiz/setup"),
+  vobizStatus: () => get<Record<string, unknown>>("/sip/vobiz/status"),
+
+  // ── Trial / subscription (migrations 017) ─────────────
+  trialStatus: (hid: string) => get<TrialStatus>(`/hospitals/${hid}/trial-status`),
+  activateSubscription: (hid: string) => post<TrialStatus>(`/hospitals/${hid}/activate`),
+
+  // ── Doctor availability (migrations 018) ──────────────
+  getDoctorAvailability: (hid: string, docId: string) =>
+    get<DoctorAvailabilityInfo>(`/hospitals/${hid}/doctors/${docId}/availability`),
+  setDoctorAvailability: (hid: string, docId: string, status: DoctorAvailability) =>
+    put<DoctorAvailabilityInfo>(`/hospitals/${hid}/doctors/${docId}/availability`, { status }),
+
+  // ── Appointment audit trail (migrations 019) ──────────
+  listAppointmentEvents: (hid: string, apptId: string) =>
+    get<AppointmentEvent[]>(`/hospitals/${hid}/appointments/${apptId}/events`),
 
   // ── Knowledge base (stored on hospital) ───────────────
   saveKnowledgeBase: (hid: string, knowledge_base: string) => put<Hospital>(`/hospitals/${hid}`, { knowledge_base }),

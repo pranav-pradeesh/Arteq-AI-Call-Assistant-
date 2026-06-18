@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCurrentHospital } from "./providers";
+import { TrialBanner } from "./trial-banner";
 import { Reveal } from "./reveal";
 import { cn } from "@/lib/utils";
 
@@ -181,6 +182,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           </div>
         </header>
         <main className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-5">
+          <TrialBanner />
           <Reveal>{children}</Reveal>
         </main>
       </div>

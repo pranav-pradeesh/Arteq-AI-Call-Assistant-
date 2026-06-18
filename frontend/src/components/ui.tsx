@@ -1,6 +1,7 @@
 "use client";
 import * as React from "react";
 import { cn } from "@/lib/utils";
+import { useReadOnly } from "./providers";
 
 type DivProps = React.HTMLAttributes<HTMLDivElement>;
 
@@ -15,14 +16,27 @@ export function CardHeader({ className, ...p }: DivProps) {
 }
 
 export function Button({
-  className, variant = "primary", ...p
+  className, variant = "primary", allowInReadOnly, disabled, title, ...p
 }: React.ButtonHTMLAttributes<HTMLButtonElement> & {
   variant?: "primary" | "ghost" | "danger" | "outline";
+  /** Keep this button enabled even when the hospital is in read-only (expired trial). */
+  allowInReadOnly?: boolean;
 }) {
+  const readOnly = useReadOnly();
+  // In read-only mode, block mutating actions (primary = create/save, danger = delete)
+  // unless explicitly allowed (e.g. the Activate button).
+  const blocked = readOnly && !allowInReadOnly && (variant === "primary" || variant === "danger");
   const v = {
     primary: "btn-primary", ghost: "btn-ghost", danger: "btn-danger", outline: "btn-outline",
   }[variant];
-  return <button className={cn(v, className)} {...p} />;
+  return (
+    <button
+      className={cn(v, className)}
+      disabled={disabled || blocked}
+      title={blocked ? "Trial expired — activate the subscription to make changes" : title}
+      {...p}
+    />
+  );
 }
 
 export const Input = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(

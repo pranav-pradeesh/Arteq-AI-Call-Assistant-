@@ -90,6 +90,7 @@ function TelephonyInner({ hospitalId }: { hospitalId: string }) {
         {/* Render whichever carrier block the backend sends. Exotel is the
             active carrier; `plivo` is shown only if the backend still returns
             the legacy block. */}
+        <BoolMap title="Vobiz" map={data.vobiz} />
         <BoolMap title="Exotel" map={data.exotel} />
         <BoolMap title="Plivo (legacy)" map={data.plivo} />
         <BoolMap title="LiveKit" map={data.livekit} />
