@@ -193,9 +193,6 @@ export const api = {
     post<Booking>(`/hospitals/${hid}/bookings/${id}/confirm-call`),
   listWhatsApp: (hid: string) => get<WhatsAppMessage[]>(`/hospitals/${hid}/whatsapp`),
 
-  // ── Trial status ──────────────────────────────────────
-  getTrialStatus: (hid: string) => get<{ subscription_status: string; trial_days_remaining: number; is_trial: boolean; is_expired: boolean }>(`/hospitals/${hid}/trial-status`),
-
   // ── Users / RBAC (planned) ────────────────────────────
   me: () => get<User>("/auth/me"),
   listUsers: () => get<User[]>("/users"),
