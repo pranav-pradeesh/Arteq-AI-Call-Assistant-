@@ -1,8 +1,7 @@
 "use client";
 import * as React from "react";
 import { ChevronDown, ChevronUp } from "lucide-react";
-import { cn } from "@/lib/utils";
-import { fmtDateTime } from "@/lib/utils";
+import { cn, fmtDateTime } from "@/lib/utils";
 
 export type WaItem = {
   id: string;

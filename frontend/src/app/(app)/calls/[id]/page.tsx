@@ -7,6 +7,7 @@ import { api } from "@/lib/api";
 import { fmtDateTime, fmtMs, paiseToRupees, parseMaybeJson } from "@/lib/utils";
 import { RequireHospital } from "@/components/require-hospital";
 import { TranscriptView } from "@/components/transcript-view";
+import { RecordingPlayer } from "@/components/audio-player";
 import {
   PageHeader, EmptyState, Spinner, Badge, Card, CardBody, CardHeader,
 } from "@/components/ui";
@@ -115,8 +116,16 @@ function CallDetailInner({ hospitalId }: { hospitalId: string }) {
             )}
           </div>
 
-          {/* Transcript */}
-          <div className="lg:col-span-2">
+          {/* Recording + transcript */}
+          <div className="space-y-4 lg:col-span-2">
+            <Card>
+              <CardHeader>
+                <h2 className="text-sm font-semibold text-gray-700">Recording</h2>
+              </CardHeader>
+              <CardBody>
+                <RecordingPlayer src={call.recording_url} />
+              </CardBody>
+            </Card>
             <Card>
               <CardHeader>
                 <h2 className="text-sm font-semibold text-gray-700">Transcript</h2>

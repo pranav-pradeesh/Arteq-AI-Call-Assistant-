@@ -153,18 +153,15 @@ export default function AdminDashboard() {
             {whatsapp.length === 0 ? (
               <EmptyState title="No messages yet" hint="Tokens & confirmations are sent here." />
             ) : (
-              <ul className="space-y-2 p-3">
-                {whatsapp.map((m) => (
-                  <li key={m.id} className="rounded-lg bg-green-50 p-2.5 text-sm">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-medium text-gray-700">{m.patientName}</span>
-                      <span className="text-[11px] text-gray-400">{timeAgo(m.at)}</span>
-                    </div>
-                    <p className="mt-0.5 text-xs text-gray-700">{m.body}</p>
-                    <p className="mt-1 text-[10px] text-gray-400">{m.phone}</p>
-                  </li>
-                ))}
-              </ul>
+              <WhatsAppFeed
+                items={whatsapp.map((m) => ({
+                  id: m.id,
+                  name: m.patientName,
+                  phone: m.phone,
+                  body: m.body,
+                  at: m.at,
+                }))}
+              />
             )}
           </CardBody>
         </Card>
