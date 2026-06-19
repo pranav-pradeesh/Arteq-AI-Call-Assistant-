@@ -404,9 +404,9 @@ try:
 
             async def _side_effects():
                 try:
-                    from src.services.sms_service import SMSService
+                    from src.services.whatsapp_service import get_messenger
                     from src.services.staff_alert import StaffAlertService
-                    await SMSService().send_appointment_cancellation(
+                    await get_messenger().send_appointment_cancellation(
                         phone=caller_phone,
                         hospital_name=hospital_name,
                         patient_name=patient_name,
@@ -466,8 +466,8 @@ try:
 
         async def _sms():
             try:
-                from src.services.sms_service import SMSService
-                await SMSService().send_callback_confirmation(
+                from src.services.whatsapp_service import get_messenger
+                await get_messenger().send_callback_confirmation(
                     phone=caller_phone,
                     hospital_name=hospital_name,
                     preferred_time=preferred_time or "soon",
@@ -558,17 +558,17 @@ try:
             return "Cannot send SMS — caller phone not available."
 
         try:
-            from src.services.sms_service import SMSService
+            from src.services.whatsapp_service import get_messenger
             address = hospital_ctx.address if hospital_ctx else ""
-            await SMSService().send_maps_link(
+            await get_messenger().send_maps_link(
                 phone=caller_phone,
                 hospital_name=hospital_name,
                 address=address,
             )
-            return "Location SMS sent to your phone."
+            return "Location details sent to your WhatsApp."
         except Exception as exc:
             logger.warning("tool_location_sms_failed", error=str(exc))
-            return "Could not send SMS right now — please note the address."
+            return "Could not send the message right now — please note the address."
 
 
     @function_tool

@@ -61,12 +61,36 @@ class Settings(BaseSettings):
     # AI Brain
     DEFAULT_LANGUAGE: str = "ml-IN"
 
-    # Sarvam AI — STT (Saarika, transcribes in caller's language) + TTS (Bulbul v3)
+    # Sarvam AI — STT (Saarika v2.5 / Saaras v3) + TTS (Bulbul v3)
+    # Supported STT language codes (BCP-47 xx-IN format):
+    #   hi-IN, bn-IN, ta-IN, te-IN, kn-IN, ml-IN, mr-IN, gu-IN, od-IN, pa-IN, en-IN
+    #   (saaras:v3 also adds: as-IN, ur-IN, sa-IN, ne-IN, mai-IN, kok-IN, ks-IN,
+    #    doi-IN, mni-IN, brx-IN, sat-IN, sd-IN — all 22 constitutional languages)
+    # Use "unknown" for automatic language detection (recommended for multi-lingual clinics).
+    # Note: Odia uses "od-IN" (Sarvam non-standard), NOT the ISO "or-IN".
     SARVAM_API_KEY: str = ""
 
     # Google Cloud — Gemini AI brain
     GOOGLE_API_KEY: str = ""
     GOOGLE_MODEL: str = "gemini-2.0-flash"
+
+    # WhatsApp — Meta Cloud API (patient notifications; no SMS).
+    # Business-initiated messages use pre-approved "Utility" templates. Set up
+    # the templates in Meta Business Manager and put their names below.
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_PHONE_NUMBER_ID: str = ""        # from Meta → WhatsApp → API Setup
+    WHATSAPP_ACCESS_TOKEN: str = ""           # permanent system-user token
+    WHATSAPP_API_VERSION: str = "v21.0"
+    WHATSAPP_TEMPLATE_LANG: str = "en"        # language code of approved templates
+    # Approved template names (override only if you named yours differently).
+    WHATSAPP_TPL_CONFIRMATION: str = "appointment_confirmation"
+    WHATSAPP_TPL_TOKEN_ACTIVE: str = "token_active"
+    WHATSAPP_TPL_REMINDER: str = "appointment_reminder"
+    WHATSAPP_TPL_CANCELLATION: str = "appointment_cancellation"
+    WHATSAPP_TPL_DOCTOR_AVAIL: str = "doctor_availability"
+    WHATSAPP_TPL_CALLBACK: str = "callback_confirmation"
+    WHATSAPP_TPL_LOCATION: str = "hospital_location"
+    WHATSAPP_TPL_LAB: str = "lab_schedule"
 
     # Database
     DATABASE_URL: str = ""
@@ -122,12 +146,17 @@ class Settings(BaseSettings):
     CAMPAIGN_RESUME_ENABLED: bool = True
     CAMPAIGN_RESUME_INTERVAL_SECONDS: int = 600
 
-    # Vobiz — SIP trunk provider (replaces Plivo/Exotel for telephony)
+    # Vobiz — SIP trunk provider (sole telephony carrier; no SMS — SIP-only)
     VOBIZ_API_KEY: str = ""
     VOBIZ_API_SECRET: str = ""
     VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
     VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
     LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID: str = "" # set after POST /admin/sip/vobiz/setup
+
+    # Vobiz call recording (disabled by default — check storage pricing in Vobiz console)
+    VOBIZ_RECORD_CALLS: bool = False
+    VOBIZ_RECORDING_FORMAT: str = "mp3"           # mp3 | wav
+    VOBIZ_RECORDING_CHANNELS: str = "mono"        # mono | stereo
 
     # Doctor availability scheduler
     DOCTOR_AVAIL_ENABLED: bool = True
