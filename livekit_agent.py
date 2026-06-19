@@ -498,74 +498,33 @@ _REPEAT_PATTERNS = [
 ]
 
 
-class _GroqLLM(openai.LLM):
-    """Groq LLM that injects anti-repetition penalties on every turn.
-
-    The voice pipeline calls ``chat()`` internally, so there's no per-call hook to
-    pass penalties through — we set them here. frequency_penalty curbs the same
-    word recurring within a reply; presence_penalty pushes the model to introduce
-    new wording instead of echoing the caller's phrasing back. Both are Groq/OpenAI
-    chat params; Sarvam's leg stays plain (it may reject them).
-    """
-
-    def chat(self, **kwargs):
-        ek = kwargs.get("extra_kwargs")
-        extra = dict(ek) if isinstance(ek, dict) else {}
-        extra.setdefault("frequency_penalty", 0.4)
-        extra.setdefault("presence_penalty", 0.3)
-        kwargs["extra_kwargs"] = extra
-        return super().chat(**kwargs)
-
-
 def _build_llm(premium: bool = True):
-    """Resilient LLM with a 3-leg fallback chain: 70b → 8b → Sarvam.
+    """Resilient LLM: Google Gemini primary → Sarvam fallback.
 
-    70b is the primary for EVERY tenant: the 8b model is too weak at Malayalam +
-    multi-rule prompt adherence — on live calls it parroted the caller's question
-    back instead of acting on it and transliterated English words ("ഇയേസ്" for
-    "Yes") despite the SCRIPT rule. 70b follows both reliably and is free on Groq.
-
-    The chain matters because Groq's free tier enforces a *per-model* daily token
-    cap (TPD, 100k): when 70b's cap is exhausted it 429s every turn. Each model
-    has its OWN bucket, so llama-3.1-8b-instant keeps serving — and it's
-    sub-second, vs Sarvam's ~12s. So 8b is the fast middle leg; Sarvam (Indian-
-    language, fully separate provider/quota) is the last resort that guarantees
-    Arya never goes silent even if all of Groq is down.
-
-    Sarvam's OpenAI-compatible endpoint authenticates with an
-    `api-subscription-key` header, not Bearer, so it needs a custom client.
+    Google Gemini (via the OpenAI-compatible endpoint) is the primary brain.
+    Sarvam sarvam-30b is the fallback — separate provider/quota, Indian-language
+    specialist, guarantees Arya never goes silent if Google is unreachable.
+    Sarvam authenticates with an `api-subscription-key` header, not Bearer.
     """
-    def _groq(model: str) -> openai.LLM:
-        return _GroqLLM(
-            base_url="https://api.groq.com/openai/v1",
-            api_key=os.getenv("GROQ_API_KEY", ""),
-            # Malayalam script is token-dense, so 200 truncates a 2-sentence
-            # reply mid-word; 512 fits a full reply. 0.5 adds enough variation to
-            # sound human without letting llama-3.3 drift into emitting its
-            # <function=...> tool syntax as spoken text.
-            model=model,
-            max_completion_tokens=200,
-            temperature=0.5,
-        )
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+    model_name = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
 
-    # premium retained for signature compat; both tiers now lead with 70b for
-    # quality, with 8b as the fast middle leg when 70b's daily cap is hit.
-    # Each Groq model has its OWN rate-limit bucket, so listing more models in
-    # GROQ_MODELS (comma-separated, best first) adds throughput headroom without
-    # a code change — the single biggest lever against the 429/413 rate-limit
-    # errors on Groq's free tier. The real fix for zero errors is a paid Groq
-    # tier (much higher TPM); this just spreads load until then.
-    models = [m.strip() for m in os.getenv(
-        "GROQ_MODELS", "llama-3.3-70b-versatile,llama-3.1-8b-instant"
-    ).split(",") if m.strip()]
-    chain = [_groq(m) for m in models]
+    chain: list = []
+
+    if google_key:
+        chain.append(openai.LLM(
+            model=model_name,
+            temperature=0.5,
+            max_completion_tokens=512,
+            client=_AsyncOpenAI(
+                api_key=google_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            ),
+        ))
 
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
     if sarvam_key:
         chain.append(openai.LLM(
-            # sarvam-m was deprecated by Sarvam (returns 400). sarvam-30b is the
-            # current Indian-language chat model — separate provider, so it keeps
-            # answering when all Groq legs are capped. ~12s latency, hence last.
             model="sarvam-30b",
             temperature=0.4,
             client=_AsyncOpenAI(
@@ -575,6 +534,10 @@ def _build_llm(premium: bool = True):
             ),
         ))
 
+    if not chain:
+        raise RuntimeError(
+            "No LLM configured. Set GOOGLE_API_KEY in your environment."
+        )
     if len(chain) == 1:
         return chain[0]
     return agents_llm.FallbackAdapter(chain)
