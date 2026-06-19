@@ -2,14 +2,13 @@
 Arteq Hospital Voice Agent — FastAPI entry point.
 
 Routes:
-  /api/v1/call/inbound/{slug}         POST — Plivo inbound/answered-outbound webhook (PCML)
+  /api/v1/livekit/token               GET  — LiveKit JWT for browser/mobile
   /api/v1/outbound/reminder           POST — schedule outbound reminder call
   /api/v1/outbound/health             GET  — outbound service health
-  /api/v1/call/status                 POST — Plivo call status callback
-  /api/v1/livekit/token               GET  — LiveKit JWT for browser/mobile
   /api/v1/health                      GET  — health check
   /metrics                            GET  — Prometheus metrics
   /admin/*                            Admin dashboard API
+  /api/v1/auth/*                      JWT auth endpoints
 """
 from __future__ import annotations
 
@@ -17,7 +16,7 @@ import os
 import sys
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 
 try:
@@ -132,8 +131,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Arteq Hospital Voice Agent",
-    description="Malayalam hospital voice AI — LiveKit + Sarvam + Groq",
-    version="2.0.0",
+    description="Multilingual hospital voice AI — LiveKit + Sarvam + Google Gemini",
+    version="2.1.0",
     lifespan=lifespan,
     docs_url="/docs",
     redoc_url=None,
@@ -187,11 +186,13 @@ async def talk(request: Request):
 async def health_check():
     return {
         "status": "healthy",
-        "version": "2.0.0",
+        "version": "2.1.0",
         "env": settings.ENV,
-        "hospital_id": settings.HOSPITAL_ID,
         "livekit_configured": bool(settings.LIVEKIT_URL and settings.LIVEKIT_API_KEY),
-        "plivo_configured": bool(settings.PLIVO_AUTH_ID and settings.PLIVO_PHONE_NUMBER),
+        "sarvam_configured": bool(settings.SARVAM_API_KEY),
+        "gemini_configured": bool(settings.GOOGLE_API_KEY),
+        "whatsapp_configured": bool(settings.WHATSAPP_ENABLED and settings.WHATSAPP_PHONE_NUMBER_ID),
+        "vobiz_configured": bool(settings.VOBIZ_API_KEY and settings.VOBIZ_PHONE_NUMBER),
     }
 
 
@@ -294,101 +295,7 @@ async def livekit_token(request: Request, slug: str = "default", participant: st
         raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")
 
 
-# ── Plivo inbound webhook ─────────────────────────────────────────────────────
-
-@app.post("/api/v1/call/inbound/{tenant_slug}")
-async def call_inbound_webhook(tenant_slug: str, request: Request):
-    """
-    Plivo calls this webhook for every answered inbound call.
-    Returns PCML that SIP-forwards the call to LiveKit, where the dispatch
-    rule creates a room named "{slug}-call-{uuid}" and the agent auto-joins.
-    """
-    from fastapi.responses import Response
-    from src.services.livekit_sip import get_inbound_pcml
-
-    form = await request.form()
-    params = {k: str(v) for k, v in form.items()}
-
-    # Verify the Plivo signature when the auth token is configured. Fail closed:
-    # a missing header is treated the same as a bad signature, otherwise anyone
-    # who knows the URL can forge inbound-call webhooks. Without a token
-    # (browser-only dev) the check is skipped entirely.
-    from src.api.security import plivo_webhook_authentic
-    full_url = f"{settings.PUBLIC_BASE_URL}/api/v1/call/inbound/{tenant_slug}"
-    if not plivo_webhook_authentic(request, full_url, params):
-        logger.warning("plivo_signature_rejected", tenant=tenant_slug)
-        return Response(status_code=403)
-
-    to_number = params.get("To", settings.PLIVO_PHONE_NUMBER)
-    xml = get_inbound_pcml(to_number=to_number)
-    return Response(content=xml, media_type="text/xml")
-
-
-# ── Exotel inbound webhook ────────────────────────────────────────────────────
-
-@app.post("/api/v1/call/inbound/exotel/{token}/{tenant_slug}")
-async def exotel_inbound_webhook(token: str, tenant_slug: str, request: Request):
-    """
-    Exotel calls this webhook for every answered inbound call.
-    Returns ExoML that SIP-forwards the call to LiveKit.
-
-    The `token` path segment is compared against EXOTEL_WEBHOOK_TOKEN — embedding
-    a secret in the URL is Exotel's recommended webhook security mechanism since
-    they do not send a cryptographic signature header.
-    """
-    from fastapi.responses import Response
-    from src.api.security import exotel_webhook_authentic
-    from src.services.livekit_sip import get_inbound_exoml, get_voicebot_exoml
-
-    if not exotel_webhook_authentic(request, token):
-        logger.warning("exotel_token_rejected", tenant=tenant_slug)
-        return Response(status_code=403)
-
-    form = await request.form()
-    params = {k: str(v) for k, v in form.items()}
-    to_number = params.get("To", settings.EXOTEL_PHONE_NUMBER)
-
-    # "websocket" transport streams the call audio over a WebSocket (Voicebot
-    # applet) which we bridge into a LiveKit room; "sip" forwards via ExoML.
-    if settings.EXOTEL_TRANSPORT == "websocket":
-        xml = get_voicebot_exoml(slug=tenant_slug, extra_params={"to": to_number})
-    else:
-        xml = get_inbound_exoml(to_number=to_number)
-    return Response(content=xml, media_type="text/xml")
-
-
-# ── Exotel Voicebot WebSocket stream ──────────────────────────────────────────
-
-@app.websocket("/ws/exotel/stream/{token}/{tenant_slug}")
-async def exotel_stream_ws(websocket: WebSocket, token: str, tenant_slug: str):
-    """
-    Bidirectional Exotel Voicebot/AgentStream WebSocket endpoint.
-
-    Exotel connects here (URL from get_voicebot_exoml) and streams raw/slin
-    16-bit 8 kHz mono PCM audio. ExotelLiveKitBridge joins the LiveKit room and
-    relays audio both ways so the existing agent handles the conversation.
-
-    The `token` path segment is the same shared secret as the inbound webhook —
-    Exotel sends no signature header, so URL secrecy is the auth mechanism.
-    """
-    import hmac as _hmac
-
-    expected = settings.EXOTEL_WEBHOOK_TOKEN or ""
-    _is_prod = str(getattr(settings, "ENV", "dev")).lower() in ("production", "prod")
-    # Reject on token mismatch, and — in production — also when no token is
-    # configured (a blank token must not fail open on a public audio socket).
-    if (expected and not _hmac.compare_digest(token, expected)) or (not expected and _is_prod):
-        logger.warning("exotel_ws_token_rejected", tenant=tenant_slug)
-        await websocket.close(code=1008)
-        return
-
-    await websocket.accept()
-    from src.telephony.exotel_bridge import ExotelLiveKitBridge
-    bridge = ExotelLiveKitBridge(websocket, tenant_slug)
-    await bridge.run()
-
-
-# ── Outbound calls & SMS ──────────────────────────────────────────────────────
+# ── Outbound calls ───────────────────────────────────────────────────────────
 
 try:
     from src.api.outbound import router as outbound_router, callback_router

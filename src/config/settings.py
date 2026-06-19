@@ -61,7 +61,13 @@ class Settings(BaseSettings):
     # AI Brain
     DEFAULT_LANGUAGE: str = "ml-IN"
 
-    # Sarvam AI — STT (Saarika, transcribes in caller's language) + TTS (Bulbul v3)
+    # Sarvam AI — STT (Saarika v2.5 / Saaras v3) + TTS (Bulbul v3)
+    # Supported STT language codes (BCP-47 xx-IN format):
+    #   hi-IN, bn-IN, ta-IN, te-IN, kn-IN, ml-IN, mr-IN, gu-IN, od-IN, pa-IN, en-IN
+    #   (saaras:v3 also adds: as-IN, ur-IN, sa-IN, ne-IN, mai-IN, kok-IN, ks-IN,
+    #    doi-IN, mni-IN, brx-IN, sat-IN, sd-IN — all 22 constitutional languages)
+    # Use "unknown" for automatic language detection (recommended for multi-lingual clinics).
+    # Note: Odia uses "od-IN" (Sarvam non-standard), NOT the ISO "or-IN".
     SARVAM_API_KEY: str = ""
 
     # Google Cloud — Gemini AI brain
@@ -140,12 +146,17 @@ class Settings(BaseSettings):
     CAMPAIGN_RESUME_ENABLED: bool = True
     CAMPAIGN_RESUME_INTERVAL_SECONDS: int = 600
 
-    # Vobiz — SIP trunk provider (replaces Plivo/Exotel for telephony)
+    # Vobiz — SIP trunk provider (sole telephony carrier; no SMS — SIP-only)
     VOBIZ_API_KEY: str = ""
     VOBIZ_API_SECRET: str = ""
     VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
     VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
     LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID: str = "" # set after POST /admin/sip/vobiz/setup
+
+    # Vobiz call recording (disabled by default — check storage pricing in Vobiz console)
+    VOBIZ_RECORD_CALLS: bool = False
+    VOBIZ_RECORDING_FORMAT: str = "mp3"           # mp3 | wav
+    VOBIZ_RECORDING_CHANNELS: str = "mono"        # mono | stereo
 
     # Doctor availability scheduler
     DOCTOR_AVAIL_ENABLED: bool = True

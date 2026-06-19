@@ -162,10 +162,42 @@ async def _assert_hospital_access(payload: dict, hospital_id: str) -> None:
         raise HTTPException(status_code=403, detail="No access to this hospital")
 
 
+# Per-IP brute-force guard: max 5 failed attempts per 10-minute window.
+_login_failures: dict[str, list[float]] = {}
+_LOGIN_MAX = 5
+_LOGIN_WINDOW = 600  # seconds
+
+
+def _login_rate_ok(ip: str) -> bool:
+    import time
+    now = time.monotonic()
+    failures = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
+    if len(failures) >= _LOGIN_MAX:
+        _login_failures[ip] = failures
+        return False
+    return True
+
+
+def _login_record_failure(ip: str) -> None:
+    import time
+    now = time.monotonic()
+    failures = [t for t in _login_failures.get(ip, []) if now - t < _LOGIN_WINDOW]
+    failures.append(now)
+    _login_failures[ip] = failures
+    if len(_login_failures) > 5000:
+        cutoff = now - _LOGIN_WINDOW
+        for k in [k for k, v in _login_failures.items() if all(t < cutoff for t in v)]:
+            _login_failures.pop(k, None)
+
+
 @router.post("/login")
-async def login(body: LoginIn):
+async def login(body: LoginIn, request: Request):
+    ip = (request.client.host if request.client else "") or "unknown"
+    if not _login_rate_ok(ip):
+        raise HTTPException(status_code=429, detail="Too many failed attempts — try again later")
     admin_pw = getattr(settings, "DASHBOARD_ADMIN_PASSWORD", "admin")
     if body.password != admin_pw:
+        _login_record_failure(ip)
         raise HTTPException(status_code=401, detail="Incorrect password")
     return {"access_token": _create_token(), "token_type": "bearer"}
 
@@ -912,6 +944,41 @@ async def get_call(hospital_id: str, call_id: str):
         "transcript": _maybe_json(row["transcript"]) or [],
         "recording_url": row["recording_url"] or None,
     }
+
+
+@router.get("/hospitals/{hospital_id}/recordings", dependencies=[Depends(_require_auth)])
+async def list_call_recordings(hospital_id: str, limit: int = 50, offset: int = 0):
+    """List Vobiz call recordings for this hospital (proxied from Vobiz API).
+
+    Recordings are linked to call_logs via recording_url when VOBIZ_RECORD_CALLS=true.
+    This endpoint also returns Vobiz-side metadata (duration, download URL).
+    """
+    from src.services.vobiz_recording import list_recordings as _vobiz_list, _configured as _rec_on
+    if not _rec_on():
+        # Fall back to recording_url stored in call_logs when Vobiz API not configured
+        pool = await _db()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                """SELECT call_id, caller, started_at, recording_url
+                   FROM call_logs
+                   WHERE hospital_id=$1 AND recording_url IS NOT NULL
+                   ORDER BY started_at DESC LIMIT $2 OFFSET $3""",
+                hospital_id, min(limit, 200), offset,
+            )
+        return {
+            "source": "call_logs",
+            "recordings": [
+                {
+                    "call_id": r["call_id"],
+                    "caller": r["caller"] or "unknown",
+                    "started_at": r["started_at"].isoformat() if r["started_at"] else None,
+                    "download_url": r["recording_url"],
+                }
+                for r in rows
+            ],
+        }
+    recs = await _vobiz_list(limit=min(limit, 200), offset=offset)
+    return {"source": "vobiz_api", "recordings": recs}
 
 
 @router.get("/hospitals/{hospital_id}/stats", dependencies=[Depends(_require_auth)])
