@@ -58,8 +58,37 @@ def _create_token() -> str:
         minutes=getattr(settings, "DASHBOARD_JWT_EXPIRE_MINUTES", 720)
     )
     secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
-    # Legacy single-password admin token — no role claim; "admin" sub is the sentinel.
-    return jwt.encode({"sub": "admin", "exp": exp}, secret, algorithm=ALGORITHM)
+    # Legacy single-password admin token. The "admin" sub is the historic
+    # sentinel; the explicit super_admin role makes the token authorise
+    # coherently on RBAC-aware routes too (additions/* `require_role` checks the
+    # role claim only, so a roleless legacy token would otherwise be rejected).
+    return jwt.encode(
+        {"sub": "admin", "role": "super_admin", "exp": exp}, secret, algorithm=ALGORITHM
+    )
+
+
+def _decode_token(
+    credentials: Optional[HTTPAuthorizationCredentials],
+) -> dict:
+    """Validate a bearer JWT and its claim shape (no DB access).
+
+    Pure token verification, split out from ``_require_auth`` so it can be unit
+    tested and reused. Accepts BOTH token shapes — legacy single-password admin
+    (``sub == "admin"``) and RBAC users (any ``role`` claim) — and rejects a
+    valid-signature token that is neither. Raises ``HTTPException(401)`` for a
+    missing, malformed, expired, or shape-invalid token.
+    """
+    secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
+    if not credentials:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    try:
+        payload = jwt.decode(credentials.credentials, secret, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid or expired token")
+    # Valid token: legacy admin (sub == "admin") OR any RBAC user (has a role claim).
+    if payload.get("sub") != "admin" and not payload.get("role"):
+        raise HTTPException(status_code=401, detail="Invalid token")
+    return payload
 
 
 async def _resolve_scope(payload: dict) -> Optional[set[str]]:
@@ -105,16 +134,7 @@ async def _require_auth(
     tenant_admin / viewer must be assigned to that hospital (via user_tenants)
     or the request is rejected with 403. super_admin and the legacy admin pass.
     """
-    secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
-    if not credentials:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    try:
-        payload = jwt.decode(credentials.credentials, secret, algorithms=[ALGORITHM])
-    except JWTError:
-        raise HTTPException(status_code=401, detail="Invalid or expired token")
-    # Valid token: legacy admin (sub == "admin") OR any RBAC user (has a role claim).
-    if payload.get("sub") != "admin" and not payload.get("role"):
-        raise HTTPException(status_code=401, detail="Invalid token")
+    payload = _decode_token(credentials)
 
     # Per-hospital authorization: enforce tenant scope on hospital-scoped routes.
     hospital_id = (

@@ -28,13 +28,12 @@ To promote a missed question to a FAQ, use the existing endpoint:
 from __future__ import annotations
 
 import json
-from typing import Annotated, Any, Dict, List, Optional
+from typing import Annotated, Any, List, Optional
 
-import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ..deps import AuthDep, PoolDep, require_auth, require_hospital_access
+from ..deps import AuthDep, PoolDep, require_hospital_access
 
 router = APIRouter(prefix="/admin", tags=["qa"])
 
