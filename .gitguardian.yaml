@@ -1,0 +1,8 @@
+version: 2
+# These are environment variable substitution placeholders — not real secrets.
+# docker-compose files use ${VAR:?error} and redis://:${VAR}@host syntax
+# which GitGuardian's Generic Password detector flags as false positives.
+ignored-paths:
+  - docker-compose.selfhost.yml
+  - docker-compose.yml
+  - .env.example

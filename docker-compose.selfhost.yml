@@ -1,36 +1,45 @@
-# Self-host stack — everything on ONE VPS (PRICING_PLANS.md §4a).
-#   postgres + redis + livekit-server + livekit-sip + app (web) + agent (Arya)
+# Self-host stack — multiple hospitals on ONE VPS.
 #
-# This replaces LiveKit Cloud with the open-source server, dropping the
-# ~₹1.20/min voice-infra cost to the price of the box. The app and agent are
-# unchanged — only LIVEKIT_URL/keys point at the local server.
+# Architecture:
+#   Nginx (reverse proxy, TLS termination) → app (FastAPI)
+#   LiveKit server + SIP service (self-hosted, no LiveKit Cloud fee)
+#   PostgreSQL + Redis (shared by all hospitals)
+#   One LiveKit agent worker handles all hospital rooms concurrently
 #
-# One-time before `docker compose -f docker-compose.selfhost.yml up -d`:
-#   1. Copy .env.selfhost.example → .env and fill secrets (Sarvam, Groq, Plivo,
-#      DB password, dashboard secrets, and a LIVEKIT_API_KEY/SECRET pair).
-#   2. Set NODE_IP to the VPS public IP so WebRTC media is reachable.
-#   3. After it's up, run POST /admin/sip/setup to create the Plivo trunks.
+# Quick start:
+#   1. Copy .env.example → .env and fill required secrets.
+#   2. Set NODE_IP to your VPS public IP (needed for WebRTC media).
+#   3. Set DOMAIN to your VPS domain/IP for Nginx (e.g. arteq.yourdomain.com).
+#   4. docker compose -f docker-compose.selfhost.yml up -d
+#   5. POST /admin/sip/vobiz/setup  (creates LiveKit SIP trunks for Vobiz)
+#
+# Adding a new hospital:
+#   POST /admin/hospitals/wizard  (name, slug, departments, doctors, etc.)
+#   No restart needed — routing is purely data-driven via the hospital slug.
 
 services:
+
+  # ── PostgreSQL ──────────────────────────────────────────────────
+  # Credentials are read from .env (POSTGRES_USER, POSTGRES_PASSWORD, POSTGRES_DB).
+  # Set POSTGRES_PASSWORD in .env before starting — the container will not init
+  # without it. Passing via env_file avoids hardcoded values in this file.
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-arteq}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-arteq}
-      POSTGRES_DB: ${POSTGRES_DB:-arteq_hospital}
+    env_file: .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-arteq} -d ${POSTGRES_DB:-arteq_hospital}"]
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER:-arteq} -d $${POSTGRES_DB:-arteq_hospital}"]
       interval: 5s
       timeout: 5s
-      retries: 5
+      retries: 10
 
+  # ── Redis ───────────────────────────────────────────────────────
   redis:
     image: redis:7-alpine
     restart: unless-stopped
-    command: redis-server --save 20 1 --loglevel warning
+    command: redis-server --save 20 1 --loglevel warning --requirepass ${REDIS_PASSWORD:-}
     volumes:
       - redis_data:/data
     healthcheck:
@@ -39,23 +48,24 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── LiveKit Server (self-hosted, replaces LiveKit Cloud) ────────
   livekit:
     image: livekit/livekit-server:latest
     restart: unless-stopped
-    command: --config /etc/livekit.yaml --node-ip ${NODE_IP}
+    command: --config /etc/livekit.yaml --node-ip ${NODE_IP:?Set NODE_IP to VPS public IP}
     environment:
-      # "key: secret" — must match LIVEKIT_API_KEY/SECRET used by app + agent.
-      LIVEKIT_KEYS: "${LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET}"
+      LIVEKIT_KEYS: "${LIVEKIT_API_KEY:?Set LIVEKIT_API_KEY}: ${LIVEKIT_API_SECRET:?Set LIVEKIT_API_SECRET}"
     volumes:
       - ./deploy/livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      - "7880:7880"      # signaling (ws)
-      - "7881:7881"      # rtc tcp
-      - "50000-50200:50000-50200/udp"  # rtc media
+      - "7880:7880"                        # WebSocket signaling
+      - "7881:7881"                        # RTC TCP
+      - "50000-50200:50000-50200/udp"      # RTC media (open in firewall)
     depends_on:
       redis:
         condition: service_healthy
 
+  # ── LiveKit SIP (Vobiz trunk bridge) ───────────────────────────
   livekit-sip:
     image: livekit/sip:latest
     restart: unless-stopped
@@ -66,34 +76,43 @@ services:
     volumes:
       - ./deploy/livekit-sip.yaml:/etc/livekit-sip.yaml:ro
     ports:
-      - "5060:5060/udp"             # SIP signaling from Plivo
-      - "10000-10100:10000-10100/udp"  # SIP rtp
+      - "5060:5060/udp"                   # SIP signaling from Vobiz
+      - "10000-10100:10000-10100/udp"     # SIP RTP media
     depends_on:
       livekit:
         condition: service_started
       redis:
         condition: service_healthy
 
+  # ── Arteq API Server ────────────────────────────────────────────
   app:
     build:
       context: .
       dockerfile: Dockerfile
     restart: unless-stopped
     env_file: .env
+    # DATABASE_URL is constructed by the app from .env values; override host to
+    # use the docker service name instead of the external host in your .env.
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-arteq}:${POSTGRES_PASSWORD:-arteq}@postgres:5432/${POSTGRES_DB:-arteq_hospital}
       DB_SSL: disable
-      REDIS_URL: redis://redis:6379/0
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       LIVEKIT_URL: ws://livekit:7880
-    ports:
-      - "8000:8000"
+    expose:
+      - "8000"
     depends_on:
       postgres:
         condition: service_healthy
       livekit:
         condition: service_started
-    command: uvicorn src.main:app --host 0.0.0.0 --port 8000
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8000 --workers 2
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
 
+  # ── Arya Agent Worker ───────────────────────────────────────────
+  # Handles all hospital rooms concurrently. Scale by adding replicas.
   agent:
     build:
       context: .
@@ -101,7 +120,6 @@ services:
     restart: unless-stopped
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-arteq}:${POSTGRES_PASSWORD:-arteq}@postgres:5432/${POSTGRES_DB:-arteq_hospital}
       DB_SSL: disable
       LIVEKIT_URL: ws://livekit:7880
     depends_on:
@@ -111,6 +129,40 @@ services:
         condition: service_started
     command: python livekit_agent.py start
 
+  # ── Nginx reverse proxy + TLS ──────────────────────────────────
+  # Terminates HTTPS, proxies /admin, /api/v1, /talk, /ws to the app.
+  # All hospitals share the same domain — routing is by slug in the URL/room name.
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/nginx.conf:/etc/nginx/nginx.conf:ro
+      - nginx_certs:/etc/nginx/certs         # mount TLS certs here
+      - nginx_logs:/var/log/nginx
+    depends_on:
+      app:
+        condition: service_healthy
+
+  # ── Prometheus (optional) ───────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:latest
+    restart: unless-stopped
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    depends_on:
+      - app
+    profiles:
+      - monitoring
+
 volumes:
   postgres_data:
   redis_data:
+  nginx_certs:
+  nginx_logs:
+  prometheus_data:
