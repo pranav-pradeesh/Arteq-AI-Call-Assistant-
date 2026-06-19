@@ -68,6 +68,24 @@ class Settings(BaseSettings):
     GOOGLE_API_KEY: str = ""
     GOOGLE_MODEL: str = "gemini-2.0-flash"
 
+    # WhatsApp — Meta Cloud API (patient notifications; no SMS).
+    # Business-initiated messages use pre-approved "Utility" templates. Set up
+    # the templates in Meta Business Manager and put their names below.
+    WHATSAPP_ENABLED: bool = False
+    WHATSAPP_PHONE_NUMBER_ID: str = ""        # from Meta → WhatsApp → API Setup
+    WHATSAPP_ACCESS_TOKEN: str = ""           # permanent system-user token
+    WHATSAPP_API_VERSION: str = "v21.0"
+    WHATSAPP_TEMPLATE_LANG: str = "en"        # language code of approved templates
+    # Approved template names (override only if you named yours differently).
+    WHATSAPP_TPL_CONFIRMATION: str = "appointment_confirmation"
+    WHATSAPP_TPL_TOKEN_ACTIVE: str = "token_active"
+    WHATSAPP_TPL_REMINDER: str = "appointment_reminder"
+    WHATSAPP_TPL_CANCELLATION: str = "appointment_cancellation"
+    WHATSAPP_TPL_DOCTOR_AVAIL: str = "doctor_availability"
+    WHATSAPP_TPL_CALLBACK: str = "callback_confirmation"
+    WHATSAPP_TPL_LOCATION: str = "hospital_location"
+    WHATSAPP_TPL_LAB: str = "lab_schedule"
+
     # Database
     DATABASE_URL: str = ""
     # SSL mode for the Postgres pool: "auto" | "require" | "disable".
