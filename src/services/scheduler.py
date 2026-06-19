@@ -25,11 +25,9 @@ from src.observability.logger import get_logger
 from src.services.appointment_workflow import (
     MAX_ATTEMPTS,
     is_within_calling_hours,
-    log_appointment_event,
     place_confirmation_call,
     place_doctor_availability_call,
     place_reminder_call,
-    update_workflow_status,
 )
 from src.services.outbound_calls import OutboundCallService
 from src.tenancy import registry

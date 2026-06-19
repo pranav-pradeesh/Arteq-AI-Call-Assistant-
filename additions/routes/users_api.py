@@ -39,13 +39,12 @@ import os
 from datetime import datetime, timedelta, timezone
 from typing import Annotated, List, Optional
 
-import asyncpg
 import bcrypt
 from jose import jwt
 from fastapi import APIRouter, Depends, HTTPException, Path, status
 from pydantic import BaseModel, EmailStr, Field
 
-from ..deps import AuthDep, PoolDep, require_auth, require_role
+from ..deps import JWT_SECRET, AuthDep, PoolDep, require_role  # JWT_SECRET: same secret the rest of the dashboard verifies with
 
 router = APIRouter(prefix="/admin", tags=["users"])
 
@@ -72,8 +71,6 @@ def verify_password(plain: str, hashed: str) -> bool:
 # ---------------------------------------------------------------------------
 # JWT settings (must match deps.py and existing auth.py)
 # ---------------------------------------------------------------------------
-
-from ..deps import JWT_SECRET  # same secret the rest of the dashboard verifies with
 
 JWT_ALGORITHM: str = "HS256"
 JWT_EXPIRE_MINUTES: int = int(os.environ.get("DASHBOARD_JWT_EXPIRE_MINUTES", "720"))

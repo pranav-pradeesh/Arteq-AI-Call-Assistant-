@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 import re
 import sys
 import uuid
@@ -164,7 +163,7 @@ def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
 class _BulbulV3ChunkedStream(_SarvamChunkedStream):
     async def _run(self, output_emitter) -> None:
         import hashlib
-        from src.cache.store import tts_cache, TTS_CACHE_TTL
+        from src.cache.store import tts_cache
 
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)

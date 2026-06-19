@@ -81,7 +81,6 @@ def body(txt, color=INK):
 def bullet(txt, label=None):
     pdf.set_font("Helvetica", "", 10.5)
     pdf.set_text_color(*INK)
-    x = pdf.get_x()
     pdf.set_text_color(*ACCENT)
     pdf.cell(5, 5.2, chr(149))  # bullet dot
     pdf.set_text_color(*INK)
