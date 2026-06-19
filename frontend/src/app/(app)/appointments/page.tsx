@@ -116,11 +116,6 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
       cell: ({ row }) => row.original.patient_phone ?? <span className="text-gray-400">{EM_DASH}</span>,
     },
     {
-      header: "Doctor",
-      accessorKey: "doctor_name",
-      cell: ({ row }) => row.original.doctor_name ?? <span className="text-gray-400">{EM_DASH}</span>,
-    },
-    {
       header: "Slot",
       accessorKey: "slot_time",
       cell: ({ row }) =>

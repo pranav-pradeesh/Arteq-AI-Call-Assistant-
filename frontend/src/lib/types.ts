@@ -143,9 +143,7 @@ export interface Appointment {
   patient_name?: string | null;
   patient_phone?: string | null;
   doctor_id?: string | null;
-  doctor_name?: string | null;
   dept_id?: string | null;
-  dept_name?: string | null;
   slot_time?: string | null;
   notes?: string | null;
   call_id?: string | null;
