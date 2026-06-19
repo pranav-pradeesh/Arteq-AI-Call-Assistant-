@@ -2501,13 +2501,14 @@ async def get_doctor_availability(hospital_id: str, doctor_id: str):
         "doctor_id": doctor_id,
         "name": doctor["name"],
         "availability_status": doctor["availability_status"],
-        "recent_events": [
+        "events": [
             {
                 "id": str(e["id"]),
+                "doctor_id": doctor_id,
+                "hospital_id": hospital_id,
                 "status": e["status"],
                 "note": e["note"],
-                "changed_by": e["changed_by"],
-                "changed_at": e["changed_at"].isoformat() if e["changed_at"] else None,
+                "created_at": e["changed_at"].isoformat() if e["changed_at"] else None,
             }
             for e in events
         ],
@@ -2603,31 +2604,17 @@ async def get_appointment_events(hospital_id: str, appointment_id: str):
                WHERE appointment_id=$1 ORDER BY created_at ASC""",
             appointment_id,
         )
-    return {
-        "appointment_id": appointment_id,
-        "patient_name": appt["patient_name"],
-        "patient_phone": appt["patient_phone"],
-        "slot_time": appt["slot_time"].isoformat() if appt["slot_time"] else None,
-        "status": appt["status"],
-        "workflow_status": appt["workflow_status"],
-        "attempts": {
-            "confirmation": appt["confirmation_attempts"],
-            "reminder": appt["reminder_attempts"],
-            "doctor_availability": appt["doctor_availability_attempts"],
-        },
-        "events": [
-            {
-                "id": str(e["id"]),
-                "event_type": e["event_type"],
-                "old_status": e["old_status"],
-                "new_status": e["new_status"],
-                "note": e["note"],
-                "actor": e["actor"],
-                "created_at": e["created_at"].isoformat() if e["created_at"] else None,
-            }
-            for e in events
-        ],
-    }
+    return [
+        {
+            "id": str(e["id"]),
+            "appointment_id": appointment_id,
+            "hospital_id": hospital_id,
+            "event_type": e["event_type"],
+            "detail": e["note"],
+            "created_at": e["created_at"].isoformat() if e["created_at"] else None,
+        }
+        for e in events
+    ]
 
 
 # ── Utility ───────────────────────────────────────────────────────────────────
