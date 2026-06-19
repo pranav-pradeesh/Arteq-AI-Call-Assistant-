@@ -1,20 +1,15 @@
 """
-SMS Service — sends SMS to patients via Plivo.
+SMS Service — patient notifications.
 
-Used for:
-- Hospital location / Google Maps link
-- Appointment confirmation details
-- Lab schedule / test prep instructions
-- Doctor schedule details
+Note: Vobiz (our telephony provider) is a SIP trunk only — it does not
+support SMS. All send methods are preserved for future carrier integration
+but currently log a warning and return False.
 """
 from __future__ import annotations
 
 import urllib.parse
 
-import httpx
 import structlog
-
-from src.config.settings import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -22,12 +17,10 @@ logger = structlog.get_logger(__name__)
 class SMSService:
     """Sends SMS messages to patients.
 
-    Provider selection (first configured wins):
-      1. Exotel — if EXOTEL_API_KEY + EXOTEL_PHONE_NUMBER are set
-      2. Plivo  — if PLIVO_AUTH_ID + PLIVO_PHONE_NUMBER are set
+    Currently a no-op: Vobiz is SIP-only and does not provide SMS.
+    Message methods are preserved so calling code needs no changes if a
+    carrier is added later.
     """
-
-    _PLIVO_SMS_URL = "https://api.plivo.com/v1/Account/{auth_id}/Message/"
 
     async def send_maps_link(
         self,
@@ -211,55 +204,6 @@ class SMSService:
         return await self._send(phone, message)
 
     async def _send(self, phone: str, message: str) -> bool:
-        """Core send logic — Exotel if configured, else Plivo."""
-        if settings.EXOTEL_API_KEY and settings.EXOTEL_PHONE_NUMBER:
-            return await self._send_exotel(phone, message)
-        if settings.PLIVO_AUTH_ID and settings.PLIVO_PHONE_NUMBER:
-            return await self._send_plivo(phone, message)
-        logger.warning("sms_skipped_no_provider_configured")
+        """SMS is not available — Vobiz is a SIP trunk only."""
+        logger.warning("sms_skipped_no_sms_provider", phone=phone[:6] + "****")
         return False
-
-    async def _send_plivo(self, phone: str, message: str) -> bool:
-        url = self._PLIVO_SMS_URL.format(auth_id=settings.PLIVO_AUTH_ID)
-        payload = {"src": settings.PLIVO_PHONE_NUMBER, "dst": phone, "text": message}
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url, json=payload,
-                    auth=(settings.PLIVO_AUTH_ID, settings.PLIVO_AUTH_TOKEN),
-                )
-            if response.status_code in (200, 201, 202):
-                logger.info("sms_sent", provider="plivo", phone=phone[:6] + "****")
-                return True
-            logger.warning("sms_failed", provider="plivo",
-                           status_code=response.status_code, error=response.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("sms_failed", provider="plivo", error=str(exc))
-            return False
-
-    async def _send_exotel(self, phone: str, message: str) -> bool:
-        url = (
-            f"https://{settings.EXOTEL_SUBDOMAIN}/v1/Accounts"
-            f"/{settings.EXOTEL_API_KEY}/Sms/send.json"
-        )
-        payload = {
-            "From": settings.EXOTEL_PHONE_NUMBER,
-            "To": phone,
-            "Body": message,
-        }
-        try:
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                response = await client.post(
-                    url, data=payload,
-                    auth=(settings.EXOTEL_API_KEY, settings.EXOTEL_API_TOKEN),
-                )
-            if response.status_code in (200, 201, 202):
-                logger.info("sms_sent", provider="exotel", phone=phone[:6] + "****")
-                return True
-            logger.warning("sms_failed", provider="exotel",
-                           status_code=response.status_code, error=response.text[:200])
-            return False
-        except Exception as exc:
-            logger.error("sms_failed", provider="exotel", error=str(exc))
-            return False

@@ -254,6 +254,15 @@ async def callback_loop(interval_seconds: int = 300) -> None:
 
     async def _pass(pool, tenant_slug):
         if not is_within_calling_hours():
+            if settings.AFTER_HOURS_CALLBACK_ENABLED:
+                pending = await service.get_pending_callbacks(pool)
+                if pending:
+                    logger.info(
+                        "callback_after_hours_queued",
+                        tenant=tenant_slug,
+                        queued=len(pending),
+                        note="will_process_at_08:00_IST",
+                    )
             return
         pending = await service.get_pending_callbacks(pool)
         if pending:
