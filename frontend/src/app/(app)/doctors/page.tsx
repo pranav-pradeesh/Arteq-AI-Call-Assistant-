@@ -366,8 +366,8 @@ function Inner({ hospitalId }: { hospitalId: string }) {
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: ["doctors", hospitalId] });
       toast("Doctor deleted", "ok");
- // synctest
-Error: (e: Error) => toast(e.message, "err"),
+    },
+    onError: (e: Error) => toast(e.message, "err"),
   });
 
   const columns: ColumnDef<Doctor>[] = [
