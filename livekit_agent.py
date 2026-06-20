@@ -1234,6 +1234,15 @@ class _LatencyMeter:
         )
         return round(total_s * 1000)
 
+    def breakdown_ms(self) -> dict:
+        """Per-stage average latency in ms — shows WHERE the response delay is:
+        eou = end-of-turn / VAD settle, llm = LLM time-to-first-token,
+        tts = TTS time-to-first-byte. Sum ≈ avg_ms()."""
+        return {
+            k: (round((self._sum[k] / self._cnt[k]) * 1000) if self._cnt[k] else 0)
+            for k in self._sum
+        }
+
 
 
 # ==============================================================================
@@ -1534,6 +1543,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 outcome = transfer_dest if transfer_dest else "completed"
                 duration_s = (ended_at - call_started_at).total_seconds()
                 cost_paise = _estimate_cost_paise(duration_s, transcript)
+                # Log WHERE the per-turn latency is spent so we can see the
+                # bottleneck in the deploy logs (grep "latency_breakdown").
+                _bd = meter.breakdown_ms()
+                print(
+                    f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
+                    f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
+                    f"turns={total_turns}",
+                    file=sys.stderr, flush=True,
+                )
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
