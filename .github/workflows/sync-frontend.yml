@@ -1,12 +1,19 @@
 name: Sync Frontend from Upstream
 
 # Mirrors the frontend/ directory from the upstream dashboard repo
-# (Mhd-Hayyan/dashboard-next) into this repo. When upstream changes, this
-# commits the update to main — which triggers the Vercel auto-deploy.
+# (Mhd-Hayyan/dashboard-next) into this repo.
 #
-# NOTE: frontend/ is treated as a mirror of upstream. Local edits to files
-# under frontend/ will be overwritten on the next sync. Make frontend changes
-# in the upstream repo, not here.
+# HARDENED: the mirrored frontend must pass typecheck + unit tests before it is
+# allowed onto main. A clean, green sync is pushed straight to main (triggering
+# the Vercel auto-deploy, as before). A sync that fails verification is opened as
+# a pull request on a stable `automated/frontend-sync` branch instead of being
+# pushed to main — so a broken or corrupted upstream commit can NEVER break main
+# again. (This previously happened repeatedly, e.g. a mangled onError in
+# doctors/page.tsx and reverted test fixes.)
+#
+# NOTE: frontend/ is still treated as a mirror of upstream. Make frontend changes
+# in the upstream repo, not here — but a failed sync now surfaces as a red PR to
+# fix rather than silently breaking main.
 
 on:
   schedule:
@@ -15,6 +22,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: sync-frontend
@@ -38,15 +46,64 @@ jobs:
             --exclude 'node_modules' \
             /tmp/upstream/ frontend/
 
-      - name: Commit and push if changed
+      - name: Detect changes
+        id: diff
+        run: |
+          if [ -n "$(git status --porcelain frontend/)" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No upstream changes."
+          fi
+
+      - name: Set up Node
+        if: steps.diff.outputs.changed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Verify synced frontend (typecheck + tests)
+        if: steps.diff.outputs.changed == 'true'
+        id: verify
+        continue-on-error: true
+        working-directory: frontend
+        run: |
+          npm ci || npm install
+          npm run typecheck
+          npm run test
+
+      - name: Configure Git
+        if: steps.diff.outputs.changed == 'true'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          if [ -n "$(git status --porcelain frontend/)" ]; then
-            git add frontend/
-            git commit -m "chore: sync frontend from Mhd-Hayyan/dashboard-next"
-            git push origin HEAD:main
-            echo "Synced upstream changes."
-          else
-            echo "No upstream changes."
+
+      # Green sync → straight to main (original behaviour, now gated).
+      - name: Push verified sync to main
+        if: steps.diff.outputs.changed == 'true' && steps.verify.outcome == 'success'
+        run: |
+          git add frontend/
+          git commit -m "chore: sync frontend from Mhd-Hayyan/dashboard-next"
+          git push origin HEAD:main
+          echo "Synced upstream changes (verified green)."
+
+      # Failed sync → open/refresh a single PR for review; never touch main.
+      - name: Open PR for a sync that failed verification
+        if: steps.diff.outputs.changed == 'true' && steps.verify.outcome != 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          BRANCH="automated/frontend-sync"
+          git checkout -b "$BRANCH"
+          git add frontend/
+          git commit -m "chore: sync frontend from upstream (needs review — checks failed)"
+          git push --force origin "$BRANCH"
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --base main --head "$BRANCH" --draft \
+              --title "Frontend sync needs review (typecheck/tests failed)" \
+              --body "The automated frontend sync from \`Mhd-Hayyan/dashboard-next\` failed typecheck or unit tests, so it was opened as a PR instead of being pushed to main. Review and fix (ideally in the upstream repo) before merging."
           fi
+          echo "::error::Frontend sync failed verification — opened/updated PR on $BRANCH instead of pushing to main."
+          exit 1
