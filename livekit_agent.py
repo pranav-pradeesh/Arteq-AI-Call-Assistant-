@@ -427,11 +427,14 @@ class BulbulV3TTS(_SarvamTTS):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Keep system prompt + last 12 messages (6 turns). A booking spans several
-# turns (name → doctor → date → time → confirm); at 2 turns the agent forgot
-# what the caller already said. The per-turn cost is dominated by the large
-# system prompt re-sent every turn, so a few short history messages are cheap.
-_MAX_CTX = 12
+# Conversation memory window: keep the system prompt + the last N context items.
+# IMPORTANT: "items" include tool calls AND tool results, not just spoken turns —
+# a single booking step (check_availability → book_appointment) can add 3–4 items,
+# so a small window made the agent forget what the caller said a moment earlier
+# ("no continuity"). 40 items comfortably holds a whole hospital call. The per-turn
+# cost is dominated by the large system prompt re-sent every turn, so retaining
+# more short history messages is cheap. Override with MAX_CTX_ITEMS if needed.
+_MAX_CTX = int(os.getenv("MAX_CTX_ITEMS", "40"))
 
 _WATCHDOG_FAREWELLS = {
     "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
@@ -789,7 +792,9 @@ ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle
 NAME COLLECTION: When asking for the caller's name for the first time, use these exact phrasings — natural, warm, not robotic:
 Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?" | Hindi → "आपका नाम बताइए?" | Tamil → "உங்கள் பெயர் சொல்லுங்கள்?" | Telugu → "మీ పేరు చెప్పండి?" | Kannada → "ನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ?" | Bengali → "আপনার নাম বলুন?" | English → "Could I get your name?"
 
-CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call.
+CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call. Keep the conversation FLOWING and continuous — briefly acknowledge what the caller just said (ശരി / മനസ്സിലായി) and build on the previous turns so it feels like one natural chat, never disconnected one-off answers.
+
+NAME USE: Say the hospital's name ONCE in the opening greeting. After that do NOT repeat the hospital name in every reply — it sounds robotic. Refer to it naturally as "ഇവിടെ" (here) or "ഞങ്ങൾ/ഞങ്ങളുടെ" (we/our), and only say the full name again if the caller asks who they've reached or it's truly needed to avoid confusion.
 
 PUNCTUATION: Use full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — the voice uses it for intonation. Do NOT repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase.
 
