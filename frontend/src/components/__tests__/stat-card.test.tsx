@@ -22,14 +22,16 @@ describe("StatCard", () => {
 
   it("renders up arrow and percentage for positive delta", () => {
     render(<StatCard label="Revenue" value="₹500" delta={12} />);
-    expect(screen.getByText("↑")).toBeTruthy();
+    // The arrow, number and "%" are separate text nodes in one span, so match
+    // on the span's combined text rather than the arrow as a standalone node.
+    expect(screen.getByText(/↑/)).toBeTruthy();
     // delta=12 renders as "12.0%"
     expect(screen.getByText(/12\.0%/)).toBeTruthy();
   });
 
   it("renders down arrow and percentage for negative delta", () => {
     render(<StatCard label="Revenue" value="₹500" delta={-5} />);
-    expect(screen.getByText("↓")).toBeTruthy();
+    expect(screen.getByText(/↓/)).toBeTruthy();
     // delta=-5 renders absolute value as "5.0%"
     expect(screen.getByText(/5\.0%/)).toBeTruthy();
   });
@@ -48,7 +50,7 @@ describe("StatCard", () => {
 
   it("renders up arrow and 0.0% for delta=0", () => {
     render(<StatCard label="Calls" value="10" delta={0} />);
-    expect(screen.getByText("↑")).toBeTruthy();
+    expect(screen.getByText(/↑/)).toBeTruthy();
     expect(screen.getByText(/0\.0%/)).toBeTruthy();
   });
 });

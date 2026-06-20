@@ -17,3 +17,6 @@ select = ["E4", "E7", "E9", "F", "W6"]
 "livekit_agent.py" = ["E402"]
 "src/main.py" = ["E402"]
 "src/db/queries.py" = ["E402"]
+# Standalone top-to-bottom PDF builder: terse reportlab layout lambdas (E731)
+# and a trailing `import os` next to the output step (E402) are deliberate.
+"scripts/build_founder_pdf.py" = ["E402", "E731"]

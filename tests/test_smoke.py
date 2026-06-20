@@ -256,12 +256,12 @@ def test_normalize_for_tts_stem_absorption():
 
 
 def test_greeting_language_matrix():
-    from src.ai.groq_brain import build_greeting_text, _GREETING_TEMPLATES
+    from src.ai.groq_brain import build_greeting_text, _HOW_CAN_I_HELP
     hosp = "Test Hospital"
     hour = 10
 
-    # Every templated language names the hospital and never a personal agent name.
-    for lang in list(_GREETING_TEMPLATES) + ["od-IN", "mr-IN", "manglish"]:
+    # Every supported language names the hospital and never a personal agent name.
+    for lang in list(_HOW_CAN_I_HELP) + ["od-IN", "mr-IN", "manglish"]:
         text = build_greeting_text(hosp, hour, lang=lang)
         assert hosp in text, f"hosp name missing for lang={lang}"
         assert "Arya" not in text, f"agent name leaked for lang={lang}"

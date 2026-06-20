@@ -16,7 +16,7 @@ endpoint is missing, so shipping the poll first is safe.
 
 from __future__ import annotations
 
-from typing import Annotated, Any, List, Optional
+from typing import Annotated, Any, List
 
 from fastapi import APIRouter, Depends, Path
 

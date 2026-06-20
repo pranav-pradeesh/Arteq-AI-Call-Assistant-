@@ -95,6 +95,45 @@ async def setup_vobiz_outbound_trunk() -> str:
         return ""
 
 
+async def _delete_existing_inbound(lk, lk_api, did_number: str) -> None:
+    """Remove any inbound trunk that already claims ``did_number`` and the
+    dispatch rules bound only to it, so inbound setup is idempotent and safe to
+    re-run. Best-effort — logs and continues on any error."""
+    try:
+        trunks = await lk.sip.list_sip_inbound_trunk(
+            lk_api.ListSIPInboundTrunkRequest()
+        )
+        stale = [t.sip_trunk_id for t in trunks.items if did_number in list(t.numbers)]
+        if not stale:
+            return
+        rules = await lk.sip.list_sip_dispatch_rule(
+            lk_api.ListSIPDispatchRuleRequest()
+        )
+        for r in rules.items:
+            bound = list(r.trunk_ids)
+            # Only delete rules scoped exclusively to the stale trunk(s); never a
+            # catch-all rule (empty trunk_ids = applies to every trunk).
+            if bound and all(tid in stale for tid in bound):
+                try:
+                    await lk.sip.delete_sip_dispatch_rule(
+                        lk_api.DeleteSIPDispatchRuleRequest(
+                            sip_dispatch_rule_id=r.sip_dispatch_rule_id
+                        )
+                    )
+                except Exception as e:
+                    logger.warning("vobiz_stale_rule_delete_failed", error=str(e))
+        for tid in stale:
+            try:
+                await lk.sip.delete_sip_trunk(
+                    lk_api.DeleteSIPTrunkRequest(sip_trunk_id=tid)
+                )
+            except Exception as e:
+                logger.warning("vobiz_stale_trunk_delete_failed", trunk_id=tid, error=str(e))
+        logger.info("vobiz_inbound_replaced", did=did_number[-4:], removed=len(stale))
+    except Exception as exc:
+        logger.warning("vobiz_inbound_cleanup_skipped", error=str(exc))
+
+
 async def setup_hospital_inbound_vobiz(
     hospital_slug: str,
     did_number: str,
@@ -110,6 +149,12 @@ async def setup_hospital_inbound_vobiz(
         from livekit import api as lk_api
         lk = _lk()
 
+        # Idempotency: drop any existing inbound trunk that already claims this
+        # DID (plus the dispatch rules bound to it) so re-running setup cleanly
+        # replaces it instead of failing on "number already in use" or leaving a
+        # stale, agent-less rule behind.
+        await _delete_existing_inbound(lk, lk_api, did_number)
+
         trunk = await lk.sip.create_sip_inbound_trunk(
             lk_api.CreateSIPInboundTrunkRequest(
                 trunk=lk_api.SIPInboundTrunkInfo(
@@ -120,6 +165,11 @@ async def setup_hospital_inbound_vobiz(
                 )
             )
         )
+        # The dispatch rule MUST dispatch the agent into the room it creates. The
+        # worker registers under an explicit agent_name (LIVEKIT_DISPATCH_NAME),
+        # so without an agent dispatch here the inbound room is created but Arya
+        # never joins — the caller hears dead air. (The outbound path already
+        # dispatches the agent via RoomAgentDispatch on room creation.)
         rule = await lk.sip.create_sip_dispatch_rule(
             lk_api.CreateSIPDispatchRuleRequest(
                 trunk_ids=[trunk.sip_trunk_id],
@@ -127,6 +177,11 @@ async def setup_hospital_inbound_vobiz(
                     dispatch_rule_individual=lk_api.SIPDispatchRuleIndividual(
                         room_prefix=f"{hospital_slug}-call-",
                     )
+                ),
+                room_config=lk_api.RoomConfiguration(
+                    agents=[lk_api.RoomAgentDispatch(
+                        agent_name=settings.LIVEKIT_DISPATCH_NAME,
+                    )],
                 ),
             )
         )

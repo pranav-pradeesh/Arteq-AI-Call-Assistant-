@@ -206,12 +206,17 @@ try:
         doctor_name: str,
         appointment_date: str,
         appointment_time: str,
+        patient_age: str = "",
+        patient_gender: str = "",
+        booked_for: str = "",
         notes: str = "",
     ) -> str:
         """
-        Book a hospital appointment for the caller. Use this once you have collected
-        the patient's name, preferred doctor (or department), date (YYYY-MM-DD), and
-        time (HH:MM 24-hour). Returns confirmation text to speak to the caller.
+        Book a hospital appointment. Use this once you have verified WHO the
+        appointment is for (booked_for: "self" or the relation, e.g. "son"),
+        collected the patient's name, age and gender, the preferred doctor (or
+        department), date (YYYY-MM-DD) and time (HH:MM 24-hour) — and read the
+        date/time back to the caller. Returns confirmation text to speak.
         """
         _mark_intent(context, "book_appointment")
         hospital_id  = _ud(context, "hospital_id", "")
@@ -225,6 +230,14 @@ try:
             # Never write a booking with an unparseable time — ask, don't guess.
             logger.warning("tool_book_bad_slot", date=appointment_date, time=appointment_time)
             return "I didn't quite catch the date and time. Which day and what time would you like?"
+
+        # A booking must be in the future — reject past dates/times (e.g. the
+        # caller said "yesterday"). Enquiries about past appointments are handled
+        # by other tools and are not affected by this guard.
+        if slot < datetime.now(_IST):
+            logger.info("tool_book_past_slot", date=appointment_date, time=appointment_time)
+            return ("That date and time has already passed — appointments can only be booked "
+                    "for an upcoming date. Which future day and time would you like?")
 
         doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
 
@@ -246,6 +259,19 @@ try:
                         logger.info("tool_book_load_balanced", dept=dept.name, doctor=resolved_name)
                 except Exception as exc:
                     logger.warning("tool_book_load_balance_failed", error=str(exc))
+
+        # Fold the verified patient details into notes (structured + parseable).
+        # "Age: N" is read back by priority.extract_age(); all of it shows on the
+        # appointment in the dashboard.
+        _details = []
+        if booked_for:
+            _details.append(f"For: {booked_for}")
+        if patient_age:
+            _details.append(f"Age: {patient_age}")
+        if patient_gender:
+            _details.append(f"Gender: {patient_gender}")
+        if _details:
+            notes = "; ".join(_details) + (f". {notes}" if notes else "")
 
         # Queue priority — emergency / senior get seen earlier once paid.
         from src.services.priority import compute_priority, extract_age
@@ -789,6 +815,12 @@ try:
         new_slot = _parse_slot(new_date, new_time)
         if not new_slot:
             return "I didn't catch the new date and time. Could you repeat them?"
+
+        # Can't move an appointment into the past.
+        if new_slot < datetime.now(_IST):
+            logger.info("tool_reschedule_past_slot", date=new_date, time=new_time)
+            return ("That new date and time has already passed — please choose an upcoming "
+                    "day and time for the appointment.")
 
         try:
             from src.db.queries import (

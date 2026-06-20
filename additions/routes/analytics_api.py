@@ -33,7 +33,6 @@ To use the real _require_auth instead of the placeholder, either:
 from __future__ import annotations
 
 import json
-import math
 from datetime import date, datetime, timedelta, timezone
 from typing import Annotated, Any, Dict, List, Literal, Optional
 
@@ -41,7 +40,7 @@ import asyncpg
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
-from ..deps import AuthDep, PoolDep, require_auth, require_hospital_access
+from ..deps import AuthDep, PoolDep, require_hospital_access
 
 router = APIRouter(prefix="/admin", tags=["analytics"])
 
@@ -253,7 +252,7 @@ async def get_analytics(
 
     # The `bucket` value is safe — validated against _VALID_BUCKETS above,
     # so it is fine to interpolate it into the SQL string (it is not user text).
-    sql = f"""
+    sql = """
         SELECT
             date_trunc($3, started_at)          AS bucket,
             COUNT(*)                            AS calls,

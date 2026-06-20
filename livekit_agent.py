@@ -23,7 +23,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import random
 import re
 import sys
 import uuid
@@ -164,7 +163,7 @@ def _tts_cache_key(opts, text: str, lang: str, speaker: str) -> str:
 class _BulbulV3ChunkedStream(_SarvamChunkedStream):
     async def _run(self, output_emitter) -> None:
         import hashlib
-        from src.cache.store import tts_cache, TTS_CACHE_TTL
+        from src.cache.store import tts_cache
 
         text = _normalize_for_tts(self._input_text)
         lang = _detect_tts_lang(text, self._opts.target_language_code)
@@ -389,11 +388,11 @@ _SARVAM_COMPAT["bulbul:v3"] = {
 
 
 # Talking speed for Bulbul TTS. `pace` is Sarvam's speed multiplier — 1.0 is the
-# natural default, higher is faster. Env-tunable via TTS_PACE; 1.3 makes Arya
-# speak a bit brisker without clipping clarity. Must be applied on BOTH the
+# natural, clearest default (best pronunciation). Env-tunable via TTS_PACE; raise
+# above 1.0 only if you want Arya to speak faster. Must be applied on BOTH the
 # WebSocket and REST paths (and every TTS instance) or the prewarm cache — whose
 # key includes pace — won't match the live voice.
-_TTS_PACE = float(os.getenv("TTS_PACE", "1.3"))
+_TTS_PACE = float(os.getenv("TTS_PACE", "1.0"))
 
 
 class BulbulV3TTS(_SarvamTTS):
@@ -428,11 +427,14 @@ class BulbulV3TTS(_SarvamTTS):
 
 # ── Constants ─────────────────────────────────────────────────────────────────
 
-# Keep system prompt + last 12 messages (6 turns). A booking spans several
-# turns (name → doctor → date → time → confirm); at 2 turns the agent forgot
-# what the caller already said. The per-turn cost is dominated by the large
-# system prompt re-sent every turn, so a few short history messages are cheap.
-_MAX_CTX = 12
+# Conversation memory window: keep the system prompt + the last N context items.
+# IMPORTANT: "items" include tool calls AND tool results, not just spoken turns —
+# a single booking step (check_availability → book_appointment) can add 3–4 items,
+# so a small window made the agent forget what the caller said a moment earlier
+# ("no continuity"). 40 items comfortably holds a whole hospital call. The per-turn
+# cost is dominated by the large system prompt re-sent every turn, so retaining
+# more short history messages is cheap. Override with MAX_CTX_ITEMS if needed.
+_MAX_CTX = int(os.getenv("MAX_CTX_ITEMS", "40"))
 
 _WATCHDOG_FAREWELLS = {
     "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
@@ -499,21 +501,42 @@ _REPEAT_PATTERNS = [
 
 
 def _build_llm(premium: bool = True):
-    """Resilient LLM: Google Gemini primary → Sarvam fallback.
+    """LLM chain — Sarvam primary, Gemini optional fallback.
 
-    Google Gemini (via the OpenAI-compatible endpoint) is the primary brain.
-    Sarvam sarvam-30b is the fallback — separate provider/quota, Indian-language
-    specialist, guarantees Arya never goes silent if Google is unreachable.
+    Sarvam (sarvam-30b) is the primary brain: it is built for Indian languages
+    and produces the most natural Malayalam, and it needs no separate billing.
+
+    Google Gemini is OFF by default. The Google Cloud $300 free-trial credit
+    cannot pay for the Gemini API (Google excludes it), so a Gemini key returns
+    429 "prepayment credits depleted" on every turn — which only spams the logs
+    and adds latency from the failed-primary retry. Set GEMINI_ENABLED=true (with
+    a funded GOOGLE_API_KEY, or once Gemini is moved to Vertex AI) to add it back
+    as a fallback after Sarvam.
+
     Sarvam authenticates with an `api-subscription-key` header, not Bearer.
     """
-    google_key = os.getenv("GOOGLE_API_KEY", "")
-    model_name = os.getenv("GOOGLE_MODEL", "gemini-2.0-flash")
-
     chain: list = []
 
-    if google_key:
+    sarvam_key = os.getenv("SARVAM_API_KEY", "")
+    if sarvam_key:
         chain.append(openai.LLM(
-            model=model_name,
+            model=os.getenv("SARVAM_MODEL", "sarvam-30b"),
+            temperature=0.4,
+            # A phone receptionist speaks 1–2 short sentences, so a tight reply
+            # ceiling keeps generation time (and therefore latency) low.
+            max_completion_tokens=int(os.getenv("LLM_MAX_TOKENS", "300")),
+            client=_AsyncOpenAI(
+                api_key=sarvam_key,
+                base_url="https://api.sarvam.ai/v1",
+                default_headers={"api-subscription-key": sarvam_key},
+            ),
+        ))
+
+    gemini_on = os.getenv("GEMINI_ENABLED", "false").lower() in ("1", "true", "yes")
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+    if gemini_on and google_key:
+        chain.append(openai.LLM(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
             temperature=0.5,
             max_completion_tokens=512,
             client=_AsyncOpenAI(
@@ -522,21 +545,10 @@ def _build_llm(premium: bool = True):
             ),
         ))
 
-    sarvam_key = os.getenv("SARVAM_API_KEY", "")
-    if sarvam_key:
-        chain.append(openai.LLM(
-            model="sarvam-30b",
-            temperature=0.4,
-            client=_AsyncOpenAI(
-                api_key=sarvam_key,
-                base_url="https://api.sarvam.ai/v1",
-                default_headers={"api-subscription-key": sarvam_key},
-            ),
-        ))
-
     if not chain:
         raise RuntimeError(
-            "No LLM configured. Set GOOGLE_API_KEY in your environment."
+            "No LLM configured. Set SARVAM_API_KEY "
+            "(and optionally GEMINI_ENABLED=true + GOOGLE_API_KEY)."
         )
     if len(chain) == 1:
         return chain[0]
@@ -656,6 +668,23 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> Optional
 # System prompt builder
 # ==============================================================================
 
+# Per-language grammar hints. Only the hospital's configured language is injected
+# into the prompt (English/Manglish/Malayalam are handled by their own sections),
+# so a Malayalam hospital doesn't pay the token (and latency) cost of 8 other
+# languages' grammar on every turn.
+_GRAMMAR_BY_LANG = {
+    "hi-IN": 'Hindi: "आप" (formal). Verb agrees with gender; masculine default if unknown. Time: "सुबह दस बजे". Spoken question tag "ना?"/"क्या?".',
+    "mr-IN": 'Marathi: "तुम्ही" (formal). Time: "सकाळी दहा वाजता". Spoken question tag "ना?".',
+    "ta-IN": 'Tamil: "நீங்கள்" (formal). Questions end "-ஆ?". Time: "காலை 10 மணி". Say "வாங்க" not "வாரும்"; never "நீர்".',
+    "te-IN": 'Telugu: "మీరు" (formal). Questions end "-ఆ?". Time: "ఉదయం 10 గంటలు". Everyday speech, not literary.',
+    "kn-IN": 'Kannada: "ನೀವು" (formal). Questions end "-ಆ?". Time: "ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆ". Use "-ರಿ" honorific.',
+    "bn-IN": 'Bengali: "আপনি" (formal). Questions add "কি?". Time: "সকাল দশটা". Verb "-চ্ছেন"/"-লেন".',
+    "gu-IN": 'Gujarati: "આપ" (formal). Time: "સવારે દસ". Questions: "-ને?".',
+    "pa-IN": 'Punjabi: "ਆਪ" (formal). Time: "ਸਵੇਰੇ ਦਸ ਵਜੇ". Respectful suffix "-ਜੀ".',
+    "od-IN": 'Odia: "ଆପଣ" (formal). Time: "ସକାଳ ୧୦ ଟା". Questions end "-କି?".',
+}
+
+
 def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
     import pytz
     _IST = pytz.timezone("Asia/Kolkata")
@@ -663,6 +692,14 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
     _DAYS = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"]
     day_name = _DAYS[(now.weekday() + 1) % 7]
     time_str = now.strftime("%H:%M")
+    date_iso = now.strftime("%Y-%m-%d")
+
+    # Only inject the hospital's own language grammar (keeps the per-turn prompt
+    # small → lower LLM time-to-first-token). Malayalam/English/Manglish are
+    # covered by their dedicated sections, so ml-IN adds nothing here.
+    _agent_lang = (getattr(hospital_ctx, "agent_language", "") or "ml-IN") if hospital_ctx else "ml-IN"
+    _g = _GRAMMAR_BY_LANG.get(_agent_lang, "")
+    grammar_block = ("GRAMMAR — speak like a real native, not a translation:\n" + _g) if _g else ""
 
     if hospital_ctx:
         try:
@@ -753,32 +790,37 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
 SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
 
-LANGUAGE: Default to the hospital's configured language. Detect the caller's language from their FIRST message and stay in that language for the entire call — do NOT switch just because one word slipped into another language. Only switch if the caller explicitly says 'speak in English', 'please speak Malayalam', or similar. Reply in the matching script: Malayalam → Malayalam script, Hindi/Marathi → Devanagari, Tamil → Tamil script, Telugu → Telugu script, Kannada → Kannada script, Bengali → Bengali script, Gujarati → Gujarati script, Punjabi → Gurmukhi, Odia → Odia script. Keep replies to at most 2 short sentences and end with ONE question when you need something. Speak plainly and naturally.
+LANGUAGE: Speak Malayalam (Malayalam script) by default. If the caller clearly speaks English, reply in English; if they speak Manglish (Malayalam in Latin script), match their Manglish. Detect from their FIRST message and stay in it — don't switch over one stray word; only switch if they explicitly ask. Keep replies SHORT — ONE short sentence when possible (two at most), ending with ONE question only when you need something. Don't over-explain, list everything, repeat the caller, or add notes they didn't ask for (e.g. unsolicited "if it's an emergency..." reminders — only mention emergencies if the caller raises one). Short replies also reach the caller faster. Speak plainly and naturally, like a real receptionist.
 
 SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
 
-MALAYALAM STYLE: Use everyday spoken Malayalam (സംസാരഭാഷ) — warm and simple, never literary or Sanskritic. Say "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?".
+MALAYALAM STYLE: Speak like a warm, friendly Malayali receptionist — everyday spoken Malayalam (സംസാരഭാഷ), simple and natural, never literary or Sanskritic. Use natural everyday words: "എന്താണ് വേണ്ടത്?" not "എന്ത് ആവശ്യമാണ്?"; "ഒന്ന് പറയാമോ?" not "ദയവായി അറിയിക്കുക"; "ശരി" / "ഉറപ്പായി" for okay. Sound caring and unhurried, like a real person — not a robotic translation.
 TENSES — use natural everyday forms, no gender suffix: present "-ുന്നു" (ഞാൻ ബുക്ക് ചെയ്യുന്നു), past "-ി/-ു" (ബുക്ക് ചെയ്തു, വന്നു — never "വന്നാൾ"), future "-ും" (ബുക്ക് ചെയ്യും).
 SUFFIX SANDHI — when a word ending in the chillu "ൽ" takes a case suffix, the "ൽ" becomes "ലിന്" (never write "ൽ" + suffix directly): കാൽ → കാലിന്, മുക്കാൽ → മുക്കാലിന്, ഹോസ്പിറ്റൽ → ഹോസ്പിറ്റലിന്.
 TIME — speak the clock naturally and NEVER say the unit words "മണിക്കൂർ" (hour) or "മിനിറ്റ്" (minute). Use these forms: :00 (o'clock) = number + മണി ("ഒരു മണി" 1:00, "പത്ത് മണി" 10:00); :15 = "Xഏ കാൽ" ("10ഏ കാൽ" 10:15); :30 (half) = the "-ര" form ("ഒന്നര" 1:30, "രണ്ടര" 2:30, "പത്തര" 10:30); :45 = "Xഏ മുക്കാൽ" ("10ഏ മുക്കാൽ" 10:45); any other minute Y = "Xഏ Y" ("10ഏ 20" 10:20). Always add the part of day ("രാവിലെ 10 മണി", "ഉച്ചയ്ക്ക് 2 മണി", "വൈകുന്നേരം 5ഏ 20"). Never say "10 AM", "10:00", or "10 മണിക്കൂർ 30 മിനിറ്റ്".
+DATES (Malayalam) — understand these from the caller AND use them when speaking dates back: ഇന്ന് (today), നാളെ (tomorrow), മറ്റന്നാൾ (day after tomorrow), ഇന്നലെ (yesterday), ഈ ആഴ്ച (this week), അടുത്ത ആഴ്ച (next week), ഈ മാസം (this month), അടുത്ത മാസം (next month). Weekdays: തിങ്കളാഴ്ച=Mon, ചൊവ്വാഴ്ച=Tue, ബുധനാഴ്ച=Wed, വ്യാഴാഴ്ച=Thu, വെള്ളിയാഴ്ച=Fri, ശനിയാഴ്ച=Sat, ഞായറാഴ്ച=Sun; "next Monday" = അടുത്ത തിങ്കളാഴ്ച. From TODAY's date (below) compute the absolute date and pass it to tools as YYYY-MM-DD, but SPEAK it back the natural Malayalam way — ഇന്ന്/നാളെ/മറ്റന്നാൾ for the next few days, otherwise the weekday like "വ്യാഴാഴ്ച". NEVER read the raw "2026-06-21" or English month names to the caller.
 For Manglish callers (Malayalam in Latin script), reply in Manglish matching their mix.
 
-GRAMMAR (apply per reply language — speak like a real native, not a translation):
-Hindi/Marathi: "आप"/"तुम्ही" (formal). Verb agrees with subject gender; use masculine default if gender unknown. Times: "सुबह दस बजे"/"सकाळी दहा वाजता". Spoken questions tag "ना?" or end with "क्या?".
-Tamil: "நீங்கள்" (formal). Questions end "-ஆ?". Time: "காலை 10 மணி". Spoken contraction: "வாங்க" not "வாரும்". Never "நீர்" (archaic).
-Telugu: "మీరు" (formal). Questions end "-ఆ?". Time: "ఉదయం 10 గంటలు". Use everyday speech forms, not literary Telugu.
-Kannada: "ನೀವು" (formal). Questions end "-ಆ?". Time: "ಬೆಳಿಗ್ಗೆ 10 ಗಂಟೆ". Use "-ರಿ" honorific suffix on verbs.
-Bengali: "আপনি" (formal). Questions add "কি?" at end. Time: "সকাল দশটা". Verb endings: "-চ্ছেন" (progressive), "-লেন" (past).
-Gujarati: "આપ" (formal). Time: "સવારે દસ". Questions: "-ને?" suffix.
-Punjabi: "ਆਪ" (formal). Time: "ਸਵੇਰੇ ਦਸ ਵਜੇ". Respectful verb suffix "-ਜੀ".
-Odia: "ଆପଣ" (formal). Time: "ସକାଳ ୧୦ ଟା". Questions end "-କି?".
+{grammar_block}
+ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions. For booking, collect in this order, ONE per turn: department → who-it's-for → name → age → gender → date → time. Wait for each answer before asking the next.
 
-ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
+BOOKING FLOW — follow strictly, keep every turn SHORT, ONE question per turn:
+1. FIRST ask which department or specialty they need (skip only if already named).
+2. Check that department against the HOSPITAL section below:
+   • NOT listed → apologise in ONE short sentence that we don't have it, then call end_call. Do NOT transfer or suggest alternatives.
+3. If it exists, call check_availability for a doctor in it:
+   • NO doctor available → say so in ONE short sentence, then call end_call.
+   • A doctor IS available → continue to step 4.
+4. VERIFY WHO IT'S FOR first: ask "ഇത് താങ്കൾക്ക് വേണ്ടിയാണോ അതോ മറ്റാർക്കെങ്കിലുമാണോ?" (is this for you or for someone else?). If someone else, note the relation (mother, son, …).
+5. Then collect the PATIENT's basic details, ONE per turn: name → age → gender.
+6. Then date, then time. TIME: if they don't say morning/afternoon/evening (or AM/PM), ASK which — never assume.
+7. READ BACK the patient name, age, doctor, date and time in the caller's language and get a clear "yes" BEFORE calling book_appointment. Pass age, gender and who-it's-for to the tool (booked_for = "self" or the relation).
 
-NAME COLLECTION: When asking for the caller's name for the first time, use these exact phrasings — natural, warm, not robotic:
-Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?" | Hindi → "आपका नाम बताइए?" | Tamil → "உங்கள் பெயர் சொல்லுங்கள்?" | Telugu → "మీ పేరు చెప్పండి?" | Kannada → "ನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ?" | Bengali → "আপনার নাম বলুন?" | English → "Could I get your name?"
+NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?"
 
-CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call.
+CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call. Keep the conversation FLOWING and continuous — briefly acknowledge what the caller just said (ശരി / മനസ്സിലായി) and build on the previous turns so it feels like one natural chat, never disconnected one-off answers.
+
+NAME USE: Say the hospital's name ONCE in the opening greeting. After that do NOT repeat the hospital name in every reply — it sounds robotic. Refer to it naturally as "ഇവിടെ" (here) or "ഞങ്ങൾ/ഞങ്ങളുടെ" (we/our), and only say the full name again if the caller asks who they've reached or it's truly needed to avoid confusion.
 
 PUNCTUATION: Use full, natural punctuation — commas for pauses, a full stop to end, a question mark on questions — the voice uses it for intonation. Do NOT repeat the same word back-to-back, and do NOT echo the caller's exact words; rephrase.
 
@@ -786,19 +828,19 @@ ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" 
 
 USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency, end_call (hang up when the caller is done). Before booking, repeat name, doctor, date and time back to confirm.
 
-DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). NEVER speak the conversion or the current clock time back to the caller — just use it. If you can't tell the day or time, ask for it in one short question — never guess.
+DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). AM/PM IS CRITICAL: if the caller gives a time WITHOUT saying morning/afternoon/evening or AM/PM (e.g. just "6:30"), do NOT assume — ask "രാവിലെയോ വൈകുന്നേരമോ?" (morning or evening?). Keep the exact minutes (6:30 stays :30, never round to :00). Before booking, read the final time back in the caller's language (e.g. "വൈകുന്നേരം 6:30-ന്, ശരിയാണോ?") and get a yes. NEVER speak the current clock time back. If you can't tell the day or time, ask in one short question — never guess. NEVER book or reschedule for a PAST date/time (e.g. "yesterday"/ഇന്നലെ) — politely say that day has passed and ask for an upcoming day. (Asking ABOUT a past or existing appointment is fine — look it up normally.)
 
-ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request.
+ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request. NEVER loop: do not repeat the same question, the same information, or "anything else?" over and over. Once the caller's request is handled and they have nothing more, give one short farewell and call end_call so the call hangs up automatically — do not wait in silence.
 
 NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a department/specialty (e.g. "a cardiologist", "whichever doctor is free soonest") rather than a named doctor — AND that department/specialty is listed in the HOSPITAL section — NEVER repeat their request back as a question and NEVER make them choose. Pick ONE doctor in THAT SAME department, call check_availability, and STATE the soonest open slot directly ("Dr. X is free tomorrow at 10:00 — shall I book that?"). Only offer another doctor if that one has no slots or the caller declines.
 
 MATCH THE EXACT DEPARTMENT/DOCTOR ASKED: Answer ONLY about the specific department, specialty, or doctor the caller named. NEVER substitute a different one — if they ask about Neurology, do NOT answer with Orthopedics; if they ask for Dr. A, do NOT offer Dr. B unless they ask. First decide whether what they named actually appears in the HOSPITAL section:
  • IF IT IS LISTED: never say it is unavailable or does not exist. If they named a specialty (e.g. "a cardiology doctor"), pick a doctor from THAT department and proceed — do NOT reply "no doctor available". If they don't know a name, briefly list that department's own doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
- • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Say plainly that the hospital does not have that department/specialty/doctor here, then offer to transfer to reception (transfer_to_department) or help with a department it does have.
+ • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Apologise plainly in ONE short sentence that the hospital does not have that department/specialty/doctor here, then call end_call.
 
 NEVER invent doctor names, departments, specialties, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, do not make it up; say it is not available here and transfer.
 
-CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
+CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER use markdown or formatting of any kind — no asterisks (*), no **bold**, no bullet points, no hyphen/dash lists, no headings, no emojis, no line-by-line lists. This is a PHONE CALL: such symbols are read aloud or break the voice. Give floor/extension/department details only if asked, woven into one plain spoken sentence (e.g. "കാർഡിയോളജി രണ്ടാം നിലയിലുണ്ട്"), never as a list. NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
 
 If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → the caller may be in pain or frightened: speak gently, reassure first.
 
@@ -811,7 +853,8 @@ AFTER HOURS: if CLOSED, give next opening and offer (a) book for then, (b) callb
 HOSPITAL:
 {hosp_block}
 
-TODAY: {day_name}, {time_str} IST | STATUS: {open_status}"""
+TODAY: {day_name} {date_iso}, {time_str} IST | STATUS: {open_status}
+The date above is the real current date — compute every appointment date from it (tomorrow = this date + 1 day, etc.) and always pass dates to tools as YYYY-MM-DD."""
 
 
 def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
@@ -1209,6 +1252,15 @@ class _LatencyMeter:
         )
         return round(total_s * 1000)
 
+    def breakdown_ms(self) -> dict:
+        """Per-stage average latency in ms — shows WHERE the response delay is:
+        eou = end-of-turn / VAD settle, llm = LLM time-to-first-token,
+        tts = TTS time-to-first-byte. Sum ≈ avg_ms()."""
+        return {
+            k: (round((self._sum[k] / self._cnt[k]) * 1000) if self._cnt[k] else 0)
+            for k in self._sum
+        }
+
 
 
 # ==============================================================================
@@ -1509,6 +1561,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 outcome = transfer_dest if transfer_dest else "completed"
                 duration_s = (ended_at - call_started_at).total_seconds()
                 cost_paise = _estimate_cost_paise(duration_s, transcript)
+                # Log WHERE the per-turn latency is spent so we can see the
+                # bottleneck in the deploy logs (grep "latency_breakdown").
+                _bd = meter.breakdown_ms()
+                print(
+                    f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
+                    f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
+                    f"turns={total_turns}",
+                    file=sys.stderr, flush=True,
+                )
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
