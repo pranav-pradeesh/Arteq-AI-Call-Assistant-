@@ -804,19 +804,18 @@ For Manglish callers (Malayalam in Latin script), reply in Manglish matching the
 {grammar_block}
 ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions. For booking, collect in this order, ONE per turn: department → who-it's-for → name → age → gender → date → time. Wait for each answer before asking the next.
 
-BOOKING FLOW — follow strictly, keep every turn SHORT, ONE question per turn:
-1. FIRST ask which department or specialty they need (skip only if already named).
-2. Check that department against the HOSPITAL section below:
-   • NOT listed → apologise in ONE short sentence that we don't have it, then call end_call. Do NOT transfer or suggest alternatives.
-3. If it exists, call check_availability for a doctor in it:
-   • NO doctor available → say so in ONE short sentence, then call end_call.
-   • A doctor IS available → continue to step 4.
-4. VERIFY WHO IT'S FOR first: ask "ഇത് താങ്കൾക്ക് വേണ്ടിയാണോ അതോ മറ്റാർക്കെങ്കിലുമാണോ?" (is this for you or for someone else?). If someone else, note the relation (mother, son, …).
-5. Then collect the PATIENT's basic details, ONE per turn: name → age → gender.
-6. Then date, then time. TIME: if they don't say morning/afternoon/evening (or AM/PM), ASK which — never assume.
-7. READ BACK the patient name, age, doctor, date and time in the caller's language and get a clear "yes" BEFORE calling book_appointment. Pass age, gender and who-it's-for to the tool (booked_for = "self" or the relation).
+BOOKING FLOW — follow strictly. Ask EXACTLY ONE thing per reply; NEVER list several items in one question; NEVER re-ask anything already given.
+1. FIRST ask which department/specialty (skip if already named).
+2. Department NOT in the HOSPITAL section → apologise in ONE sentence, then end_call. No transfer, no alternatives.
+3. Department exists → call check_availability for a doctor. No doctor → say so in ONE sentence, then end_call. Doctor available → continue.
+4. Ask WHO it's for (yourself or someone else) — ask this ONCE only. Once you know (e.g. "my younger sister"), NEVER ask it again.
+5. Collect the patient's details ONE PER REPLY, asking only the next missing one: name → age → gender. Gender must be male/female/other (ആൺ/പെൺ); if the answer isn't a valid gender, briefly re-ask once.
+6. Ask the date. Then ask the time — if morning/afternoon/evening (or AM/PM) isn't clear, ask which; keep exact minutes.
+7. Read the patient name, age, doctor, date and time back ONCE, get a "yes", then call book_appointment (pass patient_age, patient_gender, booked_for = "self" or the relation). Do not loop confirmations — once they say yes, book and move on.
 
 NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?"
+
+UNCLEAR / WEAK LINE: Phone audio can break up. If a reply is empty, garbled, a stray fragment, or doesn't fit what you asked, do NOT guess and do NOT move on — say ONE short "ക്ഷമിക്കണം, ഒന്നുകൂടി പറയാമോ?" and re-ask the SAME single thing. For names, ages, dates and times (easy to mishear on a weak line), repeat what you heard back for a quick yes/no before using it. Never invent or "auto-correct" a name into something the caller didn't say.
 
 CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call. Keep the conversation FLOWING and continuous — briefly acknowledge what the caller just said (ശരി / മനസ്സിലായി) and build on the previous turns so it feels like one natural chat, never disconnected one-off answers.
 
@@ -944,6 +943,13 @@ class HospitalVoiceAgent(Agent):
         premium_llm: bool = True,
         vad=None,
     ) -> None:
+        # Pin STT to the hospital's language so auto-detect can't flip a Malayalam
+        # caller's words into Hindi/Devanagari mid-call (which garbled names).
+        # SARVAM_STT_LANGUAGE forces a specific code; "unknown"/unset falls back
+        # to the hospital's own agent_language.
+        _stt_lang = (os.getenv("SARVAM_STT_LANGUAGE", "") or "").strip()
+        if not _stt_lang or _stt_lang == "unknown":
+            _stt_lang = agent_language or "unknown"
         super().__init__(
             instructions=system_prompt,
             tools=tools,
@@ -959,7 +965,7 @@ class HospitalVoiceAgent(Agent):
             stt=sarvam.STT(
                 api_key=os.getenv("SARVAM_API_KEY", ""),
                 model=os.getenv("SARVAM_STT_MODEL", "saarika:v2.5"),
-                language=os.getenv("SARVAM_STT_LANGUAGE", "unknown"),
+                language=_stt_lang,
             ),
             # Reuse the worker-prewarmed VAD (loaded once in prewarm_fnc) so the
             # Silero model load is off the per-call critical path. Fall back to a
