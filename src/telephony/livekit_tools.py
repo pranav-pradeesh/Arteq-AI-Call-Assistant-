@@ -226,6 +226,14 @@ try:
             logger.warning("tool_book_bad_slot", date=appointment_date, time=appointment_time)
             return "I didn't quite catch the date and time. Which day and what time would you like?"
 
+        # A booking must be in the future — reject past dates/times (e.g. the
+        # caller said "yesterday"). Enquiries about past appointments are handled
+        # by other tools and are not affected by this guard.
+        if slot < datetime.now(_IST):
+            logger.info("tool_book_past_slot", date=appointment_date, time=appointment_time)
+            return ("That date and time has already passed — appointments can only be booked "
+                    "for an upcoming date. Which future day and time would you like?")
+
         doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
 
         # Load balancing: when the caller named a department (or "any doctor")
@@ -789,6 +797,12 @@ try:
         new_slot = _parse_slot(new_date, new_time)
         if not new_slot:
             return "I didn't catch the new date and time. Could you repeat them?"
+
+        # Can't move an appointment into the past.
+        if new_slot < datetime.now(_IST):
+            logger.info("tool_reschedule_past_slot", date=new_date, time=new_time)
+            return ("That new date and time has already passed — please choose an upcoming "
+                    "day and time for the appointment.")
 
         try:
             from src.db.queries import (
