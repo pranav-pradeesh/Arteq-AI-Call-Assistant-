@@ -388,11 +388,11 @@ _SARVAM_COMPAT["bulbul:v3"] = {
 
 
 # Talking speed for Bulbul TTS. `pace` is Sarvam's speed multiplier — 1.0 is the
-# natural default, higher is faster. Env-tunable via TTS_PACE; 1.3 makes Arya
-# speak a bit brisker without clipping clarity. Must be applied on BOTH the
+# natural, clearest default (best pronunciation). Env-tunable via TTS_PACE; raise
+# above 1.0 only if you want Arya to speak faster. Must be applied on BOTH the
 # WebSocket and REST paths (and every TTS instance) or the prewarm cache — whose
 # key includes pace — won't match the live voice.
-_TTS_PACE = float(os.getenv("TTS_PACE", "1.3"))
+_TTS_PACE = float(os.getenv("TTS_PACE", "1.0"))
 
 
 class BulbulV3TTS(_SarvamTTS):
@@ -787,7 +787,15 @@ Gujarati: "આપ" (formal). Time: "સવારે દસ". Questions: "-ને
 Punjabi: "ਆਪ" (formal). Time: "ਸਵੇਰੇ ਦਸ ਵਜੇ". Respectful verb suffix "-ਜੀ".
 Odia: "ଆପଣ" (formal). Time: "ସକାଳ ୧୦ ଟା". Questions end "-କି?".
 
-ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: name → date → time. Wait for the answer before asking the next.
+ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: department → name → date → time. Wait for the answer before asking the next.
+
+BOOKING FLOW — follow strictly, keep every turn SHORT:
+1. FIRST ask which department or specialty they need (skip only if they already named one).
+2. Check that department against the HOSPITAL section below:
+   • NOT listed there → apologise in ONE short sentence that we don't have that department, then call end_call. Do NOT transfer, do NOT suggest alternatives.
+3. If the department exists, call check_availability for a doctor in it:
+   • A doctor IS available → continue: collect name → date → time, confirm once briefly, then book_appointment.
+   • NO doctor available → say so in ONE short sentence, then call end_call.
 
 NAME COLLECTION: When asking for the caller's name for the first time, use these exact phrasings — natural, warm, not robotic:
 Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?" | Hindi → "आपका नाम बताइए?" | Tamil → "உங்கள் பெயர் சொல்லுங்கள்?" | Telugu → "మీ పేరు చెప్పండి?" | Kannada → "ನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ?" | Bengali → "আপনার নাম বলুন?" | English → "Could I get your name?"
@@ -810,7 +818,7 @@ NEXT-AVAILABLE DOCTOR: When the caller asks for any available doctor / a departm
 
 MATCH THE EXACT DEPARTMENT/DOCTOR ASKED: Answer ONLY about the specific department, specialty, or doctor the caller named. NEVER substitute a different one — if they ask about Neurology, do NOT answer with Orthopedics; if they ask for Dr. A, do NOT offer Dr. B unless they ask. First decide whether what they named actually appears in the HOSPITAL section:
  • IF IT IS LISTED: never say it is unavailable or does not exist. If they named a specialty (e.g. "a cardiology doctor"), pick a doctor from THAT department and proceed — do NOT reply "no doctor available". If they don't know a name, briefly list that department's own doctors and ask which one. Only after check_availability returns zero slots may you say that specific doctor has no slots that day.
- • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Say plainly that the hospital does not have that department/specialty/doctor here, then offer to transfer to reception (transfer_to_department) or help with a department it does have.
+ • IF IT IS NOT LISTED: do NOT invent it and do NOT swap in a different department or doctor as if it were the one asked. Apologise plainly in ONE short sentence that the hospital does not have that department/specialty/doctor here, then call end_call.
 
 NEVER invent doctor names, departments, specialties, timings, fees, or availability — if it is neither in the HOSPITAL section nor a tool result, do not make it up; say it is not available here and transfer.
 
