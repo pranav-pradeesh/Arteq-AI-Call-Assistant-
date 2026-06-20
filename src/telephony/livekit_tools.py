@@ -206,12 +206,17 @@ try:
         doctor_name: str,
         appointment_date: str,
         appointment_time: str,
+        patient_age: str = "",
+        patient_gender: str = "",
+        booked_for: str = "",
         notes: str = "",
     ) -> str:
         """
-        Book a hospital appointment for the caller. Use this once you have collected
-        the patient's name, preferred doctor (or department), date (YYYY-MM-DD), and
-        time (HH:MM 24-hour). Returns confirmation text to speak to the caller.
+        Book a hospital appointment. Use this once you have verified WHO the
+        appointment is for (booked_for: "self" or the relation, e.g. "son"),
+        collected the patient's name, age and gender, the preferred doctor (or
+        department), date (YYYY-MM-DD) and time (HH:MM 24-hour) — and read the
+        date/time back to the caller. Returns confirmation text to speak.
         """
         _mark_intent(context, "book_appointment")
         hospital_id  = _ud(context, "hospital_id", "")
@@ -254,6 +259,19 @@ try:
                         logger.info("tool_book_load_balanced", dept=dept.name, doctor=resolved_name)
                 except Exception as exc:
                     logger.warning("tool_book_load_balance_failed", error=str(exc))
+
+        # Fold the verified patient details into notes (structured + parseable).
+        # "Age: N" is read back by priority.extract_age(); all of it shows on the
+        # appointment in the dashboard.
+        _details = []
+        if booked_for:
+            _details.append(f"For: {booked_for}")
+        if patient_age:
+            _details.append(f"Age: {patient_age}")
+        if patient_gender:
+            _details.append(f"Gender: {patient_gender}")
+        if _details:
+            notes = "; ".join(_details) + (f". {notes}" if notes else "")
 
         # Queue priority — emergency / senior get seen earlier once paid.
         from src.services.priority import compute_priority, extract_age
