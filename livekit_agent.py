@@ -787,15 +787,19 @@ Gujarati: "આપ" (formal). Time: "સવારે દસ". Questions: "-ને
 Punjabi: "ਆਪ" (formal). Time: "ਸਵੇਰੇ ਦਸ ਵਜੇ". Respectful verb suffix "-ਜੀ".
 Odia: "ଆପଣ" (formal). Time: "ସକାଳ ୧୦ ଟା". Questions end "-କି?".
 
-ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions (do NOT say "what is your name, doctor and date?"). For booking, collect in this order, one per turn: department → name → date → time. Wait for the answer before asking the next.
+ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle questions. For booking, collect in this order, ONE per turn: department → who-it's-for → name → age → gender → date → time. Wait for each answer before asking the next.
 
-BOOKING FLOW — follow strictly, keep every turn SHORT:
-1. FIRST ask which department or specialty they need (skip only if they already named one).
+BOOKING FLOW — follow strictly, keep every turn SHORT, ONE question per turn:
+1. FIRST ask which department or specialty they need (skip only if already named).
 2. Check that department against the HOSPITAL section below:
-   • NOT listed there → apologise in ONE short sentence that we don't have that department, then call end_call. Do NOT transfer, do NOT suggest alternatives.
-3. If the department exists, call check_availability for a doctor in it:
-   • A doctor IS available → continue: collect name → date → time, confirm once briefly, then book_appointment.
+   • NOT listed → apologise in ONE short sentence that we don't have it, then call end_call. Do NOT transfer or suggest alternatives.
+3. If it exists, call check_availability for a doctor in it:
    • NO doctor available → say so in ONE short sentence, then call end_call.
+   • A doctor IS available → continue to step 4.
+4. VERIFY WHO IT'S FOR first: ask "ഇത് താങ്കൾക്ക് വേണ്ടിയാണോ അതോ മറ്റാർക്കെങ്കിലുമാണോ?" (is this for you or for someone else?). If someone else, note the relation (mother, son, …).
+5. Then collect the PATIENT's basic details, ONE per turn: name → age → gender.
+6. Then date, then time. TIME: if they don't say morning/afternoon/evening (or AM/PM), ASK which — never assume.
+7. READ BACK the patient name, age, doctor, date and time in the caller's language and get a clear "yes" BEFORE calling book_appointment. Pass age, gender and who-it's-for to the tool (booked_for = "self" or the relation).
 
 NAME COLLECTION: When asking for the caller's name for the first time, use these exact phrasings — natural, warm, not robotic:
 Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?" | Hindi → "आपका नाम बताइए?" | Tamil → "உங்கள் பெயர் சொல்லுங்கள்?" | Telugu → "మీ పేరు చెప్పండి?" | Kannada → "ನಿಮ್ಮ ಹೆಸರು ಹೇಳಿ?" | Bengali → "আপনার নাম বলুন?" | English → "Could I get your name?"
@@ -810,7 +814,7 @@ ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" 
 
 USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency, end_call (hang up when the caller is done). Before booking, repeat name, doctor, date and time back to confirm.
 
-DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). NEVER speak the conversion or the current clock time back to the caller — just use it. If you can't tell the day or time, ask for it in one short question — never guess. NEVER book or reschedule for a PAST date/time (e.g. "yesterday"/ഇന്നലെ) — politely say that day has passed and ask for an upcoming day. (Asking ABOUT a past or existing appointment is fine — look it up normally.)
+DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). AM/PM IS CRITICAL: if the caller gives a time WITHOUT saying morning/afternoon/evening or AM/PM (e.g. just "6:30"), do NOT assume — ask "രാവിലെയോ വൈകുന്നേരമോ?" (morning or evening?). Keep the exact minutes (6:30 stays :30, never round to :00). Before booking, read the final time back in the caller's language (e.g. "വൈകുന്നേരം 6:30-ന്, ശരിയാണോ?") and get a yes. NEVER speak the current clock time back. If you can't tell the day or time, ask in one short question — never guess. NEVER book or reschedule for a PAST date/time (e.g. "yesterday"/ഇന്നലെ) — politely say that day has passed and ask for an upcoming day. (Asking ABOUT a past or existing appointment is fine — look it up normally.)
 
 ENDING THE CALL: When the caller signals they are finished — "ok thanks", "that's all", "no, nothing else", "goodbye" — do NOT ask another question and do NOT re-offer help. Say ONE short farewell and call end_call. Only keep the conversation going if they actually raise a new request. NEVER loop: do not repeat the same question, the same information, or "anything else?" over and over. Once the caller's request is handled and they have nothing more, give one short farewell and call end_call so the call hangs up automatically — do not wait in silence.
 
@@ -1234,6 +1238,15 @@ class _LatencyMeter:
         )
         return round(total_s * 1000)
 
+    def breakdown_ms(self) -> dict:
+        """Per-stage average latency in ms — shows WHERE the response delay is:
+        eou = end-of-turn / VAD settle, llm = LLM time-to-first-token,
+        tts = TTS time-to-first-byte. Sum ≈ avg_ms()."""
+        return {
+            k: (round((self._sum[k] / self._cnt[k]) * 1000) if self._cnt[k] else 0)
+            for k in self._sum
+        }
+
 
 
 # ==============================================================================
@@ -1534,6 +1547,15 @@ async def entrypoint(ctx: JobContext) -> None:
                 outcome = transfer_dest if transfer_dest else "completed"
                 duration_s = (ended_at - call_started_at).total_seconds()
                 cost_paise = _estimate_cost_paise(duration_s, transcript)
+                # Log WHERE the per-turn latency is spent so we can see the
+                # bottleneck in the deploy logs (grep "latency_breakdown").
+                _bd = meter.breakdown_ms()
+                print(
+                    f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
+                    f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
+                    f"turns={total_turns}",
+                    file=sys.stderr, flush=True,
+                )
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
