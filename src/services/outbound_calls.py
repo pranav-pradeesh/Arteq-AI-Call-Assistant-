@@ -1,15 +1,20 @@
 """
 Outbound Calls — proactive reminder, confirmation, callback, followup,
-and campaign calls via LiveKit SIP (Plivo carrier).
+and campaign calls via LiveKit SIP.
 
-LiveKit dials the patient via the Plivo SIP outbound trunk and creates a room
-with the call context stored in room metadata. The agent worker auto-dispatches
-to the room and reads the context to tailor its opening and script.
+LiveKit dials the patient via the configured SIP carrier's outbound trunk and
+creates a room with the call context in room metadata. The agent worker
+auto-dispatches to the room and reads the context to tailor its opening/script.
 
-Requires LIVEKIT_SIP_OUTBOUND_TRUNK_ID to be set (run POST /admin/sip/setup once).
+Carrier is selected by TELEPHONY_CARRIER (default "vobiz", the current carrier):
+  • vobiz → src.services.vobiz_sip.dial_outbound_vobiz
+            (run POST /admin/sip/vobiz/setup once → LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID)
+  • plivo → src.services.livekit_sip.dial_outbound (legacy)
+            (run POST /admin/sip/setup once → LIVEKIT_SIP_OUTBOUND_TRUNK_ID)
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime
 
 import structlog
@@ -29,13 +34,25 @@ async def _dial(
     context: dict,
     tenant_slug: str = "default",
 ) -> bool:
-    """Dial patient via LiveKit SIP (Plivo carrier). Returns True on success."""
+    """Dial patient via the configured SIP carrier. Returns True on success.
+
+    Carrier selected by TELEPHONY_CARRIER (default "vobiz" — the current sole
+    carrier). The legacy Plivo path stays reachable with TELEPHONY_CARRIER=plivo.
+    """
+    carrier = (os.getenv("TELEPHONY_CARRIER", "vobiz") or "vobiz").strip().lower()
     try:
-        from src.services.livekit_sip import dial_outbound
-        room = await dial_outbound(patient_phone, tenant_slug, context)
+        if carrier == "vobiz":
+            from src.services.vobiz_sip import dial_outbound_vobiz
+            room = await dial_outbound_vobiz(patient_phone, tenant_slug, context)
+        else:
+            from src.services.livekit_sip import dial_outbound
+            room = await dial_outbound(patient_phone, tenant_slug, context)
         return bool(room)
     except Exception as exc:
-        logger.error("outbound_dial_error", error=str(exc), patient=patient_phone[-4:])
+        logger.error(
+            "outbound_dial_error", error=str(exc), carrier=carrier,
+            patient=patient_phone[-4:],
+        )
         return False
 
 
