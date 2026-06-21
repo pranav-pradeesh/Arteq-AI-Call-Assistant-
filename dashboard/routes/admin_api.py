@@ -919,7 +919,7 @@ async def list_calls(hospital_id: str, limit: int = 50):
     async with pool.acquire() as conn:
         rows = await conn.fetch(
             """SELECT call_id, caller, started_at, ended_at, total_turns,
-                      latency_avg_ms, intents, outcome, recording_url
+                      latency_avg_ms, cost_paise, intents, outcome, recording_url
                FROM call_logs WHERE hospital_id=$1
                ORDER BY started_at DESC LIMIT $2""",
             hospital_id, min(limit, 200),
@@ -932,6 +932,8 @@ async def list_calls(hospital_id: str, limit: int = 50):
             "ended_at": r["ended_at"].isoformat() if r["ended_at"] else None,
             "total_turns": r["total_turns"] or 0,
             "latency_avg_ms": r["latency_avg_ms"] or 0,
+            "cost_paise": r["cost_paise"] or 0,
+            "cost_inr": round((r["cost_paise"] or 0) / 100.0, 2),
             "intents": _maybe_json(r["intents"]) or [],
             "outcome": r["outcome"] or "unknown",
             "recording_url": r["recording_url"] or None,
@@ -946,7 +948,7 @@ async def get_call(hospital_id: str, call_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT call_id, caller, started_at, ended_at, total_turns,
-                      latency_avg_ms, intents, outcome, transcript, recording_url
+                      latency_avg_ms, cost_paise, intents, outcome, transcript, recording_url
                FROM call_logs WHERE hospital_id=$1 AND call_id=$2""",
             hospital_id, call_id,
         )
@@ -959,6 +961,8 @@ async def get_call(hospital_id: str, call_id: str):
         "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
         "total_turns": row["total_turns"] or 0,
         "latency_avg_ms": row["latency_avg_ms"] or 0,
+        "cost_paise": row["cost_paise"] or 0,
+        "cost_inr": round((row["cost_paise"] or 0) / 100.0, 2),
         "intents": _maybe_json(row["intents"]) or [],
         "outcome": row["outcome"] or "unknown",
         "transcript": _maybe_json(row["transcript"]) or [],
@@ -1010,18 +1014,22 @@ async def get_stats(hospital_id: str, days: int = 7):
                  COUNT(*)::int                          AS total_calls,
                  AVG(latency_avg_ms)::int               AS avg_latency_ms,
                  COUNT(*) FILTER (WHERE outcome='transferred')::int AS transfers,
-                 AVG(total_turns)::float                AS avg_turns
+                 AVG(total_turns)::float                AS avg_turns,
+                 COALESCE(SUM(cost_paise), 0)::int      AS total_cost_paise
                FROM call_logs
                WHERE hospital_id=$1
                  AND started_at > NOW() - ($2 || ' days')::interval""",
             hospital_id,
             str(int(days)),
         )
+    total_cost_paise = row["total_cost_paise"] or 0
     return {
         "total_calls": row["total_calls"] or 0,
         "avg_latency_ms": row["avg_latency_ms"] or 0,
         "transfers": row["transfers"] or 0,
         "avg_turns": round(row["avg_turns"] or 0, 1),
+        "total_cost_paise": total_cost_paise,
+        "total_cost_inr": round(total_cost_paise / 100.0, 2),
         "days": days,
     }
 
