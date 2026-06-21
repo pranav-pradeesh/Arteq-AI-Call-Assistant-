@@ -151,6 +151,11 @@ class Settings(BaseSettings):
     VOBIZ_API_SECRET: str = ""
     VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
     VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
+    # SIP credentials LiveKit uses to authenticate OUTBOUND calls to Vobiz. Must
+    # match a Vobiz Credentials-List entry on the outbound trunk. Falls back to
+    # VOBIZ_API_KEY/SECRET if unset (legacy behaviour).
+    VOBIZ_SIP_USERNAME: str = ""
+    VOBIZ_SIP_PASSWORD: str = ""
     LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID: str = "" # set after POST /admin/sip/vobiz/setup
 
     # Vobiz call recording (disabled by default — check storage pricing in Vobiz console)
