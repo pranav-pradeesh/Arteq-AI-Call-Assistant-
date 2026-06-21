@@ -1320,18 +1320,21 @@ def _strip_tool_syntax(text: str) -> str:
 
 
 # Provider rates (paise). Tune via env if pricing changes; defaults reflect
-# Sarvam's published list as of 2026-06: Saaras STT ₹30/audio-hr, Bulbul TTS
-# ₹0.30 per 1000 chars. Groq LLaMA on the free tier costs us ~0 per call.
+# Sarvam's published list as of 2026-06 (Saarika STT ₹30/audio-hr, Bulbul TTS
+# ₹0.30 per 1000 chars) and Gemini 2.5-flash for the LLM ($0.30/1M input +
+# $2.50/1M output ≈ ~10 paise per short receptionist turn at ~₹85/$). Set
+# LLM_PAISE_PER_TURN=0 if LLM_PROVIDER=sarvam (bundled, no separate LLM billing).
 _STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
 _TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
-_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "0"))   # Groq free tier
+_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "10"))  # Gemini 2.5-flash ≈ 10 paise/turn
 
 
 def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
     """Rough per-call cost in paise. STT bills on call duration (it transcribes
     the whole audio stream), TTS bills on the characters Arya actually spoke, and
-    the LLM is ~free on Groq. Good enough to surface a per-call rupee figure on
-    the dashboard and catch a runaway-cost regression — not an invoice."""
+    the LLM (Gemini 2.5-flash) bills ~10 paise per turn. Good enough to surface a
+    per-call rupee figure on the dashboard and catch a runaway-cost regression —
+    not an invoice, and it excludes telephony (Vobiz) and LiveKit minutes."""
     minutes = max(duration_s, 0.0) / 60.0
     stt = minutes * _STT_PAISE_PER_MIN
     spoken_chars = sum(
