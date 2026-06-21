@@ -509,6 +509,26 @@ class BulbulV3TTS(_SarvamTTS):
 # more short history messages is cheap. Override with MAX_CTX_ITEMS if needed.
 _MAX_CTX = int(os.getenv("MAX_CTX_ITEMS", "40"))
 
+# ── Realtime turn-taking knobs ─────────────────────────────────────────────────
+# How fast Arya decides the caller has finished and starts replying — the single
+# biggest lever on conversational "realtime" feel (it sets the EoU portion of
+# per-turn latency). LOWER = snappier, but more risk of cutting a caller off in a
+# natural mid-sentence pause; the defaults are a safe balance for elderly /
+# Malayalam callers. Tune on REAL calls via env, no redeploy:
+#   VAD_MIN_SILENCE        end-of-speech silence before turn-end (s). The main
+#                          dial — try 0.10–0.15 for a snappier feel; raise back
+#                          toward 0.2 if callers report being cut off.
+#   ENDPOINTING_MIN_DELAY  extra post-speech wait before the LLM fires (s).
+#   ENDPOINTING_MAX_DELAY  cap so a slow speaker pausing mid-thought isn't cut off.
+#   VAD_MIN_SPEECH         min speech to count as a turn (s) — filters noise bursts.
+#   VAD_ACTIVATION_THRESHOLD  Silero speech-prob gate (phone/SIP audio scores low,
+#                          so don't raise this much or real speech is dropped).
+_VAD_MIN_SILENCE = float(os.getenv("VAD_MIN_SILENCE", "0.2"))
+_VAD_MIN_SPEECH = float(os.getenv("VAD_MIN_SPEECH", "0.3"))
+_VAD_ACTIVATION = float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.5"))
+_ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINTING_MIN_DELAY", "0.2"))
+_ENDPOINT_MAX_DELAY = float(os.getenv("ENDPOINTING_MAX_DELAY", "3.0"))
+
 _WATCHDOG_FAREWELLS = {
     "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
     "hi-IN":      "क्षमा करें, कॉल का अधिकतम समय समाप्त हो गया। ज़रूरत हो तो दोबारा कॉल करें। धन्यवाद, अलविदा!",
@@ -1101,9 +1121,9 @@ class HospitalVoiceAgent(Agent):
             # from reaching STT. min_speech_duration=0.1 filters sub-100ms noise
             # bursts without affecting speech detection.
             vad=vad or silero.VAD.load(
-                min_silence_duration=0.2,
-                activation_threshold=0.5,
-                min_speech_duration=0.3,
+                min_silence_duration=_VAD_MIN_SILENCE,
+                activation_threshold=_VAD_ACTIVATION,
+                min_speech_duration=_VAD_MIN_SPEECH,
             ),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
@@ -1640,7 +1660,9 @@ async def entrypoint(ctx: JobContext) -> None:
         #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
         #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
         turn_handling=TurnHandlingOptions(
-            endpointing=EndpointingOptions(min_delay=0.2, max_delay=3.0),
+            endpointing=EndpointingOptions(
+                min_delay=_ENDPOINT_MIN_DELAY, max_delay=_ENDPOINT_MAX_DELAY
+            ),
             preemptive_generation=PreemptiveGenerationOptions(enabled=True),
         ),
         max_tool_steps=2,
@@ -1904,9 +1926,9 @@ def prewarm(proc) -> None:
     the critical path so the first turn responds sooner.
     """
     proc.userdata["vad"] = silero.VAD.load(
-        min_silence_duration=0.2,
-        activation_threshold=0.5,
-        min_speech_duration=0.3,
+        min_silence_duration=_VAD_MIN_SILENCE,
+        activation_threshold=_VAD_ACTIVATION,
+        min_speech_duration=_VAD_MIN_SPEECH,
     )
 
 
