@@ -574,54 +574,105 @@ _REPEAT_PATTERNS = [
 
 
 def _build_llm(premium: bool = True):
-    """LLM chain — Sarvam primary, Gemini optional fallback.
+    """LLM chain — selectable primary brain with a Sarvam safety net.
 
-    Sarvam (sarvam-30b) is the primary brain: it is built for Indian languages
-    and produces the most natural Malayalam, and it needs no separate billing.
+    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
+      • "gemini" → Google Gemini Flash (gemini-2.5-flash). Low time-to-first-token
+                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong
+                   Malayalam, so it cuts latency without the quality hit a
+                   pure-English model brings. REQUIRES a FUNDED Google API key
+                   (real prepaid billing or Vertex) — the Google free-trial credit
+                   CANNOT pay for the Gemini API and 429s every turn. If your key
+                   is unfunded, set LLM_PROVIDER=sarvam, otherwise every turn fails
+                   to Gemini and falls back to Sarvam, ADDING latency.
+      • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
+                   no extra billing — but a higher TTFT. The quality-first / safe
+                   choice. Runs alone.
+      • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
+                   an ACTIVE Groq developer plan (currently inactive).
 
-    Google Gemini is OFF by default. The Google Cloud $300 free-trial credit
-    cannot pay for the Gemini API (Google excludes it), so a Gemini key returns
-    429 "prepayment credits depleted" on every turn — which only spams the logs
-    and adds latency from the failed-primary retry. Set GEMINI_ENABLED=true (with
-    a funded GOOGLE_API_KEY, or once Gemini is moved to Vertex AI) to add it back
-    as a fallback after Sarvam.
+    A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback
+    (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
+    outage degrades to the Indian-language brain rather than dropping the call.
+    Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
+    extra fallback when it isn't already the primary (back-compat).
 
     Sarvam authenticates with an `api-subscription-key` header, not Bearer.
     """
-    chain: list = []
-
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
-    if sarvam_key:
-        chain.append(openai.LLM(
+    # A phone receptionist speaks 1–2 short sentences, so a tight reply ceiling
+    # keeps generation time (and therefore latency) low. Shared by all brains.
+    _max_tokens = int(os.getenv("LLM_MAX_TOKENS", "300"))
+
+    def _gemini() -> Optional[object]:
+        if not google_key:
+            return None
+        return openai.LLM(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=google_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            ),
+        )
+
+    def _groq() -> Optional[object]:
+        if not groq_key:
+            return None
+        return openai.LLM(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+            ),
+        )
+
+    def _sarvam() -> Optional[object]:
+        if not sarvam_key:
+            return None
+        return openai.LLM(
             model=os.getenv("SARVAM_MODEL", "sarvam-30b"),
             temperature=0.4,
-            # A phone receptionist speaks 1–2 short sentences, so a tight reply
-            # ceiling keeps generation time (and therefore latency) low.
-            max_completion_tokens=int(os.getenv("LLM_MAX_TOKENS", "300")),
+            max_completion_tokens=_max_tokens,
             client=_AsyncOpenAI(
                 api_key=sarvam_key,
                 base_url="https://api.sarvam.ai/v1",
                 default_headers={"api-subscription-key": sarvam_key},
             ),
-        ))
+        )
 
+    provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
+    # A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback;
+    # Sarvam primary runs alone (no dead fallback parked behind it). An
+    # unrecognised value degrades to the safe Sarvam path.
+    primary = {"gemini": _gemini, "groq": _groq, "sarvam": _sarvam}.get(provider, _sarvam)
+    builders = (primary,) if primary is _sarvam else (primary, _sarvam)
+
+    chain: list = []
+    gemini_in_chain = False
+    for build in builders:
+        llm = build()
+        if llm is not None:
+            chain.append(llm)
+            gemini_in_chain = gemini_in_chain or (build is _gemini)
+
+    # Back-compat: GEMINI_ENABLED appends Gemini as a further fallback when it is
+    # not already the primary.
     gemini_on = os.getenv("GEMINI_ENABLED", "false").lower() in ("1", "true", "yes")
-    google_key = os.getenv("GOOGLE_API_KEY", "")
-    if gemini_on and google_key:
-        chain.append(openai.LLM(
-            model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
-            temperature=0.5,
-            max_completion_tokens=512,
-            client=_AsyncOpenAI(
-                api_key=google_key,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            ),
-        ))
+    if gemini_on and not gemini_in_chain:
+        g = _gemini()
+        if g is not None:
+            chain.append(g)
 
     if not chain:
         raise RuntimeError(
-            "No LLM configured. Set SARVAM_API_KEY "
-            "(and optionally GEMINI_ENABLED=true + GOOGLE_API_KEY)."
+            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
+            "SARVAM_API_KEY, and/or GROQ_API_KEY."
         )
     if len(chain) == 1:
         return chain[0]
@@ -1269,18 +1320,21 @@ def _strip_tool_syntax(text: str) -> str:
 
 
 # Provider rates (paise). Tune via env if pricing changes; defaults reflect
-# Sarvam's published list as of 2026-06: Saaras STT ₹30/audio-hr, Bulbul TTS
-# ₹0.30 per 1000 chars. Groq LLaMA on the free tier costs us ~0 per call.
+# Sarvam's published list as of 2026-06 (Saarika STT ₹30/audio-hr, Bulbul TTS
+# ₹0.30 per 1000 chars) and Gemini 2.5-flash for the LLM ($0.30/1M input +
+# $2.50/1M output ≈ ~10 paise per short receptionist turn at ~₹85/$). Set
+# LLM_PAISE_PER_TURN=0 if LLM_PROVIDER=sarvam (bundled, no separate LLM billing).
 _STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
 _TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
-_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "0"))   # Groq free tier
+_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "10"))  # Gemini 2.5-flash ≈ 10 paise/turn
 
 
 def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
     """Rough per-call cost in paise. STT bills on call duration (it transcribes
     the whole audio stream), TTS bills on the characters Arya actually spoke, and
-    the LLM is ~free on Groq. Good enough to surface a per-call rupee figure on
-    the dashboard and catch a runaway-cost regression — not an invoice."""
+    the LLM (Gemini 2.5-flash) bills ~10 paise per turn. Good enough to surface a
+    per-call rupee figure on the dashboard and catch a runaway-cost regression —
+    not an invoice, and it excludes telephony (Vobiz) and LiveKit minutes."""
     minutes = max(duration_s, 0.0) / 60.0
     stt = minutes * _STT_PAISE_PER_MIN
     spoken_chars = sum(
