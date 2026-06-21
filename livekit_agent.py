@@ -205,9 +205,20 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         # Mixed-script text (e.g. "Good morning! Welcome to Hospital, <native question>"):
         # split into per-script segments and synthesize each with the correct lang so
         # English words get English phonetics and native words get native phonetics.
+        # This is the COMMON case for a Malayalam receptionist (native speech with
+        # embedded English terms), so it must stream: synthesize each segment over the
+        # WebSocket and push audio as it arrives, so the caller hears segment 1 while
+        # the rest are still synthesizing — TTFB ≈ first-segment latency instead of the
+        # whole utterance. Fall back to the seamless REST PCM-concat path on WS failure.
         segments = _split_mixed_script(text, lang)
         if len(segments) > 1:
-            await self._run_multi(output_emitter, segments, speaker, rest_key)
+            try:
+                await self._run_multi_ws(output_emitter, segments, speaker, ws_key)
+            except Exception as exc:
+                _sarvam_log.warning(
+                    "multi-segment WS TTS failed (%s), falling back to REST", exc
+                )
+                await self._run_multi_rest(output_emitter, segments, speaker, rest_key)
             return
 
         try:
@@ -318,14 +329,76 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             output_emitter.push(chunk)
         tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
 
-    async def _run_multi(
+    async def _run_multi_ws(
         self, output_emitter, segments: list, speaker: str, cache_key: str
     ) -> None:
-        """Synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
+        """Stream mixed-script text segment-by-segment over the WebSocket.
+
+        Each segment is synthesized with its own language code (so English words
+        use English phonetics and native-script words use native phonetics) and its
+        audio chunks are pushed the moment they arrive. The first segment starts
+        playing while later segments are still synthesizing, so time-to-first-byte
+        is roughly the first segment's latency rather than the whole utterance's.
+
+        Synthesis is faster than realtime, so pushing each segment right after the
+        previous one keeps the emitter buffer ahead of playback — the segments play
+        back as one continuous stream with no gap. Raises on any failure so the
+        caller can fall back to the seamless REST PCM-concat path.
+        """
+        from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        if self._tts._ws_client is None:
+            self._tts._ws_client = AsyncSarvamAI(api_subscription_key=self._opts.api_key)
+
+        chunks: list[bytes] = []
+        initialized = False
+        mime = "audio/mpeg"
+
+        for seg_text, seg_lang in segments:
+            seg_speaker = _voice_for_lang(seg_lang, speaker)
+            async with self._tts._ws_client.text_to_speech_streaming.connect(
+                model="bulbul:v3",
+                send_completion_event=True,
+            ) as ws:
+                await ws.configure(
+                    target_language_code=seg_lang, speaker=seg_speaker, pace=self._opts.pace
+                )
+                await ws.convert(seg_text)
+                await ws.flush()
+
+                async for message in ws:
+                    if isinstance(message, AudioOutput):
+                        chunk = _b64.b64decode(message.data.audio)
+                        if not initialized:
+                            output_emitter.initialize(
+                                request_id="ws-multi",
+                                sample_rate=self._tts.sample_rate,
+                                num_channels=self._tts.num_channels,
+                                mime_type=mime,
+                            )
+                            initialized = True
+                        output_emitter.push(chunk)
+                        chunks.append(chunk)
+                    elif isinstance(message, EventResponse):
+                        if getattr(message.data, "event_type", "") == "final":
+                            break
+
+        if not initialized:
+            raise RuntimeError("multi-segment WS TTS: no audio chunks received")
+        # Cache under the WS key (full text) so replays hit the streaming-format
+        # cache at the top of _run, same as the single-segment WS path.
+        tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
+
+    async def _run_multi_rest(
+        self, output_emitter, segments: list, speaker: str, cache_key: str
+    ) -> None:
+        """REST fallback: synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
 
         Each segment is synthesized with its own language code so English words
         use English phonetics and native-script words use native phonetics.
-        The joined PCM is pushed as a single seamless audio stream.
+        The joined PCM is pushed as a single seamless audio stream. Slower than the
+        WS path (waits for full synthesis before any audio) but gap-free.
         """
         import io
         import wave
