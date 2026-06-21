@@ -81,8 +81,17 @@ async def setup_vobiz_outbound_trunk() -> str:
                     name="Vobiz Outbound",
                     address=_VOBIZ_SIP_HOST,
                     numbers=[getattr(settings, "VOBIZ_PHONE_NUMBER", "")],
-                    auth_username=getattr(settings, "VOBIZ_API_KEY", ""),
-                    auth_password=getattr(settings, "VOBIZ_API_SECRET", ""),
+                    # Dedicated SIP credentials (match the Vobiz Credentials-List
+                    # entry on the outbound trunk); fall back to the REST API
+                    # key/secret for back-compat if the SIP creds aren't set.
+                    auth_username=(
+                        getattr(settings, "VOBIZ_SIP_USERNAME", "")
+                        or getattr(settings, "VOBIZ_API_KEY", "")
+                    ),
+                    auth_password=(
+                        getattr(settings, "VOBIZ_SIP_PASSWORD", "")
+                        or getattr(settings, "VOBIZ_API_SECRET", "")
+                    ),
                     transport=lk_api.SIPTransport.SIP_TRANSPORT_TLS,
                 )
             )
@@ -201,6 +210,27 @@ async def setup_hospital_inbound_vobiz(
 
 # ── Runtime: outbound calls ────────────────────────────────────────────────────
 
+def _format_vobiz_dest(phone_e164: str) -> str:
+    """Format the callee number for Vobiz's outbound dial plan.
+
+    Vobiz returned SIP 404 (NOTFOUND) for raw E.164 (+91…), and inbound caller-IDs
+    arrive national 0-prefixed (e.g. 08848866921), so the dial plan is national by
+    default. Override with VOBIZ_DIAL_FORMAT if 404 persists:
+      national → 0XXXXXXXXXX  (default)    cc    → 91XXXXXXXXXX (digits, no +)
+      local    → XXXXXXXXXX   (10-digit)   e164  → +91XXXXXXXXXX
+    """
+    fmt = (getattr(settings, "VOBIZ_DIAL_FORMAT", "") or "national").strip().lower()
+    digits = phone_e164.lstrip("+")
+    last10 = digits[-10:]
+    if fmt == "e164":
+        return phone_e164 if phone_e164.startswith("+") else f"+{digits}"
+    if fmt == "cc":
+        return digits
+    if fmt == "local":
+        return last10
+    return "0" + last10  # national (default)
+
+
 async def dial_outbound_vobiz(
     patient_phone: str,
     hospital_slug: str,
@@ -226,6 +256,7 @@ async def dial_outbound_vobiz(
 
     room_name = f"{hospital_slug}-call-{uuid.uuid4().hex[:8]}"
     phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
+    dial_to = _format_vobiz_dest(phone)  # Vobiz dial-plan format (default national 0-prefix)
 
     lk = None
     try:
@@ -248,7 +279,11 @@ async def dial_outbound_vobiz(
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
                 sip_trunk_id=trunk_id,
-                sip_url=f"sip:{phone}@{_VOBIZ_SIP_HOST}",
+                # The number to dial, in Vobiz's dial-plan format (see
+                # _format_vobiz_dest). The trunk supplies the SIP address
+                # (sip.vobiz.ai) and the caller-ID (its `numbers`); this SDK has no
+                # `sip_url` field — the callee goes in `sip_call_to`.
+                sip_call_to=dial_to,
                 room_name=room_name,
                 participant_identity=f"patient-{phone[-4:]}",
                 participant_name="Patient",
@@ -260,6 +295,7 @@ async def dial_outbound_vobiz(
         logger.info(
             "vobiz_outbound_dialed",
             patient=phone[-4:],
+            dialed=dial_to,
             room=room_name,
             call_type=context.get("call_type"),
         )

@@ -324,7 +324,7 @@ async def dial_outbound(
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
                 sip_trunk_id=trunk_id,
-                sip_url=f"sip:{phone}@{sip_proxy}",
+                sip_call_to=phone,
                 room_name=room_name,
                 participant_identity=f"patient-{phone[-4:]}",
                 participant_name="Patient",
@@ -367,11 +367,6 @@ async def transfer_call_in_room(
         settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
         or settings.LIVEKIT_SIP_OUTBOUND_TRUNK_ID
     )
-    sip_proxy = (
-        "sip.exotel.com"
-        if settings.LIVEKIT_SIP_EXOTEL_OUTBOUND_TRUNK_ID
-        else "sip.plivo.com"
-    )
     if not trunk_id:
         logger.warning(
             "sip_transfer_skipped",
@@ -392,7 +387,7 @@ async def transfer_call_in_room(
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
                 sip_trunk_id=trunk_id,
-                sip_url=f"sip:{phone}@{sip_proxy}",
+                sip_call_to=phone,
                 room_name=room_name,
                 participant_identity=f"transfer-{phone[-4:]}",
                 participant_name=participant_name,

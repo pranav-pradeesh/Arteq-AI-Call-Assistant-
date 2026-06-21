@@ -205,9 +205,20 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
         # Mixed-script text (e.g. "Good morning! Welcome to Hospital, <native question>"):
         # split into per-script segments and synthesize each with the correct lang so
         # English words get English phonetics and native words get native phonetics.
+        # This is the COMMON case for a Malayalam receptionist (native speech with
+        # embedded English terms), so it must stream: synthesize each segment over the
+        # WebSocket and push audio as it arrives, so the caller hears segment 1 while
+        # the rest are still synthesizing — TTFB ≈ first-segment latency instead of the
+        # whole utterance. Fall back to the seamless REST PCM-concat path on WS failure.
         segments = _split_mixed_script(text, lang)
         if len(segments) > 1:
-            await self._run_multi(output_emitter, segments, speaker, rest_key)
+            try:
+                await self._run_multi_ws(output_emitter, segments, speaker, ws_key)
+            except Exception as exc:
+                _sarvam_log.warning(
+                    "multi-segment WS TTS failed (%s), falling back to REST", exc
+                )
+                await self._run_multi_rest(output_emitter, segments, speaker, rest_key)
             return
 
         try:
@@ -318,14 +329,76 @@ class _BulbulV3ChunkedStream(_SarvamChunkedStream):
             output_emitter.push(chunk)
         tts_cache.set(cache_key, decoded, ttl=TTS_CACHE_TTL)
 
-    async def _run_multi(
+    async def _run_multi_ws(
         self, output_emitter, segments: list, speaker: str, cache_key: str
     ) -> None:
-        """Synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
+        """Stream mixed-script text segment-by-segment over the WebSocket.
+
+        Each segment is synthesized with its own language code (so English words
+        use English phonetics and native-script words use native phonetics) and its
+        audio chunks are pushed the moment they arrive. The first segment starts
+        playing while later segments are still synthesizing, so time-to-first-byte
+        is roughly the first segment's latency rather than the whole utterance's.
+
+        Synthesis is faster than realtime, so pushing each segment right after the
+        previous one keeps the emitter buffer ahead of playback — the segments play
+        back as one continuous stream with no gap. Raises on any failure so the
+        caller can fall back to the seamless REST PCM-concat path.
+        """
+        from sarvamai import AsyncSarvamAI, AudioOutput, EventResponse
+        from src.cache.store import tts_cache, TTS_CACHE_TTL
+
+        if self._tts._ws_client is None:
+            self._tts._ws_client = AsyncSarvamAI(api_subscription_key=self._opts.api_key)
+
+        chunks: list[bytes] = []
+        initialized = False
+        mime = "audio/mpeg"
+
+        for seg_text, seg_lang in segments:
+            seg_speaker = _voice_for_lang(seg_lang, speaker)
+            async with self._tts._ws_client.text_to_speech_streaming.connect(
+                model="bulbul:v3",
+                send_completion_event=True,
+            ) as ws:
+                await ws.configure(
+                    target_language_code=seg_lang, speaker=seg_speaker, pace=self._opts.pace
+                )
+                await ws.convert(seg_text)
+                await ws.flush()
+
+                async for message in ws:
+                    if isinstance(message, AudioOutput):
+                        chunk = _b64.b64decode(message.data.audio)
+                        if not initialized:
+                            output_emitter.initialize(
+                                request_id="ws-multi",
+                                sample_rate=self._tts.sample_rate,
+                                num_channels=self._tts.num_channels,
+                                mime_type=mime,
+                            )
+                            initialized = True
+                        output_emitter.push(chunk)
+                        chunks.append(chunk)
+                    elif isinstance(message, EventResponse):
+                        if getattr(message.data, "event_type", "") == "final":
+                            break
+
+        if not initialized:
+            raise RuntimeError("multi-segment WS TTS: no audio chunks received")
+        # Cache under the WS key (full text) so replays hit the streaming-format
+        # cache at the top of _run, same as the single-segment WS path.
+        tts_cache.set(cache_key, {"mime": mime, "chunks": chunks}, ttl=TTS_CACHE_TTL)
+
+    async def _run_multi_rest(
+        self, output_emitter, segments: list, speaker: str, cache_key: str
+    ) -> None:
+        """REST fallback: synthesize mixed-script text segment-by-segment, concatenate WAV PCM.
 
         Each segment is synthesized with its own language code so English words
         use English phonetics and native-script words use native phonetics.
-        The joined PCM is pushed as a single seamless audio stream.
+        The joined PCM is pushed as a single seamless audio stream. Slower than the
+        WS path (waits for full synthesis before any audio) but gap-free.
         """
         import io
         import wave
@@ -436,6 +509,26 @@ class BulbulV3TTS(_SarvamTTS):
 # more short history messages is cheap. Override with MAX_CTX_ITEMS if needed.
 _MAX_CTX = int(os.getenv("MAX_CTX_ITEMS", "40"))
 
+# ── Realtime turn-taking knobs ─────────────────────────────────────────────────
+# How fast Arya decides the caller has finished and starts replying — the single
+# biggest lever on conversational "realtime" feel (it sets the EoU portion of
+# per-turn latency). LOWER = snappier, but more risk of cutting a caller off in a
+# natural mid-sentence pause; the defaults are a safe balance for elderly /
+# Malayalam callers. Tune on REAL calls via env, no redeploy:
+#   VAD_MIN_SILENCE        end-of-speech silence before turn-end (s). The main
+#                          dial — try 0.10–0.15 for a snappier feel; raise back
+#                          toward 0.2 if callers report being cut off.
+#   ENDPOINTING_MIN_DELAY  extra post-speech wait before the LLM fires (s).
+#   ENDPOINTING_MAX_DELAY  cap so a slow speaker pausing mid-thought isn't cut off.
+#   VAD_MIN_SPEECH         min speech to count as a turn (s) — filters noise bursts.
+#   VAD_ACTIVATION_THRESHOLD  Silero speech-prob gate (phone/SIP audio scores low,
+#                          so don't raise this much or real speech is dropped).
+_VAD_MIN_SILENCE = float(os.getenv("VAD_MIN_SILENCE", "0.2"))
+_VAD_MIN_SPEECH = float(os.getenv("VAD_MIN_SPEECH", "0.3"))
+_VAD_ACTIVATION = float(os.getenv("VAD_ACTIVATION_THRESHOLD", "0.5"))
+_ENDPOINT_MIN_DELAY = float(os.getenv("ENDPOINTING_MIN_DELAY", "0.2"))
+_ENDPOINT_MAX_DELAY = float(os.getenv("ENDPOINTING_MAX_DELAY", "3.0"))
+
 _WATCHDOG_FAREWELLS = {
     "ml-IN":      "ക്ഷമിക്കണം, maximum call time ആയി. വേറേ കാര്യം ഉണ്ടെങ്കിൽ please തിരിച്ചു call ചെയ്യൂ. നന്ദി, goodbye!",
     "hi-IN":      "क्षमा करें, कॉल का अधिकतम समय समाप्त हो गया। ज़रूरत हो तो दोबारा कॉल करें। धन्यवाद, अलविदा!",
@@ -501,54 +594,105 @@ _REPEAT_PATTERNS = [
 
 
 def _build_llm(premium: bool = True):
-    """LLM chain — Sarvam primary, Gemini optional fallback.
+    """LLM chain — selectable primary brain with a Sarvam safety net.
 
-    Sarvam (sarvam-30b) is the primary brain: it is built for Indian languages
-    and produces the most natural Malayalam, and it needs no separate billing.
+    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
+      • "gemini" → Google Gemini Flash (gemini-2.5-flash). Low time-to-first-token
+                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong
+                   Malayalam, so it cuts latency without the quality hit a
+                   pure-English model brings. REQUIRES a FUNDED Google API key
+                   (real prepaid billing or Vertex) — the Google free-trial credit
+                   CANNOT pay for the Gemini API and 429s every turn. If your key
+                   is unfunded, set LLM_PROVIDER=sarvam, otherwise every turn fails
+                   to Gemini and falls back to Sarvam, ADDING latency.
+      • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
+                   no extra billing — but a higher TTFT. The quality-first / safe
+                   choice. Runs alone.
+      • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
+                   an ACTIVE Groq developer plan (currently inactive).
 
-    Google Gemini is OFF by default. The Google Cloud $300 free-trial credit
-    cannot pay for the Gemini API (Google excludes it), so a Gemini key returns
-    429 "prepayment credits depleted" on every turn — which only spams the logs
-    and adds latency from the failed-primary retry. Set GEMINI_ENABLED=true (with
-    a funded GOOGLE_API_KEY, or once Gemini is moved to Vertex AI) to add it back
-    as a fallback after Sarvam.
+    A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback
+    (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
+    outage degrades to the Indian-language brain rather than dropping the call.
+    Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
+    extra fallback when it isn't already the primary (back-compat).
 
     Sarvam authenticates with an `api-subscription-key` header, not Bearer.
     """
-    chain: list = []
-
+    google_key = os.getenv("GOOGLE_API_KEY", "")
+    groq_key = os.getenv("GROQ_API_KEY", "")
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
-    if sarvam_key:
-        chain.append(openai.LLM(
+    # A phone receptionist speaks 1–2 short sentences, so a tight reply ceiling
+    # keeps generation time (and therefore latency) low. Shared by all brains.
+    _max_tokens = int(os.getenv("LLM_MAX_TOKENS", "300"))
+
+    def _gemini() -> Optional[object]:
+        if not google_key:
+            return None
+        return openai.LLM(
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=google_key,
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
+            ),
+        )
+
+    def _groq() -> Optional[object]:
+        if not groq_key:
+            return None
+        return openai.LLM(
+            model=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=groq_key,
+                base_url="https://api.groq.com/openai/v1",
+            ),
+        )
+
+    def _sarvam() -> Optional[object]:
+        if not sarvam_key:
+            return None
+        return openai.LLM(
             model=os.getenv("SARVAM_MODEL", "sarvam-30b"),
             temperature=0.4,
-            # A phone receptionist speaks 1–2 short sentences, so a tight reply
-            # ceiling keeps generation time (and therefore latency) low.
-            max_completion_tokens=int(os.getenv("LLM_MAX_TOKENS", "300")),
+            max_completion_tokens=_max_tokens,
             client=_AsyncOpenAI(
                 api_key=sarvam_key,
                 base_url="https://api.sarvam.ai/v1",
                 default_headers={"api-subscription-key": sarvam_key},
             ),
-        ))
+        )
 
+    provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
+    # A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback;
+    # Sarvam primary runs alone (no dead fallback parked behind it). An
+    # unrecognised value degrades to the safe Sarvam path.
+    primary = {"gemini": _gemini, "groq": _groq, "sarvam": _sarvam}.get(provider, _sarvam)
+    builders = (primary,) if primary is _sarvam else (primary, _sarvam)
+
+    chain: list = []
+    gemini_in_chain = False
+    for build in builders:
+        llm = build()
+        if llm is not None:
+            chain.append(llm)
+            gemini_in_chain = gemini_in_chain or (build is _gemini)
+
+    # Back-compat: GEMINI_ENABLED appends Gemini as a further fallback when it is
+    # not already the primary.
     gemini_on = os.getenv("GEMINI_ENABLED", "false").lower() in ("1", "true", "yes")
-    google_key = os.getenv("GOOGLE_API_KEY", "")
-    if gemini_on and google_key:
-        chain.append(openai.LLM(
-            model=os.getenv("GOOGLE_MODEL", "gemini-2.0-flash"),
-            temperature=0.5,
-            max_completion_tokens=512,
-            client=_AsyncOpenAI(
-                api_key=google_key,
-                base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-            ),
-        ))
+    if gemini_on and not gemini_in_chain:
+        g = _gemini()
+        if g is not None:
+            chain.append(g)
 
     if not chain:
         raise RuntimeError(
-            "No LLM configured. Set SARVAM_API_KEY "
-            "(and optionally GEMINI_ENABLED=true + GOOGLE_API_KEY)."
+            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
+            "SARVAM_API_KEY, and/or GROQ_API_KEY."
         )
     if len(chain) == 1:
         return chain[0]
@@ -977,9 +1121,9 @@ class HospitalVoiceAgent(Agent):
             # from reaching STT. min_speech_duration=0.1 filters sub-100ms noise
             # bursts without affecting speech detection.
             vad=vad or silero.VAD.load(
-                min_silence_duration=0.2,
-                activation_threshold=0.5,
-                min_speech_duration=0.3,
+                min_silence_duration=_VAD_MIN_SILENCE,
+                activation_threshold=_VAD_ACTIVATION,
+                min_speech_duration=_VAD_MIN_SPEECH,
             ),
             llm=_build_llm(premium=premium_llm),
             tts=BulbulV3TTS(
@@ -1196,18 +1340,21 @@ def _strip_tool_syntax(text: str) -> str:
 
 
 # Provider rates (paise). Tune via env if pricing changes; defaults reflect
-# Sarvam's published list as of 2026-06: Saaras STT ₹30/audio-hr, Bulbul TTS
-# ₹0.30 per 1000 chars. Groq LLaMA on the free tier costs us ~0 per call.
+# Sarvam's published list as of 2026-06 (Saarika STT ₹30/audio-hr, Bulbul TTS
+# ₹0.30 per 1000 chars) and Gemini 2.5-flash for the LLM ($0.30/1M input +
+# $2.50/1M output ≈ ~10 paise per short receptionist turn at ~₹85/$). Set
+# LLM_PAISE_PER_TURN=0 if LLM_PROVIDER=sarvam (bundled, no separate LLM billing).
 _STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
 _TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
-_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "0"))   # Groq free tier
+_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "10"))  # Gemini 2.5-flash ≈ 10 paise/turn
 
 
 def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
     """Rough per-call cost in paise. STT bills on call duration (it transcribes
     the whole audio stream), TTS bills on the characters Arya actually spoke, and
-    the LLM is ~free on Groq. Good enough to surface a per-call rupee figure on
-    the dashboard and catch a runaway-cost regression — not an invoice."""
+    the LLM (Gemini 2.5-flash) bills ~10 paise per turn. Good enough to surface a
+    per-call rupee figure on the dashboard and catch a runaway-cost regression —
+    not an invoice, and it excludes telephony (Vobiz) and LiveKit minutes."""
     minutes = max(duration_s, 0.0) / 60.0
     stt = minutes * _STT_PAISE_PER_MIN
     spoken_chars = sum(
@@ -1513,7 +1660,9 @@ async def entrypoint(ctx: JobContext) -> None:
         #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
         #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
         turn_handling=TurnHandlingOptions(
-            endpointing=EndpointingOptions(min_delay=0.2, max_delay=3.0),
+            endpointing=EndpointingOptions(
+                min_delay=_ENDPOINT_MIN_DELAY, max_delay=_ENDPOINT_MAX_DELAY
+            ),
             preemptive_generation=PreemptiveGenerationOptions(enabled=True),
         ),
         max_tool_steps=2,
@@ -1777,9 +1926,9 @@ def prewarm(proc) -> None:
     the critical path so the first turn responds sooner.
     """
     proc.userdata["vad"] = silero.VAD.load(
-        min_silence_duration=0.2,
-        activation_threshold=0.5,
-        min_speech_duration=0.3,
+        min_silence_duration=_VAD_MIN_SILENCE,
+        activation_threshold=_VAD_ACTIVATION,
+        min_speech_duration=_VAD_MIN_SPEECH,
     )
 
 
