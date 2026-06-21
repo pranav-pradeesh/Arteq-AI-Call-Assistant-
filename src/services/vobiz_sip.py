@@ -81,8 +81,17 @@ async def setup_vobiz_outbound_trunk() -> str:
                     name="Vobiz Outbound",
                     address=_VOBIZ_SIP_HOST,
                     numbers=[getattr(settings, "VOBIZ_PHONE_NUMBER", "")],
-                    auth_username=getattr(settings, "VOBIZ_API_KEY", ""),
-                    auth_password=getattr(settings, "VOBIZ_API_SECRET", ""),
+                    # Dedicated SIP credentials (match the Vobiz Credentials-List
+                    # entry on the outbound trunk); fall back to the REST API
+                    # key/secret for back-compat if the SIP creds aren't set.
+                    auth_username=(
+                        getattr(settings, "VOBIZ_SIP_USERNAME", "")
+                        or getattr(settings, "VOBIZ_API_KEY", "")
+                    ),
+                    auth_password=(
+                        getattr(settings, "VOBIZ_SIP_PASSWORD", "")
+                        or getattr(settings, "VOBIZ_API_SECRET", "")
+                    ),
                     transport=lk_api.SIPTransport.SIP_TRANSPORT_TLS,
                 )
             )
