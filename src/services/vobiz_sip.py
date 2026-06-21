@@ -257,7 +257,10 @@ async def dial_outbound_vobiz(
         await lk.sip.create_sip_participant(
             lk_api.CreateSIPParticipantRequest(
                 sip_trunk_id=trunk_id,
-                sip_url=f"sip:{phone}@{_VOBIZ_SIP_HOST}",
+                # The number to dial (E.164). The trunk supplies the SIP address
+                # (sip.vobiz.ai) and the caller-ID (its `numbers`); this SDK has no
+                # `sip_url` field — the callee goes in `sip_call_to`.
+                sip_call_to=phone,
                 room_name=room_name,
                 participant_identity=f"patient-{phone[-4:]}",
                 participant_name="Patient",
