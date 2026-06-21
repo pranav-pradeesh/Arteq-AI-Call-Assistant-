@@ -4,7 +4,7 @@ import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import type { Callback, CallbackStatus } from "@/lib/types";
 import { fmtDateTime } from "@/lib/utils";
-import { PageHeader, Badge, Select, Label, Spinner } from "@/components/ui";
+import { PageHeader, Badge, Select, Label, Spinner, EmptyState } from "@/components/ui";
 import { DataTable, ColumnDef } from "@/components/data-table";
 import { RequireHospital } from "@/components/require-hospital";
 
@@ -21,7 +21,7 @@ function statusTone(s: CallbackStatus): "yellow" | "blue" | "green" | "red" | "g
 function CallbacksInner({ hospitalId }: { hospitalId: string }) {
   const [statusFilter, setStatusFilter] = React.useState<CallbackStatus | "">("");
 
-  const { data = [], isLoading } = useQuery({
+  const { data = [], isLoading, isError } = useQuery({
     queryKey: ["callbacks", hospitalId, statusFilter],
     queryFn: () => api.listCallbacks(hospitalId, statusFilter || undefined),
   });
@@ -82,6 +82,8 @@ function CallbacksInner({ hospitalId }: { hospitalId: string }) {
       </div>
       {isLoading ? (
         <div className="flex justify-center py-12"><Spinner className="h-6 w-6" /></div>
+      ) : isError ? (
+        <EmptyState title="Could not load callbacks" hint="Check your connection and try again." />
       ) : (
         <DataTable
           columns={columns}
