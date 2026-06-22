@@ -157,9 +157,13 @@ class Settings(BaseSettings):
     VOBIZ_API_SECRET: str = ""
     VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
     VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
-    # Outbound callee number format for Vobiz's dial plan (Vobiz 404s on raw E.164;
-    # inbound caller-IDs are national 0-prefixed). national | cc | local | e164.
-    VOBIZ_DIAL_FORMAT: str = "national"
+    # Vobiz routes each trunk on its OWN domain, <trunkId>.sip.vobiz.ai. LiveKit must
+    # send OUTBOUND calls there, not the generic sip.vobiz.ai (which 404s "Trunk Not
+    # Found"). Get it from the Vobiz console outbound trunk. Empty → generic host.
+    VOBIZ_SIP_OUTBOUND_DOMAIN: str = ""
+    # Outbound callee number format. Vobiz expects E.164 per its docs.
+    # e164 | cc | national | local.
+    VOBIZ_DIAL_FORMAT: str = "e164"
     # SIP credentials LiveKit uses to authenticate OUTBOUND calls to Vobiz. Must
     # match a Vobiz Credentials-List entry on the outbound trunk. Falls back to
     # VOBIZ_API_KEY/SECRET if unset (legacy behaviour).

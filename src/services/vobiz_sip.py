@@ -79,7 +79,14 @@ async def setup_vobiz_outbound_trunk() -> str:
             lk_api.CreateSIPOutboundTrunkRequest(
                 trunk=lk_api.SIPOutboundTrunkInfo(
                     name="Vobiz Outbound",
-                    address=_VOBIZ_SIP_HOST,
+                    # Vobiz routes each trunk on its OWN domain, <trunkId>.sip.vobiz.ai.
+                    # Sending to the generic sip.vobiz.ai makes Vobiz reject with
+                    # 404 "Trunk Not Found" — set VOBIZ_SIP_OUTBOUND_DOMAIN to the
+                    # outbound trunk's SIP domain from the Vobiz console.
+                    address=(
+                        getattr(settings, "VOBIZ_SIP_OUTBOUND_DOMAIN", "")
+                        or _VOBIZ_SIP_HOST
+                    ),
                     numbers=[getattr(settings, "VOBIZ_PHONE_NUMBER", "")],
                     # Dedicated SIP credentials (match the Vobiz Credentials-List
                     # entry on the outbound trunk); fall back to the REST API
@@ -213,22 +220,23 @@ async def setup_hospital_inbound_vobiz(
 def _format_vobiz_dest(phone_e164: str) -> str:
     """Format the callee number for Vobiz's outbound dial plan.
 
-    Vobiz returned SIP 404 (NOTFOUND) for raw E.164 (+91…), and inbound caller-IDs
-    arrive national 0-prefixed (e.g. 08848866921), so the dial plan is national by
-    default. Override with VOBIZ_DIAL_FORMAT if 404 persists:
-      national → 0XXXXXXXXXX  (default)    cc    → 91XXXXXXXXXX (digits, no +)
-      local    → XXXXXXXXXX   (10-digit)   e164  → +91XXXXXXXXXX
+    Vobiz expects E.164 (+91…) per its docs, so that is the default. The earlier
+    404s were a trunk-domain issue (generic sip.vobiz.ai vs <trunkId>.sip.vobiz.ai),
+    not the number format. Override with VOBIZ_DIAL_FORMAT only if a given trunk
+    needs a different shape:
+      e164  → +91XXXXXXXXXX (default)   cc    → 91XXXXXXXXXX (digits, no +)
+      national → 0XXXXXXXXXX            local → XXXXXXXXXX   (10-digit)
     """
-    fmt = (getattr(settings, "VOBIZ_DIAL_FORMAT", "") or "national").strip().lower()
+    fmt = (getattr(settings, "VOBIZ_DIAL_FORMAT", "") or "e164").strip().lower()
     digits = phone_e164.lstrip("+")
     last10 = digits[-10:]
-    if fmt == "e164":
-        return phone_e164 if phone_e164.startswith("+") else f"+{digits}"
+    if fmt == "national":
+        return "0" + last10
     if fmt == "cc":
         return digits
     if fmt == "local":
         return last10
-    return "0" + last10  # national (default)
+    return phone_e164 if phone_e164.startswith("+") else f"+{digits}"  # e164 (default)
 
 
 async def dial_outbound_vobiz(
@@ -254,9 +262,16 @@ async def dial_outbound_vobiz(
         logger.error("livekit_not_configured")
         return ""
 
+    # Guard against empty/invalid numbers — without this a missing phone formats
+    # to "0" and dials a bogus destination (seen in prod from a phone-less row).
+    _digits = "".join(ch for ch in (patient_phone or "") if ch.isdigit())
+    if len(_digits) < 10:
+        logger.error("vobiz_outbound_bad_number", patient_phone=patient_phone or "")
+        return ""
+
     room_name = f"{hospital_slug}-call-{uuid.uuid4().hex[:8]}"
     phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
-    dial_to = _format_vobiz_dest(phone)  # Vobiz dial-plan format (default national 0-prefix)
+    dial_to = _format_vobiz_dest(phone)  # Vobiz dial-plan format (default E.164)
 
     lk = None
     try:
