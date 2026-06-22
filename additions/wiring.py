@@ -72,7 +72,7 @@ def register_additions(
     app.include_router(monitoring_api.router, dependencies=extra)
     app.include_router(live_ws.router)  # WebSocket; authenticates via ?token= query
     app.include_router(users_api.router)  # self-contained RBAC auth
-    app.include_router(doctor_api.router)        # /doctor/* — doctor self-service (role=doctor)
+    app.include_router(doctor_api.router)        # /admin/doctor/* — doctor self-service (role=doctor)
     app.include_router(doctor_api.admin_router)  # /admin/doctor-logins (admin provisioning)
 
     # Frontend (dashboard-next/src/lib/api.ts) expects these to live under the

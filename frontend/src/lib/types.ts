@@ -346,3 +346,36 @@ export interface TrialStatus {
   activated_at?: string | null;
   days_remaining?: number | null;
 }
+
+// ── Doctor self-service (additions/routes/doctor_api.py, role="doctor") ─────
+// A logged-in doctor sees ONLY their own data; the backend scopes every query
+// to the doctor_id in the signed JWT.
+export type DoctorAvailabilityStatus = "available" | "delayed" | "unavailable";
+
+export interface DoctorProfile {
+  id: string;
+  name: string;
+  name_ml?: string | null;
+  specialty?: string | null;
+  qualifications?: string | null;
+  availability_status?: string | null;
+  department?: string | null;
+  hospital?: string | null;
+}
+
+export interface DoctorAppointment {
+  id: string;
+  patient_name?: string | null;
+  patient_phone?: string | null;
+  slot_time?: string | null;
+  status: string;
+  confirmation_code?: string | null;
+}
+
+export interface DoctorScheduleEntry {
+  day_of_week: number; // 0 = Sun
+  start_time: string;
+  end_time: string;
+  room?: string | null;
+  active: boolean;
+}

@@ -12,6 +12,7 @@ import type {
   CallFeedback, MissedQuestion, User,
   Patient, Booking, BookingStatus, PaymentMode, WhatsAppMessage,
   TrialStatus, DoctorAvailability, DoctorAvailabilityInfo, AppointmentEvent,
+  DoctorProfile, DoctorAppointment, DoctorScheduleEntry, DoctorAvailabilityStatus,
 } from "./types";
 
 import { getSession } from "next-auth/react";
@@ -210,6 +211,22 @@ export const api = {
   runConfirmationCall: (hid: string, id: string) =>
     post<Booking>(`/hospitals/${hid}/bookings/${id}/confirm-call`),
   listWhatsApp: (hid: string) => get<WhatsAppMessage[]>(`/hospitals/${hid}/whatsapp`),
+
+  // ── Doctor self-service (additions/routes/doctor_api.py, role="doctor") ──
+  // Each call is scoped server-side to the doctor_id in the JWT — no id is
+  // passed from the client. Paths resolve to backend /admin/doctor/* via the
+  // /admin/api → /admin rewrite.
+  doctorMe: () => get<DoctorProfile>("/doctor/me"),
+  doctorAppointments: (day?: string) =>
+    get<DoctorAppointment[]>(`/doctor/me/appointments${qs({ day })}`),
+  doctorSchedule: () => get<DoctorScheduleEntry[]>("/doctor/me/schedule"),
+  setMyAvailability: (status: DoctorAvailabilityStatus, note = "") =>
+    post<{ status: string; note: string }>("/doctor/me/availability", { status, note }),
+  // Admin provisioning: create a doctor login for an existing doctors row.
+  createDoctorLogin: (b: { doctor_id: string; email: string; password: string }) =>
+    post<{ email: string; role: string; doctor_id: string; doctor_name: string }>(
+      "/doctor-logins", b
+    ),
 
   // ── Users / RBAC (planned) ────────────────────────────
   me: () => get<User>("/auth/me"),

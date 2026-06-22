@@ -6,11 +6,12 @@ users linked to a doctors row via migration 024). Every query is scoped to that
 doctor_id from the token, so a doctor can never read another doctor's patients,
 schedule, or appointments.
 
-Routes (doctor, role="doctor"):
-  GET  /doctor/me                → the doctor's own profile
-  GET  /doctor/me/appointments   → their appointments (?day=YYYY-MM-DD, else upcoming)
-  GET  /doctor/me/schedule       → their weekly schedule
-  POST /doctor/me/availability   → set today's availability (available|delayed|unavailable)
+Routes (doctor, role="doctor") — mounted under /admin/* so they ride the
+dashboard's existing Next proxy (/admin/api/* → backend /admin/*):
+  GET  /admin/doctor/me                → the doctor's own profile
+  GET  /admin/doctor/me/appointments   → their appointments (?day=YYYY-MM-DD, else upcoming)
+  GET  /admin/doctor/me/schedule       → their weekly schedule
+  POST /admin/doctor/me/availability   → set today's availability (available|delayed|unavailable)
 
 Provisioning (admin):
   POST /admin/doctor-logins      → create a login for a doctors row (admin only)
@@ -24,7 +25,10 @@ from pydantic import BaseModel, Field
 
 from ..deps import AuthDep, PoolDep, require_role
 
-router = APIRouter(prefix="/doctor", tags=["doctor"])
+# Mounted under /admin/* so it rides the dashboard's existing Next proxy
+# (/admin/api/* → backend /admin/*) and Bearer-auth conventions. Auth is still
+# role=doctor, scoped to the token's doctor_id (see _doctor_ctx).
+router = APIRouter(prefix="/admin/doctor", tags=["doctor"])
 admin_router = APIRouter(prefix="/admin", tags=["doctor-admin"])
 
 _VALID_AVAIL = {"available", "delayed", "unavailable"}
@@ -54,7 +58,8 @@ async def doctor_me(ctx: DoctorCtx, pool: PoolDep) -> dict:
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """SELECT d.id::text AS id, d.name, d.name_ml, d.specialty,
-                      d.qualifications, dep.name AS department, h.name AS hospital
+                      d.qualifications, d.availability_status,
+                      dep.name AS department, h.name AS hospital
                FROM doctors d
                LEFT JOIN departments dep ON dep.id = d.dept_id
                LEFT JOIN hospitals  h   ON h.id  = d.hospital_id
@@ -123,12 +128,20 @@ async def set_availability(body: AvailabilityIn, ctx: DoctorCtx, pool: PoolDep) 
             detail=f"status must be one of {sorted(_VALID_AVAIL)}",
         )
     async with pool.acquire() as conn:
-        await conn.execute(
-            """INSERT INTO doctor_availability
-                   (id, doctor_id, hospital_id, status, note, changed_by)
-               VALUES (gen_random_uuid(), $1, $2, $3, $4, 'doctor')""",
-            doctor_id, hospital_id or None, body.status, body.note,
-        )
+        async with conn.transaction():
+            # Append to the immutable audit log (migration 018) …
+            await conn.execute(
+                """INSERT INTO doctor_availability_events
+                       (id, doctor_id, hospital_id, status, note, changed_by)
+                   VALUES (gen_random_uuid(), $1, $2, $3, $4, 'doctor')""",
+                doctor_id, hospital_id or None, body.status, body.note,
+            )
+            # … and reflect it as the doctor's current status so the agent and
+            # the dashboards read a single source of truth.
+            await conn.execute(
+                "UPDATE doctors SET availability_status = $2 WHERE id = $1",
+                doctor_id, body.status,
+            )
     return {"status": body.status, "note": body.note}
 
 
