@@ -39,7 +39,14 @@ from typing import Callable, Optional
 
 from fastapi import Depends, FastAPI
 
-from .routes import analytics_api, live_ws, monitoring_api, qa_api, users_api
+from .routes import (
+    analytics_api,
+    doctor_api,
+    live_ws,
+    monitoring_api,
+    qa_api,
+    users_api,
+)
 
 
 def register_additions(
@@ -65,6 +72,8 @@ def register_additions(
     app.include_router(monitoring_api.router, dependencies=extra)
     app.include_router(live_ws.router)  # WebSocket; authenticates via ?token= query
     app.include_router(users_api.router)  # self-contained RBAC auth
+    app.include_router(doctor_api.router)        # /admin/doctor/* — doctor self-service (role=doctor)
+    app.include_router(doctor_api.admin_router)  # /admin/doctor-logins (admin provisioning)
 
     # Frontend (dashboard-next/src/lib/api.ts) expects these to live under the
     # existing "/admin" prefix — each router already sets prefix="/admin".

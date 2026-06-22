@@ -76,7 +76,12 @@ JWT_ALGORITHM: str = "HS256"
 JWT_EXPIRE_MINUTES: int = int(os.environ.get("DASHBOARD_JWT_EXPIRE_MINUTES", "720"))
 
 
-def _issue_token(email: str, role: str) -> str:
+def _issue_token(
+    email: str,
+    role: str,
+    doctor_id: Optional[str] = None,
+    hospital_id: Optional[str] = None,
+) -> str:
     """Issue a signed JWT with sub (email) and role claims.
 
     sub MUST stay the user's email: tenant scoping (user_tenants lookups in
@@ -84,6 +89,10 @@ def _issue_token(email: str, role: str) -> str:
     the single-password super admin) both key off it. RBAC tokens are accepted
     by the main admin API via their `role` claim — no sub spoofing needed.
     The duplicate `email` claim is kept for clients that read it directly.
+
+    For role="doctor" the token also carries doctor_id + hospital_id so the
+    doctor self-service API can scope every query to that doctor without a DB
+    round-trip.
     """
     now = datetime.now(tz=timezone.utc)
     payload = {
@@ -93,6 +102,10 @@ def _issue_token(email: str, role: str) -> str:
         "iat": now,
         "exp": now + timedelta(minutes=JWT_EXPIRE_MINUTES),
     }
+    if doctor_id:
+        payload["doctor_id"] = doctor_id
+    if hospital_id:
+        payload["hospital_id"] = hospital_id
     return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
 
@@ -114,6 +127,8 @@ class TokenResponse(BaseModel):
 class MeResponse(BaseModel):
     email: str
     role: str
+    doctor_id: Optional[str] = None
+    hospital_id: Optional[str] = None
 
 
 class UserOut(BaseModel):
@@ -150,7 +165,7 @@ class UpdateUserRequest(BaseModel):
 # Role constants
 # ---------------------------------------------------------------------------
 
-VALID_ROLES = {"super_admin", "tenant_admin", "viewer"}
+VALID_ROLES = {"super_admin", "tenant_admin", "viewer", "doctor"}
 
 
 # ---------------------------------------------------------------------------
@@ -242,7 +257,8 @@ async def login(
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             """
-            SELECT id::text, email, password_hash, role, active
+            SELECT id::text, email, password_hash, role, active,
+                   doctor_id::text AS doctor_id, hospital_id::text AS hospital_id
             FROM users
             WHERE email = $1
             LIMIT 1
@@ -265,7 +281,12 @@ async def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    token = _issue_token(email=row["email"], role=row["role"])
+    token = _issue_token(
+        email=row["email"],
+        role=row["role"],
+        doctor_id=row["doctor_id"],
+        hospital_id=row["hospital_id"],
+    )
     return TokenResponse(access_token=token)
 
 
@@ -286,7 +307,12 @@ async def me(payload: AuthDep) -> MeResponse:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token missing 'sub' claim.",
         )
-    return MeResponse(email=email, role=role or "unknown")
+    return MeResponse(
+        email=email,
+        role=role or "unknown",
+        doctor_id=payload.get("doctor_id"),
+        hospital_id=payload.get("hospital_id"),
+    )
 
 
 # ---------------------------------------------------------------------------

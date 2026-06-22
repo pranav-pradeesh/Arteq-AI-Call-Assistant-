@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 import { Button, Card, CardBody, Input, Label, Spinner } from "@/components/ui";
 
 export default function LoginPage() {
@@ -21,7 +21,11 @@ export default function LoginPage() {
       setError("Invalid email or password");
       return;
     }
-    router.push("/overview");
+    // Doctors get their own self-service dashboard; everyone else lands on the
+    // admin overview. The role rides in the freshly-issued session.
+    const session = await getSession();
+    const role = (session?.user as { role?: string } | undefined)?.role;
+    router.push(role === "doctor" ? "/doctor" : "/overview");
     router.refresh();
   }
 

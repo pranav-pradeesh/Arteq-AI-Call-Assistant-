@@ -596,8 +596,9 @@ _REPEAT_PATTERNS = [
 def _build_llm(premium: bool = True):
     """LLM chain — selectable primary brain with a Sarvam safety net.
 
-    LLM_PROVIDER selects the PRIMARY conversational brain (default "openrouter"):
-      • "openrouter" → OpenRouter (default), an OpenAI-compatible gateway. Routes to
+    LLM_PROVIDER selects the PRIMARY conversational brain (default "sarvam" — best
+    Malayalam; set LLM_PROVIDER=openrouter/gemini/groq for a lower-latency brain):
+      • "openrouter" → OpenRouter, an OpenAI-compatible gateway. Routes to
                    OPENROUTER_MODEL (default google/gemini-2.5-flash-lite) — a low-cost,
                    low-TTFT Gemini variant with strong Malayalam. ONE key
                    (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
@@ -691,7 +692,7 @@ def _build_llm(premium: bool = True):
             ),
         )
 
-    provider = (os.getenv("LLM_PROVIDER", "openrouter") or "openrouter").strip().lower()
+    provider = (os.getenv("LLM_PROVIDER", "sarvam") or "sarvam").strip().lower()
     # A fast primary (openrouter/gemini/groq) keeps Sarvam as an automatic
     # error-fallback; Sarvam primary runs alone (no dead fallback parked behind
     # it). An unrecognised value degrades to the safe Sarvam path.
@@ -1036,8 +1037,9 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
     # cache, every subsequent call is an instant cache hit.
     from src.tts_normalize import name_for_lang
-    # Outbound calls are always English-language, so always use the Latin name.
-    # Inbound uses the native-script name for Indic langs so TTS phonetics are correct.
+    # Hospital name: Latin form for outbound (a proper noun spoken inside the
+    # greeting, even a Malayalam one). Inbound uses the native-script name so the
+    # TTS phonetics are correct.
     if hospital_ctx:
         hosp_name_en = hospital_ctx.name
         hosp_name = (hosp_name_en if outbound_context
@@ -1049,15 +1051,39 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
         call_type = outbound_context.get("call_type", "")
         pname = outbound_context.get("patient_name", "")
         dname = outbound_context.get("doctor_name", "")
+        # Templates add the title themselves, so strip a leading "Dr." from the
+        # stored name — otherwise it reads "Dr. Dr. Meera Joseph".
+        _d = dname.strip()
+        if _d.lower().startswith("dr."):
+            _d = _d[3:].strip()
+        elif _d.lower().startswith("dr "):
+            _d = _d[3:].strip()
+        dname = _d
         date  = outbound_context.get("appointment_date", "")
         ttime = outbound_context.get("appointment_time", "")
+        # Malayalam-first: a ml-IN tenant greets outbound in Malayalam (medical and
+        # proper nouns stay English, the way Keralites actually speak). Other
+        # languages fall back to English.
+        ml = (agent_language or "").lower().startswith("ml")
         if call_type == "confirmation":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ് വിളിക്കുന്നത്. "
+                    f"{date}-ന് {ttime}-ന് {dname} ഡോക്ടറുമായുള്ള നിങ്ങളുടെ appointment "
+                    f"ഉറപ്പിക്കാനാണ് വിളിച്ചത്. വരാൻ പറ്റുമോ?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
                 "Can you attend?"
             )
         elif call_type == "reminder":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{date}-ന് {dname} ഡോക്ടറുമായുള്ള appointment ഓർമിപ്പിക്കാനാണ് വിളിച്ചത്. "
+                    f"എന്തെങ്കിലും സംശയം ഉണ്ടോ?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"This is a reminder of your appointment with Dr. {dname} on {date}. "
@@ -1066,22 +1092,45 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
         elif call_type == "doctor_availability":
             dstatus = outbound_context.get("doctor_status", "")
             if dstatus == "unavailable":
+                if ml:
+                    return (
+                        f"നമസ്കാരം {pname}, ഇന്നത്തെ നിങ്ങളുടെ appointment സംബന്ധിച്ച് "
+                        f"{hosp_name}-ൽ നിന്നാണ്. ക്ഷമിക്കണം, {dname} ഡോക്ടർ ഇന്ന് ലഭ്യമല്ല. "
+                        f"reschedule ചെയ്യാൻ സഹായിക്കട്ടെ?"
+                    )
                 return (
                     f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                     f"Unfortunately Dr. {dname} is unavailable today. May I help you reschedule?"
                 )
             elif dstatus == "delayed":
+                if ml:
+                    return (
+                        f"നമസ്കാരം {pname}, ഇന്നത്തെ appointment സംബന്ധിച്ച് {hosp_name}-ൽ നിന്നാണ്. "
+                        f"{dname} ഡോക്ടർക്ക് ഇന്ന് അൽപം വൈകും. നിങ്ങൾ വരാൻ ആഗ്രഹിക്കുന്നുണ്ടോ?"
+                    )
                 return (
                     f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                     f"Dr. {dname} is running a little late today. Would you still like to come in?"
+                )
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, ഇന്നത്തെ appointment സംബന്ധിച്ച് {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{dname} ഡോക്ടർ planned പ്രകാരം ലഭ്യമാണ്. എന്തെങ്കിലും സംശയം ഉണ്ടോ?"
                 )
             return (
                 f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                 f"Dr. {dname} is available as scheduled. Do you have any questions?"
             )
         elif call_type == "callback":
+            if ml:
+                return f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. എങ്ങനെ സഹായിക്കാം?"
             return f"Hello {pname}, this is {hosp_name} calling. How can I help you today?"
         elif call_type == "followup":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{dname} ഡോക്ടറെ കണ്ടതിനു ശേഷം ഇപ്പോൾ എങ്ങനെ ഉണ്ട്?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"How are you feeling after your visit with Dr. {dname}?"
