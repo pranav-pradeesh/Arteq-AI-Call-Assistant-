@@ -1690,18 +1690,21 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata.get("vad"),
     )
 
-    # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires
-    # a second LLM call that our on_user_turn_completed mutation invalidates),
-    # cap retries so a 429 doesn't hammer the same minute 4x, and limit tool
-    # steps so a turn can't chain many large LLM calls.
+    # Groq free-tier TPM is small (12k). Cap retries so a 429 doesn't hammer the
+    # same minute 4x, and limit tool steps so a turn can't chain many large LLM
+    # calls.
     session = AgentSession(
         userdata=session_data,
         # Endpointing + preemptive generation moved under turn_handling in
         # livekit-agents 1.5 (the flat kwargs are deprecated, removed in 2.0);
         # this is the exact equivalent the SDK's own compat shim builds.
-        #   - preemptive_generation: start the LLM the moment the caller pauses,
-        #     before end-of-turn is confirmed, then keep/discard the draft once
-        #     VAD settles — removes most post-speech dead air.
+        #   - preemptive_generation: DISABLED. It starts the LLM the moment the
+        #     caller pauses, on the RAW user message — but this agent rewrites
+        #     new_message.content in on_user_turn_completed (acoustic metadata,
+        #     DTMF remap, repeat-suppression). That mutation invalidates the
+        #     preemptive draft, and the turn can end up producing NO reply at all
+        #     (observed as Arya going silent right after the caller names a
+        #     doctor). Correctness over the small dead-air saving — keep it off.
         #   - endpointing min/max delay: cut the post-speech wait before the LLM
         #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
         #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
@@ -1709,7 +1712,7 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing=EndpointingOptions(
                 min_delay=_ENDPOINT_MIN_DELAY, max_delay=_ENDPOINT_MAX_DELAY
             ),
-            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=False),
         ),
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
