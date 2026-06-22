@@ -76,9 +76,9 @@ class Settings(BaseSettings):
     OPENROUTER_API_KEY: str = ""
     OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
 
-    # Google Cloud — Gemini AI brain
+    # Google AI Studio — Gemini AI brain (default conversational provider)
     GOOGLE_API_KEY: str = ""
-    GOOGLE_MODEL: str = "gemini-2.0-flash"
+    GOOGLE_MODEL: str = "gemini-2.5-flash-lite"
 
     # WhatsApp — Meta Cloud API (patient notifications; no SMS).
     # Business-initiated messages use pre-approved "Utility" templates. Set up
