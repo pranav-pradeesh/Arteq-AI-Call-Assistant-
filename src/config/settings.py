@@ -70,6 +70,12 @@ class Settings(BaseSettings):
     # Note: Odia uses "od-IN" (Sarvam non-standard), NOT the ISO "or-IN".
     SARVAM_API_KEY: str = ""
 
+    # OpenRouter — default conversational brain (OpenAI-compatible gateway).
+    # One key pays for any hosted model; default routes to a cheap, low-latency
+    # Gemini variant with strong Malayalam.
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
+
     # Google Cloud — Gemini AI brain
     GOOGLE_API_KEY: str = ""
     GOOGLE_MODEL: str = "gemini-2.0-flash"

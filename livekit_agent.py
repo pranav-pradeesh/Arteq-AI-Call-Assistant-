@@ -3,7 +3,7 @@ Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
   • Silero VAD → Sarvam STT (Saarika, transcribes in the caller's own language)
-  • Groq LLaMA 70B (via OpenAI-compatible base_url)
+  • OpenRouter (default: google/gemini-2.5-flash-lite, via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
   • Function tools — book/cancel appointments, callbacks, SMS, emergency
@@ -15,7 +15,7 @@ Run:
 
 Required env vars:
   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
-  SARVAM_API_KEY, GROQ_API_KEY
+  SARVAM_API_KEY, OPENROUTER_API_KEY
   DATABASE_URL
 """
 from __future__ import annotations
@@ -596,22 +596,26 @@ _REPEAT_PATTERNS = [
 def _build_llm(premium: bool = True):
     """LLM chain — selectable primary brain with a Sarvam safety net.
 
-    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
-      • "gemini" → Google Gemini Flash (gemini-2.5-flash). Low time-to-first-token
-                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong
-                   Malayalam, so it cuts latency without the quality hit a
-                   pure-English model brings. REQUIRES a FUNDED Google API key
+    LLM_PROVIDER selects the PRIMARY conversational brain (default "openrouter"):
+      • "openrouter" → OpenRouter (default), an OpenAI-compatible gateway. Routes to
+                   OPENROUTER_MODEL (default google/gemini-2.5-flash-lite) — a low-cost,
+                   low-TTFT Gemini variant with strong Malayalam. ONE key
+                   (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
+                   avoids the funded-Google-billing requirement of direct Gemini.
+      • "gemini" → Google Gemini Flash (gemini-2.5-flash) via Google's own endpoint.
+                   Low time-to-first-token (~0.5s vs Sarvam-30B's ~1.9s observed in
+                   prod) AND strong Malayalam. REQUIRES a FUNDED Google API key
                    (real prepaid billing or Vertex) — the Google free-trial credit
                    CANNOT pay for the Gemini API and 429s every turn. If your key
-                   is unfunded, set LLM_PROVIDER=sarvam, otherwise every turn fails
-                   to Gemini and falls back to Sarvam, ADDING latency.
+                   is unfunded, use LLM_PROVIDER=openrouter or sarvam, otherwise every
+                   turn fails to Gemini and falls back to Sarvam, ADDING latency.
       • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
                    no extra billing — but a higher TTFT. The quality-first / safe
                    choice. Runs alone.
       • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
                    an ACTIVE Groq developer plan (currently inactive).
 
-    A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback
+    A fast primary (openrouter/gemini/groq) keeps Sarvam as an automatic error-fallback
     (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
     outage degrades to the Indian-language brain rather than dropping the call.
     Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
@@ -622,9 +626,30 @@ def _build_llm(premium: bool = True):
     google_key = os.getenv("GOOGLE_API_KEY", "")
     groq_key = os.getenv("GROQ_API_KEY", "")
     sarvam_key = os.getenv("SARVAM_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     # A phone receptionist speaks 1–2 short sentences, so a tight reply ceiling
     # keeps generation time (and therefore latency) low. Shared by all brains.
     _max_tokens = int(os.getenv("LLM_MAX_TOKENS", "300"))
+
+    def _openrouter() -> Optional[object]:
+        if not openrouter_key:
+            return None
+        # OpenRouter is OpenAI-compatible (Bearer auth). The optional HTTP-Referer
+        # and X-Title headers attribute traffic to this app on OpenRouter's
+        # dashboards/leaderboards; both are no-ops if you leave the defaults.
+        return openai.LLM(
+            model=os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=openrouter_key,
+                base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                default_headers={
+                    "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://arteq.ai"),
+                    "X-Title": os.getenv("OPENROUTER_APP_NAME", "Arteq AI Call Assistant"),
+                },
+            ),
+        )
 
     def _gemini() -> Optional[object]:
         if not google_key:
@@ -666,11 +691,16 @@ def _build_llm(premium: bool = True):
             ),
         )
 
-    provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
-    # A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback;
-    # Sarvam primary runs alone (no dead fallback parked behind it). An
-    # unrecognised value degrades to the safe Sarvam path.
-    primary = {"gemini": _gemini, "groq": _groq, "sarvam": _sarvam}.get(provider, _sarvam)
+    provider = (os.getenv("LLM_PROVIDER", "openrouter") or "openrouter").strip().lower()
+    # A fast primary (openrouter/gemini/groq) keeps Sarvam as an automatic
+    # error-fallback; Sarvam primary runs alone (no dead fallback parked behind
+    # it). An unrecognised value degrades to the safe Sarvam path.
+    primary = {
+        "openrouter": _openrouter,
+        "gemini": _gemini,
+        "groq": _groq,
+        "sarvam": _sarvam,
+    }.get(provider, _sarvam)
     builders = (primary,) if primary is _sarvam else (primary, _sarvam)
 
     chain: list = []
@@ -691,8 +721,8 @@ def _build_llm(premium: bool = True):
 
     if not chain:
         raise RuntimeError(
-            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
-            "SARVAM_API_KEY, and/or GROQ_API_KEY."
+            "No LLM configured. Set OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), "
+            "GOOGLE_API_KEY (LLM_PROVIDER=gemini), SARVAM_API_KEY, and/or GROQ_API_KEY."
         )
     if len(chain) == 1:
         return chain[0]
