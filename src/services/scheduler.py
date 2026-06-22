@@ -27,6 +27,7 @@ from src.services.appointment_workflow import (
     is_within_calling_hours,
     place_confirmation_call,
     place_doctor_availability_call,
+    place_queue_call,
     place_reminder_call,
 )
 from src.services.outbound_calls import OutboundCallService
@@ -95,9 +96,13 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
           AND a.reminder_attempts < $1
           AND a.status IN ('booked', 'confirmed')
           AND a.workflow_status NOT IN ('cancelled', 'missed')
+          AND a.source <> 'import'
           AND a.slot_time BETWEEN now() AND now() + interval '24 hours'
         ORDER BY a.slot_time
     """
+    # Imported (trial) appointments get their 24h + 2h reminders from the
+    # queue consumer (outbound_queue_loop), so they are excluded here to avoid
+    # a duplicate single-shot reminder call.
 
     async def _pass(pool, tenant_slug):
         if not is_within_calling_hours():
@@ -210,6 +215,7 @@ async def doctor_availability_loop(interval_seconds: int = 600) -> None:
           AND a.status IN ('booked', 'confirmed')
           AND a.workflow_status NOT IN ('cancelled', 'missed', 'doctor_available',
                                         'doctor_delayed', 'doctor_unavailable')
+          AND COALESCE(h.call_on_doctor_unavailable_enabled, true) = true
           AND DATE(a.slot_time AT TIME ZONE 'Asia/Kolkata') = CURRENT_DATE
         ORDER BY a.slot_time
     """
@@ -241,6 +247,60 @@ async def doctor_availability_loop(interval_seconds: int = 600) -> None:
             pass
 
     logger.info("doctor_availability_loop_stopped")
+
+
+# ── Outbound queue loop ────────────────────────────────────────────────────────
+
+async def outbound_queue_loop(interval_seconds: int = 300) -> None:
+    """Drain due rows from outbound_call_queue (trial 24h/2h reminder calls).
+
+    The import endpoint enqueues a reminder_24h row at slot-24h and a reminder_2h
+    row at slot-2h (subject to the hospital's toggles). This loop dials any row
+    whose scheduled_at has arrived, within the calling window, with retry up to
+    max_attempts. Other producers (campaigns, etc.) may share this table, so the
+    loop is call_type-agnostic and simply honours scheduled_at / status.
+    """
+    logger.info("outbound_queue_loop_started", interval_seconds=interval_seconds)
+
+    _DUE = """
+        SELECT q.id, q.appointment_id, q.hospital_id, q.call_type, q.phone,
+               q.patient_name, q.context_json, q.scheduled_at,
+               q.attempt_count, q.max_attempts, q.tenant_slug,
+               h.slug AS slug
+        FROM outbound_call_queue q
+        LEFT JOIN hospitals h ON h.id = q.hospital_id
+        WHERE q.status = 'pending'
+          AND q.attempt_count < q.max_attempts
+          AND q.scheduled_at <= now()
+        ORDER BY q.scheduled_at
+        LIMIT 50
+    """
+
+    async def _pass(pool, tenant_slug):
+        if not is_within_calling_hours():
+            return
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(_DUE)
+        if rows:
+            logger.info("outbound_queue_pass", tenant=tenant_slug, due=len(rows))
+        for row in rows:
+            if _stop.is_set():
+                break
+            try:
+                await place_queue_call(pool, dict(row), row["slug"] or tenant_slug)
+            except Exception as exc:
+                logger.error("outbound_queue_item_failed",
+                             queue_id=str(row["id"]), error=str(exc))
+            await asyncio.sleep(1.0)  # pace the SIP trunk
+
+    while not _stop.is_set():
+        await _for_each_target("outbound_queue", _pass)
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("outbound_queue_loop_stopped")
 
 
 # ── Callback loop ─────────────────────────────────────────────────────────────
@@ -498,6 +558,14 @@ def start_scheduler() -> asyncio.Task | None:
             name="campaign_resume_loop",
         )
         logger.info("campaign_resume_scheduler_started", interval_seconds=cr_interval)
+
+    if getattr(settings, "OUTBOUND_QUEUE_ENABLED", True):
+        oq_interval = getattr(settings, "OUTBOUND_QUEUE_INTERVAL_SECONDS", 300)
+        asyncio.create_task(
+            outbound_queue_loop(oq_interval),
+            name="outbound_queue_loop",
+        )
+        logger.info("outbound_queue_scheduler_started", interval_seconds=oq_interval)
 
     return task
 

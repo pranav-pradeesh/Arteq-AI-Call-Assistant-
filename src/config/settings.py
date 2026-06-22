@@ -170,6 +170,12 @@ class Settings(BaseSettings):
     DOCTOR_AVAIL_ENABLED: bool = True
     DOCTOR_AVAIL_INTERVAL_SECONDS: int = 600      # poll every 10 min
 
+    # Outbound reminder queue consumer (trial tier — 24h + 2h reminder calls).
+    # Drains outbound_call_queue rows whose scheduled_at has arrived, within the
+    # calling window, honouring the per-hospital reminder toggles.
+    OUTBOUND_QUEUE_ENABLED: bool = True
+    OUTBOUND_QUEUE_INTERVAL_SECONDS: int = 300    # poll every 5 min
+
     # Patient recognition
     PATIENT_RECOGNITION_ENABLED: bool = True
 
