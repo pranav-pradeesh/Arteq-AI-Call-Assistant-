@@ -1235,6 +1235,13 @@ class HospitalVoiceAgent(Agent):
         even the first call on a cold worker is near-instant.
         """
         await self.session.say(self._greeting, allow_interruptions=True)
+        # Mark that the opening greeting actually reached TTS. A turns=0 call
+        # where this is True is a caller who heard Arya and hung up; if it is
+        # False the caller dropped during the pre-greeting setup (dead air).
+        try:
+            self.session.userdata["greeting_delivered"] = True
+        except Exception:
+            pass
 
     async def on_user_turn_completed(
         self,
@@ -1775,6 +1782,19 @@ async def entrypoint(ctx: JobContext) -> None:
     meter = _LatencyMeter()
     session.on("conversation_item_added", meter.on_item)
 
+    # Immediate-disconnect diagnostics. A caller who drops before any turn
+    # completes (turns=0) is either a benign hangup/misdial or a symptom of
+    # pre-greeting dead air. Record HOW LONG they stayed and whether the
+    # greeting was delivered so the two cases can be told apart in the logs.
+    @ctx.room.on("participant_disconnected")
+    def _on_participant_left(participant):
+        elapsed = (datetime.now(timezone.utc) - call_started_at).total_seconds()
+        _log.info(
+            "participant disconnected room=%s call=%s after=%.1fs greeting_delivered=%s",
+            room_name, call_id[:8], elapsed,
+            session_data.get("greeting_delivered", False),
+        )
+
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
 
@@ -1822,22 +1842,35 @@ async def entrypoint(ctx: JobContext) -> None:
                 _cost = _cost_breakdown_paise(duration_s, transcript, _ptok, _ctok)
                 cost_paise = _cost.cost_paise
                 direction = "outbound" if outbound_context else "inbound"
-                # Log WHERE the per-turn latency is spent so we can see the
-                # bottleneck in the deploy logs (grep "latency_breakdown"), plus
-                # the cost split (grep "cost_breakdown" — confirms live token capture).
-                _bd = meter.breakdown_ms()
-                print(
-                    f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
-                    f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
-                    f"turns={total_turns}",
-                    file=sys.stderr, flush=True,
-                )
-                print(
-                    f"[arteq] cost_breakdown call={call_id} total={cost_paise}p "
-                    f"stt={_cost.stt_paise}p tts={_cost.tts_paise}p llm={_cost.llm_paise}p "
-                    f"tel={_cost.telephony_paise}p tokens={_ptok}+{_ctok}",
-                    file=sys.stderr, flush=True,
-                )
+                if total_turns > 0:
+                    # Log WHERE the per-turn latency is spent so we can see the
+                    # bottleneck in the deploy logs (grep "latency_breakdown"), plus
+                    # the cost split (grep "cost_breakdown" — confirms live token capture).
+                    _bd = meter.breakdown_ms()
+                    print(
+                        f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
+                        f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
+                        f"turns={total_turns}",
+                        file=sys.stderr, flush=True,
+                    )
+                    print(
+                        f"[arteq] cost_breakdown call={call_id} total={cost_paise}p "
+                        f"stt={_cost.stt_paise}p tts={_cost.tts_paise}p llm={_cost.llm_paise}p "
+                        f"tel={_cost.telephony_paise}p tokens={_ptok}+{_ctok}",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    # No turn ever completed — the caller dropped before the first
+                    # exchange. This is NOT an error, so log it at info level (not
+                    # stderr) to keep real failures visible. greeting_delivered
+                    # distinguishes a benign hangup (True) from pre-greeting dead
+                    # air where the agent was too slow to speak (False).
+                    _log.info(
+                        "call ended with no turns room=%s call=%s greeting_delivered=%s "
+                        "duration=%.1fs — caller disconnected before first exchange",
+                        room_name, call_id[:8],
+                        session_data.get("greeting_delivered", False), duration_s,
+                    )
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
