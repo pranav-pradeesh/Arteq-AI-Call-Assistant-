@@ -3,7 +3,7 @@ Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
   • Silero VAD → Sarvam STT (Saarika, transcribes in the caller's own language)
-  • OpenRouter (default: google/gemini-2.5-flash-lite, via OpenAI-compatible base_url)
+  • Google AI Studio Gemini (default: gemini-2.5-flash-lite, via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
   • Function tools — book/cancel appointments, callbacks, SMS, emergency
@@ -15,7 +15,7 @@ Run:
 
 Required env vars:
   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
-  SARVAM_API_KEY, OPENROUTER_API_KEY
+  SARVAM_API_KEY, GOOGLE_API_KEY
   DATABASE_URL
 """
 from __future__ import annotations
@@ -596,27 +596,28 @@ _REPEAT_PATTERNS = [
 def _build_llm(premium: bool = True):
     """LLM chain — selectable primary brain with a Sarvam safety net.
 
-    LLM_PROVIDER selects the PRIMARY conversational brain (default "sarvam" — best
-    Malayalam; set LLM_PROVIDER=openrouter/gemini/groq for a lower-latency brain):
-      • "openrouter" → OpenRouter, an OpenAI-compatible gateway. Routes to
-                   OPENROUTER_MODEL (default google/gemini-2.5-flash-lite) — a low-cost,
-                   low-TTFT Gemini variant with strong Malayalam. ONE key
-                   (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
-                   avoids the funded-Google-billing requirement of direct Gemini.
-      • "gemini" → Google Gemini Flash (gemini-2.5-flash) via Google's own endpoint.
-                   Low time-to-first-token (~0.5s vs Sarvam-30B's ~1.9s observed in
-                   prod) AND strong Malayalam. REQUIRES a FUNDED Google API key
+    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
+      • "gemini" → Google AI Studio Gemini (default GOOGLE_MODEL=gemini-2.5-flash-lite)
+                   via Google's own OpenAI-compatible endpoint. Low time-to-first-token
+                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong Malayalam.
+                   flash-lite is the cheapest tier; raise GOOGLE_MODEL to
+                   gemini-2.5-flash for higher quality. REQUIRES a FUNDED Google API key
                    (real prepaid billing or Vertex) — the Google free-trial credit
                    CANNOT pay for the Gemini API and 429s every turn. If your key
                    is unfunded, use LLM_PROVIDER=openrouter or sarvam, otherwise every
                    turn fails to Gemini and falls back to Sarvam, ADDING latency.
+      • "openrouter" → OpenRouter, an OpenAI-compatible gateway routing to
+                   OPENROUTER_MODEL (default google/gemini-2.5-flash-lite). ONE key
+                   (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
+                   avoids the funded-Google-billing requirement of direct Gemini —
+                   the fallback when a direct Google key isn't available.
       • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
                    no extra billing — but a higher TTFT. The quality-first / safe
                    choice. Runs alone.
       • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
                    an ACTIVE Groq developer plan (currently inactive).
 
-    A fast primary (openrouter/gemini/groq) keeps Sarvam as an automatic error-fallback
+    A fast primary (gemini/openrouter/groq) keeps Sarvam as an automatic error-fallback
     (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
     outage degrades to the Indian-language brain rather than dropping the call.
     Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
@@ -656,7 +657,7 @@ def _build_llm(premium: bool = True):
         if not google_key:
             return None
         return openai.LLM(
-            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite"),
             temperature=0.4,
             max_completion_tokens=_max_tokens,
             client=_AsyncOpenAI(
@@ -692,13 +693,13 @@ def _build_llm(premium: bool = True):
             ),
         )
 
-    provider = (os.getenv("LLM_PROVIDER", "sarvam") or "sarvam").strip().lower()
-    # A fast primary (openrouter/gemini/groq) keeps Sarvam as an automatic
+    provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
+    # A fast primary (gemini/openrouter/groq) keeps Sarvam as an automatic
     # error-fallback; Sarvam primary runs alone (no dead fallback parked behind
     # it). An unrecognised value degrades to the safe Sarvam path.
     primary = {
-        "openrouter": _openrouter,
         "gemini": _gemini,
+        "openrouter": _openrouter,
         "groq": _groq,
         "sarvam": _sarvam,
     }.get(provider, _sarvam)
@@ -722,8 +723,8 @@ def _build_llm(premium: bool = True):
 
     if not chain:
         raise RuntimeError(
-            "No LLM configured. Set OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), "
-            "GOOGLE_API_KEY (LLM_PROVIDER=gemini), SARVAM_API_KEY, and/or GROQ_API_KEY."
+            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
+            "OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), SARVAM_API_KEY, and/or GROQ_API_KEY."
         )
     if len(chain) == 1:
         return chain[0]
