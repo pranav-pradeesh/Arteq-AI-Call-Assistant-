@@ -89,6 +89,8 @@ const qs = (params: Record<string, string | number | undefined>) => {
 export const api = {
   // ── Auth ──────────────────────────────────────────────
   login: (password: string) => post<{ access_token: string; token_type: string }>("/login", { password }),
+  changePassword: (old_password: string, new_password: string) =>
+    post<{ ok: boolean }>("/auth/change-password", { old_password, new_password }),
 
   // ── Hospitals ─────────────────────────────────────────
   listHospitals: () => get<Hospital[]>("/hospitals"),

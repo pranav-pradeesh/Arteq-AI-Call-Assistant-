@@ -271,6 +271,44 @@ async def auth_login(body: LoginIn, request: Request):
     return await login(body, request)
 
 
+class ChangePwIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@router.post("/auth/change-password")
+async def change_password(
+    body: ChangePwIn,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Let the signed-in user change their own password (verifies the old one)."""
+    import bcrypt as _bcrypt
+    payload = _decode_token(credentials)
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id, password_hash FROM users WHERE email = $1", sub)
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="This account's password is managed on the server and cannot be changed here.",
+        )
+    try:
+        ok = _bcrypt.checkpw(body.old_password.encode()[:72], user["password_hash"].encode())
+    except Exception:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    new_hash = _bcrypt.hashpw(body.new_password.encode()[:72], _bcrypt.gensalt(rounds=12)).decode()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET password_hash = $1 WHERE id = $2", new_hash, user["id"])
+    return {"ok": True}
+
+
 @router.get("/auth/me")
 async def auth_me(
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),

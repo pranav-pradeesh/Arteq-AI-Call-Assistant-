@@ -121,7 +121,7 @@ function AnalyticsInner({ hospitalId }: { hospitalId: string }) {
           />
           <StatCard
             label="Avg Turns"
-            value={summary.avg_turns.toFixed(1)}
+            value={(summary.avg_turns ?? 0).toFixed(1)}
           />
         </div>
       ) : null}

@@ -10,6 +10,7 @@ export default function LoginPage() {
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(false);
+  const [showForgot, setShowForgot] = React.useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -64,6 +65,19 @@ export default function LoginPage() {
             <Button type="submit" className="w-full" disabled={loading}>
               {loading && <Spinner />} Sign in
             </Button>
+            <button
+              type="button"
+              onClick={() => setShowForgot((s) => !s)}
+              className="w-full text-center text-xs text-gray-500 hover:underline"
+            >
+              Forgot password?
+            </button>
+            {showForgot && (
+              <p className="rounded-md bg-gray-50 p-2 text-center text-xs text-gray-500">
+                Contact your administrator to reset your password. Hospital admins:
+                ask your Arteq super-admin to set a new password from the Users page.
+              </p>
+            )}
           </form>
         </CardBody>
       </Card>
