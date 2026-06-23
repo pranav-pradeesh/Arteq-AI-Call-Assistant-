@@ -594,40 +594,31 @@ _REPEAT_PATTERNS = [
 
 
 def _build_llm(premium: bool = True):
-    """LLM chain — selectable primary brain with a Sarvam safety net.
+    """Single conversational brain. Sarvam-30B is NOT used as an LLM.
 
-    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
+    LLM_PROVIDER selects the brain (default "gemini"):
       • "gemini" → Google AI Studio Gemini (default GOOGLE_MODEL=gemini-2.5-flash-lite)
                    via Google's own OpenAI-compatible endpoint. Low time-to-first-token
-                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong Malayalam.
-                   flash-lite is the cheapest tier; raise GOOGLE_MODEL to
-                   gemini-2.5-flash for higher quality. REQUIRES a FUNDED Google API key
-                   (real prepaid billing or Vertex) — the Google free-trial credit
-                   CANNOT pay for the Gemini API and 429s every turn. If your key
-                   is unfunded, use LLM_PROVIDER=openrouter or sarvam, otherwise every
-                   turn fails to Gemini and falls back to Sarvam, ADDING latency.
+                   AND strong Malayalam. flash-lite is the cheapest tier; raise
+                   GOOGLE_MODEL to gemini-2.5-flash for higher quality. REQUIRES a
+                   FUNDED Google API key (real prepaid billing or Vertex) — the Google
+                   free-trial credit CANNOT pay for the Gemini API and 429s every turn.
+                   There is NO automatic fallback now, so an unfunded key drops turns;
+                   use LLM_PROVIDER=openrouter if you don't have funded Google billing.
       • "openrouter" → OpenRouter, an OpenAI-compatible gateway routing to
                    OPENROUTER_MODEL (default google/gemini-2.5-flash-lite). ONE key
                    (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
-                   avoids the funded-Google-billing requirement of direct Gemini —
-                   the fallback when a direct Google key isn't available.
-      • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
-                   no extra billing — but a higher TTFT. The quality-first / safe
-                   choice. Runs alone.
+                   avoids the funded-Google-billing requirement of direct Gemini.
       • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
-                   an ACTIVE Groq developer plan (currently inactive).
+                   an ACTIVE Groq developer plan, and its Malayalam is weaker.
 
-    A fast primary (gemini/openrouter/groq) keeps Sarvam as an automatic error-fallback
-    (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
-    outage degrades to the Indian-language brain rather than dropping the call.
-    Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
-    extra fallback when it isn't already the primary (back-compat).
-
-    Sarvam authenticates with an `api-subscription-key` header, not Bearer.
+    Sarvam-30B was removed as a conversational brain — it answered terse one-word
+    Malayalam turns poorly. (Sarvam is still used for STT/Saarika and TTS/Bulbul;
+    that is unaffected.) A single brain now answers every turn, with no error
+    fallback: the unknown/legacy "sarvam" provider value resolves to Gemini.
     """
     google_key = os.getenv("GOOGLE_API_KEY", "")
     groq_key = os.getenv("GROQ_API_KEY", "")
-    sarvam_key = os.getenv("SARVAM_API_KEY", "")
     openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     # A phone receptionist speaks 1–2 short sentences, so a tight reply ceiling
     # keeps generation time (and therefore latency) low. Shared by all brains.
@@ -679,56 +670,24 @@ def _build_llm(premium: bool = True):
             ),
         )
 
-    def _sarvam() -> Optional[object]:
-        if not sarvam_key:
-            return None
-        return openai.LLM(
-            model=os.getenv("SARVAM_MODEL", "sarvam-30b"),
-            temperature=0.4,
-            max_completion_tokens=_max_tokens,
-            client=_AsyncOpenAI(
-                api_key=sarvam_key,
-                base_url="https://api.sarvam.ai/v1",
-                default_headers={"api-subscription-key": sarvam_key},
-            ),
-        )
-
     provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
-    # A fast primary (gemini/openrouter/groq) keeps Sarvam as an automatic
-    # error-fallback; Sarvam primary runs alone (no dead fallback parked behind
-    # it). An unrecognised value degrades to the safe Sarvam path.
-    primary = {
+    # Sarvam is no longer a conversational brain. An unrecognised value — including
+    # the legacy "sarvam" — resolves to Gemini, the default brain.
+    build = {
         "gemini": _gemini,
         "openrouter": _openrouter,
         "groq": _groq,
-        "sarvam": _sarvam,
-    }.get(provider, _sarvam)
-    builders = (primary,) if primary is _sarvam else (primary, _sarvam)
+    }.get(provider, _gemini)
 
-    chain: list = []
-    gemini_in_chain = False
-    for build in builders:
-        llm = build()
-        if llm is not None:
-            chain.append(llm)
-            gemini_in_chain = gemini_in_chain or (build is _gemini)
-
-    # Back-compat: GEMINI_ENABLED appends Gemini as a further fallback when it is
-    # not already the primary.
-    gemini_on = os.getenv("GEMINI_ENABLED", "false").lower() in ("1", "true", "yes")
-    if gemini_on and not gemini_in_chain:
-        g = _gemini()
-        if g is not None:
-            chain.append(g)
-
-    if not chain:
+    llm = build()
+    if llm is None:
         raise RuntimeError(
-            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
-            "OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), SARVAM_API_KEY, and/or GROQ_API_KEY."
+            f"LLM_PROVIDER={provider!r} selected but its API key is not set. "
+            "Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
+            "OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), or GROQ_API_KEY (LLM_PROVIDER=groq)."
         )
-    if len(chain) == 1:
-        return chain[0]
-    return agents_llm.FallbackAdapter(chain)
+    # Single brain, no FallbackAdapter — Sarvam is intentionally not parked behind it.
+    return llm
 
 
 # ==============================================================================
@@ -1751,18 +1710,21 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata.get("vad"),
     )
 
-    # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires
-    # a second LLM call that our on_user_turn_completed mutation invalidates),
-    # cap retries so a 429 doesn't hammer the same minute 4x, and limit tool
-    # steps so a turn can't chain many large LLM calls.
+    # Groq free-tier TPM is small (12k). Cap retries so a 429 doesn't hammer the
+    # same minute 4x, and limit tool steps so a turn can't chain many large LLM
+    # calls.
     session = AgentSession(
         userdata=session_data,
         # Endpointing + preemptive generation moved under turn_handling in
         # livekit-agents 1.5 (the flat kwargs are deprecated, removed in 2.0);
         # this is the exact equivalent the SDK's own compat shim builds.
-        #   - preemptive_generation: start the LLM the moment the caller pauses,
-        #     before end-of-turn is confirmed, then keep/discard the draft once
-        #     VAD settles — removes most post-speech dead air.
+        #   - preemptive_generation: DISABLED. It starts the LLM the moment the
+        #     caller pauses, on the RAW user message — but this agent rewrites
+        #     new_message.content in on_user_turn_completed (acoustic metadata,
+        #     DTMF remap, repeat-suppression). That mutation invalidates the
+        #     preemptive draft, and the turn can end up producing NO reply at all
+        #     (observed as Arya going silent right after the caller names a
+        #     doctor). Correctness over the small dead-air saving — keep it off.
         #   - endpointing min/max delay: cut the post-speech wait before the LLM
         #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
         #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
@@ -1770,7 +1732,7 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing=EndpointingOptions(
                 min_delay=_ENDPOINT_MIN_DELAY, max_delay=_ENDPOINT_MAX_DELAY
             ),
-            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=False),
         ),
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
