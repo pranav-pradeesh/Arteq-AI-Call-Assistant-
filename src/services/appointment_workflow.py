@@ -436,6 +436,19 @@ async def place_queue_call(
         **{k: v for k, v in ctx.items() if k != "call_type"},
     }
 
+    # Carry retry budget into the room so the agent can auto-redial an
+    # answered-but-immediately-dropped call (early drop / dead air).
+    context["_requeue"] = {
+        "phone": phone,
+        "call_type": call_type,
+        "patient_name": context.get("patient_name") or "",
+        "hospital_id": hospital_id,
+        "appointment_id": appt_id,
+        "tenant_slug": row.get("slug") or tenant_slug,
+        "attempt": attempts + 1,
+        "max_attempts": max_attempts,
+    }
+
     room = await _dial_vobiz(phone, row.get("slug") or tenant_slug, context)
 
     next_attempt = attempts + 1

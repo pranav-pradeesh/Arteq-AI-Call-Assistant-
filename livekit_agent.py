@@ -1866,6 +1866,38 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception:
                 pass
 
+            # Auto-redial on early drop: an outbound queue call that was answered
+            # but where the patient never engaged (total_turns == 0 — instant drop
+            # or dead air) is re-queued once more, capped by the original
+            # max_attempts. A call with real turns is left as completed.
+            try:
+                _rq = (outbound_context or {}).get("_requeue")
+                if _rq and direction == "outbound" and total_turns == 0:
+                    _att = int(_rq.get("attempt", 1))
+                    _max = int(_rq.get("max_attempts", 3))
+                    if _att < _max:
+                        import json as _json2
+                        from src.db.queries import get_pool as _get_pool
+                        _ctx = {k: v for k, v in (outbound_context or {}).items() if k != "_requeue"}
+                        _pool = await _get_pool()
+                        async with _pool.acquire() as _conn:
+                            await _conn.execute(
+                                "INSERT INTO outbound_call_queue "
+                                "(hospital_id, call_type, phone, patient_name, context_json, "
+                                " scheduled_at, attempt_count, max_attempts, status, tenant_slug) "
+                                "VALUES ($1,$2,$3,$4,$5::jsonb, now() + interval '3 minutes', "
+                                " $6, $7, 'pending', $8)",
+                                _rq.get("hospital_id") or hospital_id,
+                                _rq.get("call_type") or "reminder",
+                                _rq.get("phone"), _rq.get("patient_name") or "",
+                                _json2.dumps(_ctx), _att, _max,
+                                _rq.get("tenant_slug") or "default",
+                            )
+                        _log.info("early_drop_requeued call=%s attempt=%s/%s",
+                                  call_id[:8], _att, _max)
+            except Exception as _rq_exc:
+                print(f"[arteq] early-drop requeue failed: {_rq_exc}", file=sys.stderr)
+
             # Increment campaign answered counter if this was an outbound campaign call
             campaign_id = (outbound_context or {}).get("campaign_id", "")
             if campaign_id and total_turns > 0:

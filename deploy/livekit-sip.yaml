@@ -6,7 +6,7 @@ redis:
   address: redis:6379
 sip_port: 5060
 rtp_port: 10000-10100
-use_external_ip: false
+use_external_ip: true   # advertise public IP for SIP RTP media
 logging:
   level: info
   json: false
