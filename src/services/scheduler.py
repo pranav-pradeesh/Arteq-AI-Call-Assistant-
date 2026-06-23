@@ -532,15 +532,44 @@ async def campaign_resume_loop(interval_seconds: int = 600) -> None:
 
 # ── Startup / shutdown ────────────────────────────────────────────────────────
 
-def start_scheduler() -> asyncio.Task | None:
-    """Spawn all background loops. Returns the reminder task (primary handle)."""
-    if not getattr(settings, "REMINDERS_ENABLED", True):
-        logger.info("reminder_scheduler_disabled")
-        return None
+# ── Leader election ────────────────────────────────────────────────────────────
+# uvicorn runs multiple workers; without this EVERY worker would run the loops and
+# dial the same outbound_call_queue rows -> duplicate calls. A Postgres
+# session-level advisory lock elects exactly ONE worker to run the schedulers.
+# The lock is held for the leader's lifetime on a dedicated connection and is
+# auto-released if that process dies, so another worker can take over on restart.
+_leader_conn = None
+_LEADER_LOCK_KEY = 911287  # arbitrary app-wide constant
 
-    _stop.clear()
+
+async def _acquire_leadership() -> bool:
+    global _leader_conn
+    try:
+        import asyncpg, os
+        _leader_conn = await asyncpg.connect(os.environ["DATABASE_URL"])
+        got = await _leader_conn.fetchval(
+            "SELECT pg_try_advisory_lock($1)", _LEADER_LOCK_KEY
+        )
+        if not got:
+            await _leader_conn.close()
+            _leader_conn = None
+        return bool(got)
+    except Exception as exc:
+        # If the lock check itself fails (e.g. dev with no DB yet), run anyway so
+        # a single-process deployment is never left without a scheduler.
+        logger.warning("scheduler_leader_check_failed_running_anyway", error=str(exc))
+        return True
+
+
+async def _bootstrap() -> None:
+    """Elect a leader, then (only on the leader) spawn every background loop."""
+    if not await _acquire_leadership():
+        logger.info("scheduler_standby", reason="another worker holds leadership")
+        return
+    logger.info("scheduler_leader_elected")
+
     interval = getattr(settings, "REMINDER_INTERVAL_SECONDS", 900)
-    task = asyncio.create_task(reminder_loop(interval), name="reminder_loop")
+    asyncio.create_task(reminder_loop(interval), name="reminder_loop")
     logger.info("reminder_scheduler_started", interval_seconds=interval)
 
     if getattr(settings, "CALLBACKS_ENABLED", True):
@@ -601,12 +630,28 @@ def start_scheduler() -> asyncio.Task | None:
         )
         logger.info("cdr_reconcile_scheduler_started", interval_seconds=cdr_interval)
 
-    return task
+
+def start_scheduler() -> asyncio.Task | None:
+    """Spawn the scheduler bootstrap (leader election + all loops). Returns the
+    bootstrap task as the lifecycle handle for stop_scheduler()."""
+    if not getattr(settings, "REMINDERS_ENABLED", True):
+        logger.info("reminder_scheduler_disabled")
+        return None
+    _stop.clear()
+    return asyncio.create_task(_bootstrap(), name="scheduler_bootstrap")
 
 
 async def stop_scheduler(task: asyncio.Task | None) -> None:
-    """Signal all loops to stop and await the primary task."""
+    """Signal all loops to stop, release leadership, and await the bootstrap task."""
+    global _leader_conn
     _stop.set()
+    if _leader_conn is not None:
+        try:
+            await _leader_conn.execute("SELECT pg_advisory_unlock($1)", _LEADER_LOCK_KEY)
+            await _leader_conn.close()
+        except Exception:
+            pass
+        _leader_conn = None
     if task is None:
         return
     task.cancel()
