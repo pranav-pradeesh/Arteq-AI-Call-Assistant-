@@ -18,7 +18,7 @@ export default function LoginPage() {
     const res = await signIn("credentials", { email, password, redirect: false });
     setLoading(false);
     if (res?.error || !res?.ok) {
-      setError("Invalid email or password");
+      setError("Invalid username or password");
       return;
     }
     // Doctors get their own self-service dashboard; everyone else lands on the
@@ -42,13 +42,13 @@ export default function LoginPage() {
           </div>
           <form onSubmit={onSubmit} className="space-y-3">
             <div>
-              <Label>Email</Label>
+              <Label>Username</Label>
               <Input
-                type="email"
+                type="text"
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@hospital.com"
+                placeholder="superadmin"
               />
             </div>
             <div>

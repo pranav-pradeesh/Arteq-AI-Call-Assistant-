@@ -265,6 +265,26 @@ async def login(body: LoginIn, request: Request):
     return {"access_token": _create_token(), "token_type": "bearer", "role": "super_admin", "tenants": []}
 
 
+@router.post("/auth/login")
+async def auth_login(body: LoginIn, request: Request):
+    """Alias of /login for the Next.js frontend (next-auth Credentials)."""
+    return await login(body, request)
+
+
+@router.get("/auth/me")
+async def auth_me(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Return the authenticated identity + role for the frontend session."""
+    payload = _decode_token(credentials)
+    sub = payload.get("sub")
+    if sub == "admin" or payload.get("role") == "super_admin":
+        role = "super_admin"
+    else:
+        role = payload.get("role", "viewer")
+    return {"email": sub, "role": role}
+
+
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)

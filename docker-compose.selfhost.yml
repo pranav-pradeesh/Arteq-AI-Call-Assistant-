@@ -131,6 +131,28 @@ services:
         condition: service_started
     command: python livekit_agent.py start
 
+  # ── Next.js Admin Dashboard ───────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_BASE: http://app:8000
+    image: arteq-frontend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      NODE_ENV: production
+      NEXT_PUBLIC_API_BASE: http://app:8000
+      NEXTAUTH_URL: http://187.127.153.87
+      PORT: "3000"
+      HOSTNAME: 0.0.0.0
+    expose:
+      - "3000"
+    depends_on:
+      app:
+        condition: service_started
+
   # ── Nginx reverse proxy + TLS ──────────────────────────────────
   # Terminates HTTPS, proxies /admin, /api/v1, /talk, /ws to the app.
   # All hospitals share the same domain — routing is by slug in the URL/room name.
@@ -146,6 +168,8 @@ services:
       - nginx_logs:/var/log/nginx
     depends_on:
       app:
+        condition: service_started
+      frontend:
         condition: service_started
 
   # ── Prometheus (optional) ───────────────────────────────────────
