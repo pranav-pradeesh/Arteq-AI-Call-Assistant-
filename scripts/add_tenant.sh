@@ -35,4 +35,5 @@ while [[ $# -gt 0 ]]; do
 done
 
 docker cp "${SCRIPT_DIR}/add_tenant.py" "${APP_CONTAINER}:/tmp/add_tenant.py"
-docker exec "${APP_CONTAINER}" python3 /tmp/add_tenant.py "${ARGS[@]}"
+# -w /app so the script can import src.* (needed for --did SIP setup).
+docker exec -w /app "${APP_CONTAINER}" python3 /tmp/add_tenant.py "${ARGS[@]}"

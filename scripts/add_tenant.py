@@ -22,6 +22,9 @@ Options:
   --tier         hospital | clinic                 (default: hospital)
   --trial-days   Trial length in days; 0 = activate immediately (default: 14)
   --kb-file      Path (inside container) to a knowledge-base text file (optional)
+  --did          Vobiz DID in +E.164 (optional). If given, also creates the
+                 LiveKit inbound SIP trunk + dispatch rule so incoming calls to
+                 that number reach the agent. Requires running inside /app.
 """
 import argparse, asyncio, asyncpg, os, sys, uuid, json
 from datetime import datetime, timedelta, timezone
@@ -50,6 +53,7 @@ def parse_args():
     p.add_argument("--tier", default="hospital", choices=["hospital", "clinic"])
     p.add_argument("--trial-days", type=int, default=14)
     p.add_argument("--kb-file", default=None)
+    p.add_argument("--did", default=None, help="Vobiz DID (+E.164) for inbound SIP")
     return p.parse_args()
 
 
@@ -126,11 +130,30 @@ async def main():
         )
         print(f"linked {username!r} -> {slug}")
 
+        # ── 4. Optional: LiveKit inbound SIP trunk + dispatch rule ───────────
+        sip_line = ""
+        if a.did:
+            try:
+                from src.services.vobiz_sip import setup_hospital_inbound_vobiz
+                trunk_id, rule_id = await setup_hospital_inbound_vobiz(slug, a.did)
+                if trunk_id:
+                    await conn.execute(
+                        "UPDATE hospitals SET phone=COALESCE(NULLIF(phone,''),$1) WHERE id=$2",
+                        a.did, hid,
+                    )
+                    sip_line = f"  Inbound  : {a.did} -> trunk {trunk_id}, rule {rule_id} (agent dispatch)"
+                else:
+                    sip_line = "  Inbound  : FAILED to create SIP trunk (see logs)"
+            except Exception as exc:
+                sip_line = f"  Inbound  : SIP setup error: {exc}"
+
         print("\n=== Tenant ready ===")
         print(f"  Hospital : {a.name} ({slug}) — {sub_status}"
               + (f", trial until {expires:%Y-%m-%d}" if expires else ""))
         print(f"  Login    : username={username}  (dashboard at http://187.127.153.87/login)")
         print(f"  Agent    : {a.agent_name} [{a.language}], tier={a.tier}")
+        if sip_line:
+            print(sip_line)
     finally:
         await conn.close()
 
