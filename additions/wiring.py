@@ -45,6 +45,7 @@ from .routes import (
     live_ws,
     monitoring_api,
     qa_api,
+    usage_api,
     users_api,
 )
 
@@ -74,6 +75,7 @@ def register_additions(
     app.include_router(users_api.router)  # self-contained RBAC auth
     app.include_router(doctor_api.router)        # /admin/doctor/* — doctor self-service (role=doctor)
     app.include_router(doctor_api.admin_router)  # /admin/doctor-logins (admin provisioning)
+    app.include_router(usage_api.router)         # /admin/.../usage — per-service cost vs plan limit
 
     # Frontend (dashboard-next/src/lib/api.ts) expects these to live under the
     # existing "/admin" prefix — each router already sets prefix="/admin".

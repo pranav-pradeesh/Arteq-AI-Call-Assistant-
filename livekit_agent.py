@@ -1385,30 +1385,30 @@ def _strip_tool_syntax(text: str) -> str:
     return _TOOL_SYNTAX_RE.sub("", text).strip()
 
 
-# Provider rates (paise). Tune via env if pricing changes; defaults reflect
-# Sarvam's published list as of 2026-06 (Saarika STT ₹30/audio-hr, Bulbul TTS
-# ₹0.30 per 1000 chars) and Gemini 2.5-flash for the LLM ($0.30/1M input +
-# $2.50/1M output ≈ ~10 paise per short receptionist turn at ~₹85/$). Sarvam is
-# no longer used as an LLM, so LLM billing is always the selected brain's.
-_STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
-_TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
-_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "10"))  # Gemini 2.5-flash ≈ 10 paise/turn
+def _spoken_chars(transcript: list[dict]) -> int:
+    """Characters Arya actually spoke (what Sarvam TTS bills on)."""
+    return sum(len(m.get("text", "")) for m in transcript if m.get("role") == "assistant")
 
 
-def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
-    """Rough per-call cost in paise. STT bills on call duration (it transcribes
-    the whole audio stream), TTS bills on the characters Arya actually spoke, and
-    the LLM (Gemini 2.5-flash) bills ~10 paise per turn. Good enough to surface a
-    per-call rupee figure on the dashboard and catch a runaway-cost regression —
-    not an invoice, and it excludes telephony (Vobiz) and LiveKit minutes."""
-    minutes = max(duration_s, 0.0) / 60.0
-    stt = minutes * _STT_PAISE_PER_MIN
-    spoken_chars = sum(
-        len(m.get("text", "")) for m in transcript if m.get("role") == "assistant"
+def _cost_breakdown_paise(
+    duration_s: float,
+    transcript: list[dict],
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+):
+    """Per-service cost from REAL usage (see src.services.cost_model).
+
+    STT on real audio seconds, TTS on real spoken characters, LLM on real
+    prompt/completion tokens × the provider's published price. Telephony here is
+    the duration-based estimate; the Vobiz CDR job later overwrites it with the
+    real billed INR cost. Returns a CostBreakdown (has .cost_paise + .as_dict())."""
+    from src.services.cost_model import call_cost_breakdown
+    return call_cost_breakdown(
+        duration_s=duration_s,
+        spoken_chars=_spoken_chars(transcript),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
-    tts = (spoken_chars / 1000.0) * _TTS_PAISE_PER_KCHAR
-    llm = (len(transcript) // 2) * _LLM_PAISE_PER_TURN
-    return max(0, round(stt + tts + llm))
 
 
 class _LatencyMeter:
@@ -1428,6 +1428,9 @@ class _LatencyMeter:
     def __init__(self) -> None:
         self._sum = {"eou": 0.0, "llm": 0.0, "tts": 0.0}
         self._cnt = {"eou": 0, "llm": 0, "tts": 0}
+        # Real LLM token usage accumulated across the call, for per-service cost.
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
 
     def on_item(self, ev) -> None:
         item = getattr(ev, "item", None)
@@ -1444,6 +1447,23 @@ class _LatencyMeter:
             if isinstance(val, (int, float)) and val > 0:
                 self._sum[key] += float(val)
                 self._cnt[key] += 1
+        # Token usage key names vary across livekit-agents versions, so match
+        # defensively on substrings rather than a fixed key (logged once in prod
+        # via the cost line so we can confirm the live shape).
+        for mkey, val in metrics.items():
+            if not isinstance(val, (int, float)) or val <= 0:
+                continue
+            k = mkey.lower()
+            if "token" not in k:
+                continue
+            if "prompt" in k or "input" in k:
+                self._prompt_tokens += int(val)
+            elif "completion" in k or "output" in k:
+                self._completion_tokens += int(val)
+
+    def tokens(self) -> tuple[int, int]:
+        """(prompt_tokens, completion_tokens) accumulated across the call."""
+        return self._prompt_tokens, self._completion_tokens
 
     def avg_ms(self) -> int:
         total_s = sum(
@@ -1777,15 +1797,28 @@ async def entrypoint(ctx: JobContext) -> None:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
                 duration_s = (ended_at - call_started_at).total_seconds()
-                cost_paise = _estimate_cost_paise(duration_s, transcript)
+                # Per-service cost from REAL usage (audio seconds, spoken chars,
+                # LLM tokens) × published rate. Telephony here is the duration
+                # estimate; the Vobiz CDR job overwrites it with the billed cost.
+                _ptok, _ctok = meter.tokens()
+                _cost = _cost_breakdown_paise(duration_s, transcript, _ptok, _ctok)
+                cost_paise = _cost.cost_paise
+                direction = "outbound" if outbound_context else "inbound"
                 if total_turns > 0:
                     # Log WHERE the per-turn latency is spent so we can see the
-                    # bottleneck in the deploy logs (grep "latency_breakdown").
+                    # bottleneck in the deploy logs (grep "latency_breakdown"), plus
+                    # the cost split (grep "cost_breakdown" — confirms live token capture).
                     _bd = meter.breakdown_ms()
                     print(
                         f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
                         f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
                         f"turns={total_turns}",
+                        file=sys.stderr, flush=True,
+                    )
+                    print(
+                        f"[arteq] cost_breakdown call={call_id} total={cost_paise}p "
+                        f"stt={_cost.stt_paise}p tts={_cost.tts_paise}p llm={_cost.llm_paise}p "
+                        f"tel={_cost.telephony_paise}p tokens={_ptok}+{_ctok}",
                         file=sys.stderr, flush=True,
                     )
                 else:
@@ -1813,6 +1846,15 @@ async def entrypoint(ctx: JobContext) -> None:
                     intents=intents,
                     outcome=outcome,
                     emotional_state=emotional_state,
+                    stt_paise=_cost.stt_paise,
+                    tts_paise=_cost.tts_paise,
+                    llm_paise=_cost.llm_paise,
+                    telephony_paise=_cost.telephony_paise,
+                    llm_prompt_tokens=_ptok,
+                    llm_completion_tokens=_ctok,
+                    stt_audio_seconds=int(max(duration_s, 0.0)),
+                    tts_chars=_spoken_chars(transcript),
+                    direction=direction,
                 )
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
