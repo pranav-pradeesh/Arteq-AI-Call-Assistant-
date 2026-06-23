@@ -176,6 +176,19 @@ class Settings(BaseSettings):
     VOBIZ_RECORDING_FORMAT: str = "mp3"           # mp3 | wav
     VOBIZ_RECORDING_CHANNELS: str = "mono"        # mono | stereo
 
+    # Vobiz CDR cost reconciliation — pulls each call's REAL billed INR cost from
+    # the Vobiz CDR API and writes it to call_logs.telephony_paise. Opt-in: the
+    # exact endpoint path/auth must be confirmed against the Vobiz console/docs,
+    # so it defaults OFF and fails safe (leaves the duration estimate in place).
+    VOBIZ_CDR_ENABLED: bool = False
+    VOBIZ_API_BASE: str = "https://api.vobiz.ai"
+    VOBIZ_CDR_RECENT_PATH: str = "/v1/cdr/recent"  # GET; returns recent CDRs
+    VOBIZ_CDR_RECENT_LIMIT: int = 200
+    VOBIZ_CDR_INTERVAL_SECONDS: int = 600          # reconcile every 10 min
+    # How far back to look for an un-reconciled call's CDR (calls settle quickly).
+    VOBIZ_CDR_LOOKBACK_HOURS: int = 48
+    VOBIZ_CDR_MATCH_WINDOW_SECONDS: int = 180      # CDR vs call_log start tolerance
+
     # Doctor availability scheduler
     DOCTOR_AVAIL_ENABLED: bool = True
     DOCTOR_AVAIL_INTERVAL_SECONDS: int = 600      # poll every 10 min

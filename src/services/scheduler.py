@@ -303,6 +303,32 @@ async def outbound_queue_loop(interval_seconds: int = 300) -> None:
     logger.info("outbound_queue_loop_stopped")
 
 
+# ── Vobiz CDR cost reconciliation loop ─────────────────────────────────────────
+
+async def cdr_reconcile_loop(interval_seconds: int = 600) -> None:
+    """Pull each outbound call's REAL billed INR cost from the Vobiz CDR API and
+    write it onto call_logs (replacing the duration-based telephony estimate)."""
+    logger.info("cdr_reconcile_loop_started", interval_seconds=interval_seconds)
+
+    async def _pass(pool, tenant_slug):
+        try:
+            from src.services.vobiz_billing import reconcile_cdr_costs
+            n = await reconcile_cdr_costs(pool)
+            if n:
+                logger.info("cdr_reconcile_pass", tenant=tenant_slug, reconciled=n)
+        except Exception as exc:
+            logger.error("cdr_reconcile_failed", tenant=tenant_slug, error=str(exc))
+
+    while not _stop.is_set():
+        await _for_each_target("cdr_reconcile", _pass)
+        try:
+            await asyncio.wait_for(_stop.wait(), timeout=interval_seconds)
+        except asyncio.TimeoutError:
+            pass
+
+    logger.info("cdr_reconcile_loop_stopped")
+
+
 # ── Callback loop ─────────────────────────────────────────────────────────────
 
 async def callback_loop(interval_seconds: int = 300) -> None:
@@ -566,6 +592,14 @@ def start_scheduler() -> asyncio.Task | None:
             name="outbound_queue_loop",
         )
         logger.info("outbound_queue_scheduler_started", interval_seconds=oq_interval)
+
+    if getattr(settings, "VOBIZ_CDR_ENABLED", False):
+        cdr_interval = getattr(settings, "VOBIZ_CDR_INTERVAL_SECONDS", 600)
+        asyncio.create_task(
+            cdr_reconcile_loop(cdr_interval),
+            name="cdr_reconcile_loop",
+        )
+        logger.info("cdr_reconcile_scheduler_started", interval_seconds=cdr_interval)
 
     return task
 

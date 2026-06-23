@@ -13,6 +13,7 @@ import type {
   Patient, Booking, BookingStatus, PaymentMode, WhatsAppMessage,
   TrialStatus, DoctorAvailability, DoctorAvailabilityInfo, AppointmentEvent,
   DoctorProfile, DoctorAppointment, DoctorScheduleEntry, DoctorAvailabilityStatus,
+  UsageResponse, PlanUpdate,
 } from "./types";
 
 import { getSession } from "next-auth/react";
@@ -227,6 +228,13 @@ export const api = {
     post<{ email: string; role: string; doctor_id: string; doctor_name: string }>(
       "/doctor-logins", b
     ),
+
+  // ── Usage & cost (additions/routes/usage_api.py) ──────
+  // Per-service spend vs plan limit for the current billing period. hospitalUsage
+  // is tenant-scoped server-side; usageOverview + setHospitalPlan are super_admin.
+  hospitalUsage: (hid: string) => get<UsageResponse>(`/hospitals/${hid}/usage`),
+  usageOverview: () => get<UsageResponse[]>("/usage/overview"),
+  setHospitalPlan: (hid: string, b: PlanUpdate) => put<UsageResponse>(`/hospitals/${hid}/plan`, b),
 
   // ── Users / RBAC (planned) ────────────────────────────
   me: () => get<User>("/auth/me"),
