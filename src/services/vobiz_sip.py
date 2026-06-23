@@ -303,7 +303,7 @@ async def dial_outbound_vobiz(
                 participant_identity=f"patient-{phone[-4:]}",
                 participant_name="Patient",
                 play_ringtone=True,
-                wait_until_answered=False,
+                wait_until_answered=True,
             )
         )
 
