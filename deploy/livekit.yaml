@@ -1,6 +1,4 @@
 # LiveKit server config for self-hosting on one VPS.
-# API keys come from the LIVEKIT_KEYS env var (set in docker-compose.selfhost.yml)
-# so no secret lives in this file.
 port: 7880
 bind_addresses:
   - ""
@@ -8,17 +6,9 @@ rtc:
   tcp_port: 7881
   port_range_start: 50000
   port_range_end: 50200
-  # On a VPS the container can't see the public IP — set NODE_IP to the VPS
-  # public IP in the env so WebRTC candidates are reachable.
   use_external_ip: false
 redis:
   address: redis:6379
-# SIP is handled by the separate livekit-sip service, which talks to this
-# server over WebSocket + Redis.
-sip:
-  # Patients reach Vobiz DID; Vobiz bridges to livekit-sip on 5060. No direct
-  # internet SIP exposure beyond what the compose maps.
-  trunk_id_required: false
 logging:
   level: info
   json: false

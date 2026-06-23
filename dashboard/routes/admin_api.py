@@ -51,6 +51,8 @@ DOW_FULL = {
 
 class LoginIn(BaseModel):
     password: str
+    username: Optional[str] = None
+    email: Optional[str] = None
 
 
 def _create_token() -> str:
@@ -215,11 +217,52 @@ async def login(body: LoginIn, request: Request):
     ip = (request.client.host if request.client else "") or "unknown"
     if not _login_rate_ok(ip):
         raise HTTPException(status_code=429, detail="Too many failed attempts — try again later")
+
+    identifier = (body.username or body.email or "").lower().strip()
+    if identifier:
+        import bcrypt as _bcrypt
+        pool = await _db()
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT id, email, password_hash, active, role FROM users WHERE email = $1",
+                identifier,
+            )
+        if not user or not user["active"]:
+            _login_record_failure(ip)
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        try:
+            ok = _bcrypt.checkpw(body.password.encode()[:72], user["password_hash"].encode())
+        except Exception:
+            ok = False
+        if not ok:
+            _login_record_failure(ip)
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        exp = datetime.now(timezone.utc) + timedelta(
+            minutes=getattr(settings, "DASHBOARD_JWT_EXPIRE_MINUTES", 720)
+        )
+        secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
+        if user["role"] == "super_admin":
+            token = jwt.encode(
+                {"sub": user["email"], "role": "super_admin", "exp": exp},
+                secret, algorithm=ALGORITHM,
+            )
+            return {"access_token": token, "token_type": "bearer", "role": "super_admin", "tenants": []}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT tenant_slug FROM user_tenants WHERE user_id = $1", user["id"]
+            )
+        tenants = [r["tenant_slug"] for r in rows]
+        token = jwt.encode(
+            {"sub": user["email"], "role": "hospital_admin", "tenants": tenants, "exp": exp},
+            secret, algorithm=ALGORITHM,
+        )
+        return {"access_token": token, "token_type": "bearer", "role": "hospital_admin", "tenants": tenants}
+
     admin_pw = getattr(settings, "DASHBOARD_ADMIN_PASSWORD", "admin")
     if body.password != admin_pw:
         _login_record_failure(ip)
         raise HTTPException(status_code=401, detail="Incorrect password")
-    return {"access_token": _create_token(), "token_type": "bearer"}
+    return {"access_token": _create_token(), "token_type": "bearer", "role": "super_admin", "tenants": []}
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
@@ -227,7 +270,7 @@ async def login(body: LoginIn, request: Request):
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def dashboard_home(request: Request):
     if templates:
-        return templates.TemplateResponse("index.html", {"request": request})
+        return templates.TemplateResponse("index.html", {"request": request, "admin_prefix": __import__("os").environ.get("ADMIN_PREFIX", "/admin")})
     return HTMLResponse("<h1>Dashboard templates not found</h1>", status_code=500)
 
 

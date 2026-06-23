@@ -319,8 +319,10 @@ except Exception as e:
 
 try:
     from dashboard.routes.admin_api import router as admin_router
-    app.include_router(admin_router, prefix="/admin", tags=["admin"])
-    logger.info("dashboard_mounted", path="/admin")
+    import os
+    _admin_prefix = os.environ.get("ADMIN_PREFIX", "/admin")
+    app.include_router(admin_router, prefix=_admin_prefix, tags=["admin"])
+    logger.info("dashboard_mounted", path=_admin_prefix)
 except Exception as e:
     logger.error("dashboard_mount_failed", error=str(e))
 
