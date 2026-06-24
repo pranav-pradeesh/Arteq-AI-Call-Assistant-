@@ -182,15 +182,38 @@ def _fuzzy_find_doctor(hospital_ctx, name: str):
     q = _strip_honorifics(name)
     if not q:
         return None, None, name
-    q_tokens = {t for t in q.split() if len(t) > 1}
+
+    def _toks(s):
+        return [t for t in s.split() if len(t) > 1]
+
+    def _strong(tok):
+        # A real name word, not an initial like "p.k" / "k". Shared initials must
+        # NOT be enough to match (that booked the wrong "P.K" doctor before).
+        return "." not in tok and len(tok) > 2
+
+    q_tokens = set(_toks(q))
+    best = None
+    best_score = 0.0
     for doc in (hospital_ctx.doctors if hospital_ctx else []):
         for cand in (doc.name, getattr(doc, "name_ml", "") or ""):
             c = _strip_honorifics(cand)
             if not c:
                 continue
-            if q in c or c in q or (q_tokens & {t for t in c.split() if len(t) > 1}):
-                dept_id = getattr(doc, "dept_id", None)
-                return str(doc.id), str(dept_id) if dept_id else None, doc.name
+            if q == c:
+                score = 1000.0
+            elif q in c or c in q:
+                score = 100.0 + len(q_tokens & set(_toks(c)))
+            else:
+                overlap = q_tokens & set(_toks(c))
+                score = sum(5.0 if _strong(tok) else 0.5 for tok in overlap)
+            if score > best_score:
+                best_score = score
+                best = doc
+    # Require at least one strong (real-name-word) match — a lone shared initial
+    # (0.5) is below threshold and will NOT pick a doctor.
+    if best is not None and best_score >= 5.0:
+        dept_id = getattr(best, "dept_id", None)
+        return str(best.id), str(dept_id) if dept_id else None, best.name
     return None, None, name
 
 
