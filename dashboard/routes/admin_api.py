@@ -2828,6 +2828,8 @@ _COL_ALIASES = {
     "datetime": "datetime", "date_time": "datetime", "appointment": "datetime",
     "appointment_datetime": "datetime", "slot": "datetime", "slot_time": "datetime",
     "appointment_time": "datetime", "date": "date", "time": "time",
+    "last_visit": "date", "lastvisit": "date", "last visit": "date",
+    "visit": "date", "visit_date": "date", "visited": "date",
 }
 
 # Queue status (DB enum) → status reported to the dashboard (contract shape).
@@ -3196,3 +3198,87 @@ def _maybe_json(value):
         except Exception:
             return value
     return value
+
+
+
+# ── Per-doctor patient roster (CSV/XLSX import) ────────────────────────────────
+
+@router.post(
+    "/hospitals/{hospital_id}/doctors/{doctor_id}/patients/import",
+    dependencies=[Depends(_require_auth)],
+)
+async def import_doctor_patients(
+    hospital_id: str,
+    doctor_id: str,
+    file: UploadFile = File(...),
+):
+    """Import a doctor's patient roster from a .csv/.xlsx.
+
+    Recognised columns (any order, case-insensitive): name / patient_name,
+    phone / mobile, last_visit / date. Returns {imported, skipped, total}.
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(content) > _MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {_MAX_IMPORT_BYTES // (1024 * 1024)} MB).",
+        )
+    rows = _parse_import_file(file.filename or "", content)
+    pool = await _db()
+    imported = 0
+    skipped = 0
+    async with pool.acquire() as conn:
+        owns = await conn.fetchval(
+            "SELECT 1 FROM doctors WHERE id = $1 AND hospital_id = $2",
+            doctor_id, hospital_id,
+        )
+        if not owns:
+            raise HTTPException(status_code=404, detail="Doctor not found for this hospital")
+        for r in rows:
+            name = (r.get("patient_name") or "").strip()
+            phone = (r.get("phone") or "").strip()
+            lv = r.get("datetime")
+            last_visit = str(lv).strip() if lv else ""
+            if not name and not phone:
+                skipped += 1
+                continue
+            await conn.execute(
+                "INSERT INTO doctor_patients (hospital_id, doctor_id, name, phone, last_visit) "
+                "VALUES ($1, $2, $3, $4, $5)",
+                hospital_id, doctor_id, name or "(no name)", phone, last_visit,
+            )
+            imported += 1
+    return {"imported": imported, "skipped": skipped, "total": len(rows)}
+
+
+@router.get(
+    "/hospitals/{hospital_id}/doctors/{doctor_id}/patients",
+    dependencies=[Depends(_require_auth)],
+)
+async def list_doctor_patients(hospital_id: str, doctor_id: str):
+    """List a doctor's imported patient roster."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, name, phone, last_visit, created_at FROM doctor_patients "
+            "WHERE doctor_id = $1 AND hospital_id = $2 ORDER BY name",
+            doctor_id, hospital_id,
+        )
+    return [dict(r) for r in rows]
+
+
+@router.delete(
+    "/hospitals/{hospital_id}/doctors/{doctor_id}/patients",
+    dependencies=[Depends(_require_auth)],
+)
+async def clear_doctor_patients(hospital_id: str, doctor_id: str):
+    """Clear a doctor's imported patient roster (for a clean re-import)."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM doctor_patients WHERE doctor_id = $1 AND hospital_id = $2",
+            doctor_id, hospital_id,
+        )
+    return {"ok": True}

@@ -81,6 +81,31 @@ const put = <T>(p: string, body?: unknown) =>
   request<T>(p, { method: "PUT", body: body ? JSON.stringify(body) : undefined });
 const del = <T>(p: string) => request<T>(p, { method: "DELETE" });
 
+// Multipart upload (FormData) — like request() but no JSON content-type header.
+async function upload<T>(path: string, file: File): Promise<T> {
+  const token = await resolveToken();
+  const fd = new FormData();
+  fd.append("file", file);
+  const headers: Record<string, string> = {};
+  if (token) headers["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${BASE}${path}`, { method: "POST", body: fd, headers });
+  if (res.status === 401) {
+    _cachedToken = null;
+    if (typeof window !== "undefined" && window.location.pathname !== "/login") {
+      window.location.href = "/login";
+    }
+    throw new ApiError(401, "Unauthorized");
+  }
+  if (!res.ok) {
+    let detail = res.statusText;
+    try { const b = await res.json(); detail = b?.detail || b?.message || detail; } catch { /* */ }
+    throw new ApiError(res.status, detail);
+  }
+  return (await res.json()) as T;
+}
+
+export type DoctorPatient = { id: string; name: string; phone: string; last_visit: string; created_at: string };
+
 const qs = (params: Record<string, string | number | undefined>) => {
   const u = new URLSearchParams();
   for (const [k, v] of Object.entries(params)) if (v != null && v !== "") u.set(k, String(v));
@@ -93,6 +118,15 @@ export const api = {
   login: (password: string) => post<{ access_token: string; token_type: string }>("/login", { password }),
   changePassword: (old_password: string, new_password: string) =>
     post<{ ok: boolean }>("/auth/change-password", { old_password, new_password }),
+
+  // ── Per-doctor patient roster (CSV/XLSX import) ───────────
+  importDoctorPatients: (hid: string, did: string, file: File) =>
+    upload<{ imported: number; skipped: number; total: number }>(
+      `/hospitals/${hid}/doctors/${did}/patients/import`, file),
+  listDoctorPatients: (hid: string, did: string) =>
+    get<DoctorPatient[]>(`/hospitals/${hid}/doctors/${did}/patients`),
+  clearDoctorPatients: (hid: string, did: string) =>
+    del<void>(`/hospitals/${hid}/doctors/${did}/patients`),
 
   // ── Hospitals ─────────────────────────────────────────
   listHospitals: () => get<Hospital[]>("/hospitals"),

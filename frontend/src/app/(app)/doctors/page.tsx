@@ -5,9 +5,9 @@ import { api } from "@/lib/api";
 import type { Doctor, Department, Schedule, DoctorAvailability } from "@/lib/types";
 import { RequireHospital } from "@/components/require-hospital";
 import { DataTable, type ColumnDef } from "@/components/data-table";
-import { FormModal } from "@/components/modal";
+import { FormModal, Modal } from "@/components/modal";
 import {
-  PageHeader, Button, Field, Input, Select, Badge, Card, CardHeader, CardBody,
+  PageHeader, Button, Field, Input, Select, Badge, Card, CardHeader, CardBody, Spinner,
 } from "@/components/ui";
 import { useToast, useReadOnly } from "@/components/providers";
 import { DOW_LABELS, dowLabel, fmtDateTime } from "@/lib/utils";
@@ -366,6 +366,104 @@ function DoctorLoginModal({ doctor, onClose }: { doctor: Doctor; onClose: () => 
 
 // ── Main Inner component ──────────────────────────────────────────────────────
 
+function PatientsModal({
+  hospitalId, doctor, onClose,
+}: { hospitalId: string; doctor: Doctor; onClose: () => void }) {
+  const toast = useToast();
+  const qc = useQueryClient();
+  const fileRef = React.useRef<HTMLInputElement>(null);
+
+  const { data: patients = [], isLoading } = useQuery({
+    queryKey: ["doctor-patients", hospitalId, doctor.id],
+    queryFn: () => api.listDoctorPatients(hospitalId, doctor.id),
+  });
+
+  const importMut = useMutation({
+    mutationFn: (file: File) => api.importDoctorPatients(hospitalId, doctor.id, file),
+    onSuccess: (r) => {
+      toast(`Imported ${r.imported} patient(s)${r.skipped ? `, skipped ${r.skipped}` : ""}`, "ok");
+      qc.invalidateQueries({ queryKey: ["doctor-patients", hospitalId, doctor.id] });
+      if (fileRef.current) fileRef.current.value = "";
+    },
+    onError: (e: unknown) => toast((e as { message?: string })?.message || "Import failed", "err"),
+  });
+
+  const clearMut = useMutation({
+    mutationFn: () => api.clearDoctorPatients(hospitalId, doctor.id),
+    onSuccess: () => {
+      toast("Roster cleared", "ok");
+      qc.invalidateQueries({ queryKey: ["doctor-patients", hospitalId, doctor.id] });
+    },
+  });
+
+  return (
+    <Modal open onClose={onClose} title={`Patients — Dr. ${doctor.name}`} wide>
+      <div className="space-y-4">
+        <div className="rounded-lg border border-dashed border-gray-300 p-4">
+          <p className="mb-2 text-sm font-medium text-gray-700">Import from CSV / Excel</p>
+          <p className="mb-3 text-xs text-gray-500">
+            Columns (any order): <code>name</code>, <code>phone</code>, <code>last_visit</code>.
+            Accepts .csv and .xlsx.
+          </p>
+          <input
+            ref={fileRef}
+            type="file"
+            accept=".csv,.xlsx,.xls,.xlsm,.txt"
+            className="block w-full text-sm"
+            disabled={importMut.isPending}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) importMut.mutate(f);
+            }}
+          />
+          {importMut.isPending && (
+            <p className="mt-2 flex items-center gap-2 text-xs text-gray-500"><Spinner /> Importing…</p>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between">
+          <p className="text-sm font-medium text-gray-700">
+            Roster {isLoading ? "" : `(${patients.length})`}
+          </p>
+          {patients.length > 0 && (
+            <Button
+              variant="danger"
+              className="text-xs"
+              disabled={clearMut.isPending}
+              onClick={() => { if (confirm("Clear this doctor's roster?")) clearMut.mutate(); }}
+            >
+              Clear all
+            </Button>
+          )}
+        </div>
+
+        {isLoading ? (
+          <p className="py-6 text-center text-sm text-gray-400">Loading…</p>
+        ) : patients.length === 0 ? (
+          <p className="py-6 text-center text-sm text-gray-400">No patients imported yet.</p>
+        ) : (
+          <div className="max-h-80 overflow-y-auto rounded-lg border border-gray-100">
+            <table className="w-full text-sm">
+              <thead className="sticky top-0 bg-gray-50 text-left text-xs text-gray-500">
+                <tr><th className="px-3 py-2">Name</th><th className="px-3 py-2">Phone</th><th className="px-3 py-2">Last visit</th></tr>
+              </thead>
+              <tbody>
+                {patients.map((p) => (
+                  <tr key={p.id} className="border-t border-gray-100">
+                    <td className="px-3 py-2">{p.name}</td>
+                    <td className="px-3 py-2 font-mono text-xs">{p.phone || "—"}</td>
+                    <td className="px-3 py-2 text-xs text-gray-500">{p.last_visit || "—"}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    </Modal>
+  );
+}
+
 function Inner({ hospitalId }: { hospitalId: string }) {
   const toast = useToast();
   const qc = useQueryClient();
@@ -391,6 +489,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   const [form, setForm] = React.useState<DoctorForm>(BLANK_DOC);
   const [schedDoctor, setSchedDoctor] = React.useState<Doctor | null>(null);
   const [loginDoctor, setLoginDoctor] = React.useState<Doctor | null>(null);
+  const [patientsDoctor, setPatientsDoctor] = React.useState<Doctor | null>(null);
 
   function openCreate() {
     setEditing(null);
@@ -499,6 +598,9 @@ function Inner({ hospitalId }: { hospitalId: string }) {
           <Button variant="outline" onClick={() => setLoginDoctor(row.original)} className="text-xs">
             Login
           </Button>
+          <Button variant="outline" onClick={() => setPatientsDoctor(row.original)} className="text-xs">
+            Patients
+          </Button>
           <Button
             variant="danger"
             className="text-xs"
@@ -577,6 +679,14 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         <DoctorLoginModal
           doctor={loginDoctor}
           onClose={() => setLoginDoctor(null)}
+        />
+      )}
+
+      {patientsDoctor && (
+        <PatientsModal
+          hospitalId={hospitalId}
+          doctor={patientsDoctor}
+          onClose={() => setPatientsDoctor(null)}
         />
       )}
     </div>
