@@ -770,7 +770,7 @@ async def get_appointments_by_phone(
                LEFT JOIN departments dep ON a.dept_id = dep.id
                WHERE a.patient_phone=$1 AND a.hospital_id=$2
                  AND a.status IN ('pending','booked','confirmed')
-               ORDER BY a.created_at DESC
+               ORDER BY a.slot_time ASC NULLS LAST
                LIMIT 3""",
             phone, hospital_id,
         )

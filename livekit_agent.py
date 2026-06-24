@@ -805,6 +805,7 @@ async def _load_patient_profile(caller_phone: str, hospital_id: str) -> Optional
             "history": [
                 {
                     "doctor": a.get("doctor_name", ""),
+                    "dept": a.get("dept_name", ""),
                     "slot": str(a["slot_time"])[:16] if a.get("slot_time") else "",
                     "status": a.get("status", ""),
                 }
@@ -1625,7 +1626,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 caller_phone = ident if ident.startswith("+") else f"+{ident}"
                 break
         from src.tenancy.features import enabled as _feat_on
-        if caller_phone and _feat_on(tenant_features, "patient_recognition"):
+        if caller_phone:
             patient_profile = await _load_patient_profile(caller_phone, hospital_id)
     except Exception:
         pass
@@ -1637,11 +1638,24 @@ async def entrypoint(ctx: JobContext) -> None:
     agent_language = (getattr(hospital_ctx, "agent_language", None) or settings.AGENT_LANGUAGE)
     system_prompt = _build_prompt(hospital_ctx, outbound_context)
     if patient_profile:
-        last = patient_profile["history"][0] if patient_profile["history"] else {}
+        _appts = patient_profile.get("history") or []
+        _lines = []
+        for _a in _appts:
+            if _a.get("slot"):
+                _seg = f"  - {_a['slot']} with Dr. {_a.get('doctor', '?')}"
+                if _a.get("dept"):
+                    _seg += f" ({_a['dept']})"
+                if _a.get("status"):
+                    _seg += f" [{_a['status']}]"
+                _lines.append(_seg)
+        _block = "\n".join(_lines) if _lines else "  (none on record)"
         system_prompt += (
-            f"\n\nRETURNING PATIENT: {patient_profile['name']} — "
-            f"last seen {last.get('slot', 'recently')} with Dr. {last.get('doctor', '?')}. "
-            "Greet them by name."
+            f"\n\nCALLER ON RECORD: {patient_profile['name']}. Greet them by name.\n"
+            f"THEIR APPOINTMENTS (soonest first; dates are YYYY-MM-DD HH:MM):\n{_block}\n"
+            "If they ask about their appointment \u2014 when it is, which doctor, which "
+            "department, or whether it is confirmed \u2014 answer from this list and speak the "
+            "date and time naturally in their language. If none are on record, say so and "
+            "offer to book one."
         )
 
     returning_name = patient_profile["name"] if (patient_profile and not outbound_context) else ""
