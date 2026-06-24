@@ -645,9 +645,6 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         <Field label="Name *">
           <Input value={form.name} onChange={set("name")} required />
         </Field>
-        <Field label="Name (Malayalam)">
-          <Input value={form.name_ml} onChange={set("name_ml")} />
-        </Field>
         <Field label="Specialty">
           <Input value={form.specialty} onChange={set("specialty")} placeholder="e.g. Cardiology" />
         </Field>
