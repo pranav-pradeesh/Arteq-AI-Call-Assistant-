@@ -382,6 +382,99 @@ async def place_doctor_availability_call(
     return bool(room)
 
 
+# ── Outbound queue consumer ───────────────────────────────────────────────────
+
+# Human-readable call-type labels for queue rows enqueued by the import flow.
+_QUEUE_CALL_TYPES = {
+    "reminder_24h": "24-hour reminder",
+    "reminder_2h": "2-hour reminder",
+    "doctor_unavailable": "doctor unavailable",
+}
+
+
+async def place_queue_call(
+    pool,
+    row: dict,
+    tenant_slug: str = "default",
+) -> bool:
+    """Dial one ``outbound_call_queue`` row and persist the outcome.
+
+    Used by the queue consumer for the trial tier's 24h / 2h reminder calls.
+    Honours the calling window and the row's ``max_attempts``. On a successful
+    dial the row is marked ``completed``; on failure the attempt count is bumped
+    and the row reverts to ``pending`` (retried next pass) until ``max_attempts``,
+    at which point it is marked ``max_attempts``.
+
+    Returns True if a call was dialled (a room was created).
+    """
+    if not is_within_calling_hours():
+        return False
+
+    queue_id = str(row["id"])
+    appt_id = str(row["appointment_id"]) if row.get("appointment_id") else None
+    hospital_id = str(row.get("hospital_id") or "")
+    call_type = row.get("call_type") or "reminder"
+    phone = row.get("phone") or ""
+    attempts = row.get("attempt_count", 0)
+    max_attempts = row.get("max_attempts", MAX_ATTEMPTS)
+
+    if not phone or attempts >= max_attempts:
+        return False
+
+    ctx = row.get("context_json") or {}
+    if isinstance(ctx, str):
+        try:
+            import json as _json
+            ctx = _json.loads(ctx)
+        except Exception:
+            ctx = {}
+    context = {
+        "call_type": call_type,
+        "appointment_id": appt_id,
+        "patient_name": row.get("patient_name") or ctx.get("patient_name") or "",
+        "hospital_id": hospital_id,
+        **{k: v for k, v in ctx.items() if k != "call_type"},
+    }
+
+    # Carry retry budget into the room so the agent can auto-redial an
+    # answered-but-immediately-dropped call (early drop / dead air).
+    context["_requeue"] = {
+        "phone": phone,
+        "call_type": call_type,
+        "patient_name": context.get("patient_name") or "",
+        "hospital_id": hospital_id,
+        "appointment_id": appt_id,
+        "tenant_slug": row.get("slug") or tenant_slug,
+        "attempt": attempts + 1,
+        "max_attempts": max_attempts,
+    }
+
+    room = await _dial_vobiz(phone, row.get("slug") or tenant_slug, context)
+
+    next_attempt = attempts + 1
+    new_status = (
+        "completed" if room
+        else ("max_attempts" if next_attempt >= max_attempts else "pending")
+    )
+
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """UPDATE outbound_call_queue
+               SET attempt_count = $1, attempted_at = now(), status = $2,
+                   livekit_room = COALESCE($3, livekit_room), updated_at = now()
+               WHERE id = $4""",
+            next_attempt, new_status, (room or None), queue_id,
+        )
+        if appt_id:
+            label = _QUEUE_CALL_TYPES.get(call_type, call_type)
+            await log_appointment_event(
+                conn, appt_id, hospital_id,
+                event_type="call_attempted" if room else "call_missed",
+                note=f"{label} attempt {next_attempt}/{max_attempts}, room={room or 'none'}",
+            )
+    return bool(room)
+
+
 # ── Cancellation ──────────────────────────────────────────────────────────────
 
 async def cancel_appointment(

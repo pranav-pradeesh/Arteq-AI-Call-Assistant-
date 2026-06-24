@@ -346,3 +346,81 @@ export interface TrialStatus {
   activated_at?: string | null;
   days_remaining?: number | null;
 }
+
+// ── Doctor self-service (additions/routes/doctor_api.py, role="doctor") ─────
+// A logged-in doctor sees ONLY their own data; the backend scopes every query
+// to the doctor_id in the signed JWT.
+export type DoctorAvailabilityStatus = "available" | "delayed" | "unavailable";
+
+export interface DoctorProfile {
+  id: string;
+  name: string;
+  name_ml?: string | null;
+  specialty?: string | null;
+  qualifications?: string | null;
+  availability_status?: string | null;
+  department?: string | null;
+  hospital?: string | null;
+}
+
+export interface DoctorAppointment {
+  id: string;
+  patient_name?: string | null;
+  patient_phone?: string | null;
+  slot_time?: string | null;
+  status: string;
+  confirmation_code?: string | null;
+}
+
+export interface DoctorScheduleEntry {
+  day_of_week: number; // 0 = Sun
+  start_time: string;
+  end_time: string;
+  room?: string | null;
+  active: boolean;
+}
+
+// ── Usage & cost (additions/routes/usage_api.py) ────────────────────────────
+// Per-service spend vs plan limit. `source` says whether a figure is the real
+// platform-billed cost ("billed": Vobiz CDR / OpenRouter) or real usage × the
+// provider's published rate ("list-price": Gemini / Sarvam have no cost API).
+export type CostSource = "billed" | "list-price";
+
+export interface ServiceLine {
+  paise: number;
+  source: CostSource;
+}
+
+export interface UsageBreakdown {
+  stt: ServiceLine;
+  tts: ServiceLine;
+  llm: ServiceLine;
+  telephony: ServiceLine;
+}
+
+export interface UsageResponse {
+  hospital_id: string;
+  hospital_name?: string | null;
+  plan_name?: string | null;
+  period_start: string;
+  period_end: string;
+  calls: number;
+  inbound_calls: number;
+  outbound_calls: number;
+  minutes: number;
+  cost_paise: number;
+  by_service: UsageBreakdown;
+  monthly_call_limit?: number | null;
+  monthly_minutes_limit?: number | null;
+  monthly_cost_limit_paise?: number | null;
+  percent_used?: number | null;
+  over_limit: boolean;
+}
+
+export interface PlanUpdate {
+  plan_name?: string | null;
+  monthly_call_limit?: number | null;
+  monthly_minutes_limit?: number | null;
+  monthly_cost_limit_paise?: number | null;
+  billing_cycle_day?: number | null;
+}

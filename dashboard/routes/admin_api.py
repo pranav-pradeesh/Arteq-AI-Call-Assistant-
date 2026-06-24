@@ -18,7 +18,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import HTMLResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
@@ -51,6 +51,8 @@ DOW_FULL = {
 
 class LoginIn(BaseModel):
     password: str
+    username: Optional[str] = None
+    email: Optional[str] = None
 
 
 def _create_token() -> str:
@@ -215,11 +217,110 @@ async def login(body: LoginIn, request: Request):
     ip = (request.client.host if request.client else "") or "unknown"
     if not _login_rate_ok(ip):
         raise HTTPException(status_code=429, detail="Too many failed attempts — try again later")
+
+    identifier = (body.username or body.email or "").lower().strip()
+    if identifier:
+        import bcrypt as _bcrypt
+        pool = await _db()
+        async with pool.acquire() as conn:
+            user = await conn.fetchrow(
+                "SELECT id, email, password_hash, active, role FROM users WHERE email = $1",
+                identifier,
+            )
+        if not user or not user["active"]:
+            _login_record_failure(ip)
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        try:
+            ok = _bcrypt.checkpw(body.password.encode()[:72], user["password_hash"].encode())
+        except Exception:
+            ok = False
+        if not ok:
+            _login_record_failure(ip)
+            raise HTTPException(status_code=401, detail="Invalid username or password")
+        exp = datetime.now(timezone.utc) + timedelta(
+            minutes=getattr(settings, "DASHBOARD_JWT_EXPIRE_MINUTES", 720)
+        )
+        secret = getattr(settings, "DASHBOARD_JWT_SECRET", "insecure-dev-secret")
+        if user["role"] == "super_admin":
+            token = jwt.encode(
+                {"sub": user["email"], "role": "super_admin", "exp": exp},
+                secret, algorithm=ALGORITHM,
+            )
+            return {"access_token": token, "token_type": "bearer", "role": "super_admin", "tenants": []}
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT tenant_slug FROM user_tenants WHERE user_id = $1", user["id"]
+            )
+        tenants = [r["tenant_slug"] for r in rows]
+        token = jwt.encode(
+            {"sub": user["email"], "role": "hospital_admin", "tenants": tenants, "exp": exp},
+            secret, algorithm=ALGORITHM,
+        )
+        return {"access_token": token, "token_type": "bearer", "role": "hospital_admin", "tenants": tenants}
+
     admin_pw = getattr(settings, "DASHBOARD_ADMIN_PASSWORD", "admin")
     if body.password != admin_pw:
         _login_record_failure(ip)
         raise HTTPException(status_code=401, detail="Incorrect password")
-    return {"access_token": _create_token(), "token_type": "bearer"}
+    return {"access_token": _create_token(), "token_type": "bearer", "role": "super_admin", "tenants": []}
+
+
+@router.post("/auth/login")
+async def auth_login(body: LoginIn, request: Request):
+    """Alias of /login for the Next.js frontend (next-auth Credentials)."""
+    return await login(body, request)
+
+
+class ChangePwIn(BaseModel):
+    old_password: str
+    new_password: str
+
+
+@router.post("/auth/change-password")
+async def change_password(
+    body: ChangePwIn,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Let the signed-in user change their own password (verifies the old one)."""
+    import bcrypt as _bcrypt
+    payload = _decode_token(credentials)
+    sub = payload.get("sub")
+    if not sub:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if len(body.new_password) < 8:
+        raise HTTPException(status_code=400, detail="New password must be at least 8 characters")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT id, password_hash FROM users WHERE email = $1", sub)
+    if not user:
+        raise HTTPException(
+            status_code=400,
+            detail="This account's password is managed on the server and cannot be changed here.",
+        )
+    try:
+        ok = _bcrypt.checkpw(body.old_password.encode()[:72], user["password_hash"].encode())
+    except Exception:
+        ok = False
+    if not ok:
+        raise HTTPException(status_code=401, detail="Current password is incorrect")
+    new_hash = _bcrypt.hashpw(body.new_password.encode()[:72], _bcrypt.gensalt(rounds=12)).decode()
+    async with pool.acquire() as conn:
+        await conn.execute("UPDATE users SET password_hash = $1 WHERE id = $2", new_hash, user["id"])
+    return {"ok": True}
+
+
+@router.get("/auth/me")
+async def auth_me(
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+):
+    """Return the authenticated identity + role for the frontend session."""
+    payload = _decode_token(credentials)
+    sub = payload.get("sub")
+    if sub == "admin" or payload.get("role") == "super_admin":
+        role = "super_admin"
+    else:
+        role = payload.get("role", "viewer")
+    return {"email": sub, "role": role}
 
 
 # ── Dashboard HTML ─────────────────────────────────────────────────────────────
@@ -227,7 +328,7 @@ async def login(body: LoginIn, request: Request):
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
 async def dashboard_home(request: Request):
     if templates:
-        return templates.TemplateResponse("index.html", {"request": request})
+        return templates.TemplateResponse("index.html", {"request": request, "admin_prefix": __import__("os").environ.get("ADMIN_PREFIX", "/admin")})
     return HTMLResponse("<h1>Dashboard templates not found</h1>", status_code=500)
 
 
@@ -2709,6 +2810,376 @@ async def get_appointment_events(hospital_id: str, appointment_id: str):
             "created_at": e["created_at"].isoformat() if e["created_at"] else None,
         }
         for e in events
+    ]
+
+
+# ── Outbound reminder trial — import / settings / queue ───────────────────────
+
+# IST is the booking timezone; naive datetimes from imports are localized to it.
+_IST = timezone(timedelta(hours=5, minutes=30))
+_MAX_IMPORT_BYTES = 5 * 1024 * 1024  # 5 MB
+
+# Accepted header aliases (lower-cased, stripped) → canonical field.
+_COL_ALIASES = {
+    "patient_name": "patient_name", "name": "patient_name", "patient": "patient_name",
+    "patientname": "patient_name", "full_name": "patient_name",
+    "phone": "phone", "mobile": "phone", "contact": "phone", "number": "phone",
+    "phone_number": "phone", "mobile_number": "phone", "phone_no": "phone",
+    "datetime": "datetime", "date_time": "datetime", "appointment": "datetime",
+    "appointment_datetime": "datetime", "slot": "datetime", "slot_time": "datetime",
+    "appointment_time": "datetime", "date": "date", "time": "time",
+}
+
+# Queue status (DB enum) → status reported to the dashboard (contract shape).
+_QUEUE_STATUS_MAP = {
+    "pending": "queued", "in_progress": "placed", "completed": "answered",
+    "failed": "missed", "cancelled": "missed", "max_attempts": "missed",
+}
+
+_IMPORT_DATETIME_FORMATS = (
+    "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y-%m-%dT%H:%M", "%Y-%m-%dT%H:%M:%S",
+    "%d/%m/%Y %H:%M", "%d/%m/%Y %I:%M %p", "%d-%m-%Y %H:%M", "%d-%m-%Y %I:%M %p",
+    "%m/%d/%Y %H:%M", "%m/%d/%Y %I:%M %p", "%d %b %Y %H:%M", "%d %B %Y %I:%M %p",
+    "%d/%m/%Y", "%Y-%m-%d", "%d-%m-%Y",
+)
+
+
+def _normalize_phone(raw: str) -> Optional[str]:
+    """Normalize an Indian mobile number to E.164 (+91XXXXXXXXXX) or None."""
+    if not raw:
+        return None
+    digits = re.sub(r"[^\d]", "", str(raw))
+    if len(digits) == 12 and digits.startswith("91"):
+        digits = digits[2:]
+    elif len(digits) == 11 and digits.startswith("0"):
+        digits = digits[1:]
+    if len(digits) == 10 and digits[0] in "6789":
+        return "+91" + digits
+    return None
+
+
+def _parse_import_datetime(value) -> Optional[datetime]:
+    """Parse a cell value into a tz-aware datetime (IST), or None if unparseable."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value if value.tzinfo else value.replace(tzinfo=_IST)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        dt = datetime.fromisoformat(text)
+        return dt if dt.tzinfo else dt.replace(tzinfo=_IST)
+    except ValueError:
+        pass
+    for fmt in _IMPORT_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=_IST)
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_import_file(filename: str, content: bytes) -> list[dict]:
+    """Parse an uploaded .csv/.xlsx into row dicts: {row, patient_name, phone, datetime}.
+
+    Raises HTTPException(400) for an unsupported extension or unreadable file.
+    A 'date' + 'time' pair is combined into 'datetime' when no datetime column exists.
+    """
+    import csv
+    import io
+
+    name = (filename or "").lower()
+
+    def _resolve(rec: dict) -> dict:
+        dt = rec.get("datetime")
+        if not dt and (rec.get("date") or rec.get("time")):
+            dt = f"{rec.get('date', '')} {rec.get('time', '')}".strip()
+        return {
+            "patient_name": rec.get("patient_name", ""),
+            "phone": rec.get("phone", ""),
+            "datetime": dt,
+        }
+
+    if name.endswith(".csv") or name.endswith(".txt"):
+        try:
+            text = content.decode("utf-8-sig")
+        except UnicodeDecodeError:
+            text = content.decode("latin-1", errors="replace")
+        reader = csv.reader(io.StringIO(text))
+        try:
+            header = next(reader)
+        except StopIteration:
+            return []
+        cols = {i: _COL_ALIASES.get(h.strip().lower()) for i, h in enumerate(header)}
+        out = []
+        for idx, raw in enumerate(reader, start=2):
+            if not any(c.strip() for c in raw):
+                continue
+            rec = {}
+            for i, val in enumerate(raw):
+                key = cols.get(i)
+                if key:
+                    rec[key] = val.strip()
+            out.append({"row": idx, **_resolve(rec)})
+        return out
+
+    if name.endswith(".xlsx") or name.endswith(".xlsm") or name.endswith(".xls"):
+        try:
+            import openpyxl
+        except ImportError:
+            raise HTTPException(
+                status_code=400,
+                detail="Excel parsing unavailable on the server — upload a .csv instead.",
+            )
+        try:
+            wb = openpyxl.load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        except Exception:
+            raise HTTPException(status_code=400, detail="Could not read the Excel file.")
+        ws = wb.active
+        rows_iter = ws.iter_rows(values_only=True)
+        header = None
+        for r in rows_iter:
+            if r and any(c is not None and str(c).strip() for c in r):
+                header = r
+                break
+        if header is None:
+            return []
+        cols = {i: _COL_ALIASES.get(str(h).strip().lower()) for i, h in enumerate(header) if h is not None}
+        out = []
+        for idx, r in enumerate(rows_iter, start=2):
+            if not r or not any(c is not None and str(c).strip() for c in r):
+                continue
+            rec = {}
+            for i, val in enumerate(r):
+                key = cols.get(i)
+                if key and val is not None:
+                    rec[key] = val if key == "datetime" else str(val).strip()
+            out.append({"row": idx, **_resolve(rec)})
+        return out
+
+    raise HTTPException(
+        status_code=400,
+        detail="Unsupported file type — upload a .csv or .xlsx file.",
+    )
+
+
+async def _enqueue_reminder_calls(
+    conn, hospital_id: str, slug: str, appointment_id: str,
+    phone: str, patient_name: str, slot_time: datetime, hosp: dict, doctor_name: str,
+) -> int:
+    """Enqueue 24h/2h reminder rows for an imported appointment, per toggles.
+
+    A reminder whose send time has already passed (e.g. a same-day import for an
+    appointment under 24h away) is skipped for that offset; the later offset
+    still applies. Returns the number of rows enqueued.
+    """
+    now = datetime.now(timezone.utc)
+    plans = (
+        ("reminder_24h", bool(hosp["remind_24h_enabled"]), timedelta(hours=24)),
+        ("reminder_2h",  bool(hosp["remind_2h_enabled"]),  timedelta(hours=2)),
+    )
+    enqueued = 0
+    for call_type, enabled, offset in plans:
+        if not enabled:
+            continue
+        scheduled_at = slot_time - offset
+        if scheduled_at < now:
+            continue
+        already = await conn.fetchval(
+            """SELECT 1 FROM outbound_call_queue
+               WHERE appointment_id=$1 AND call_type=$2 AND status='pending'""",
+            appointment_id, call_type,
+        )
+        if already:
+            continue
+        await conn.execute(
+            """INSERT INTO outbound_call_queue
+                 (id, hospital_id, appointment_id, call_type, phone, patient_name,
+                  context_json, scheduled_at, tenant_slug)
+               VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8,$9)""",
+            str(uuid.uuid4()), hospital_id, appointment_id, call_type, phone, patient_name,
+            json.dumps({"call_type": call_type, "patient_name": patient_name,
+                        "doctor_name": doctor_name}),
+            scheduled_at, slug,
+        )
+        enqueued += 1
+    return enqueued
+
+
+@router.post(
+    "/hospitals/{hospital_id}/appointments/import",
+    dependencies=[Depends(_require_auth)],
+)
+async def import_appointments(
+    hospital_id: str,
+    file: UploadFile = File(...),
+    doctor_id: str = Form(...),
+):
+    """Import a per-doctor appointment list (multipart .csv/.xlsx) and enqueue
+    the hospital's enabled reminder calls. Columns: patient_name, phone, datetime.
+
+    Returns ``{imported, skipped:[{row, reason}]}``. Rows are deduped on
+    (hospital, doctor, phone, slot_time); imported appointments are marked
+    ``source='import'`` so the time-based reminder loop leaves them to the queue.
+    """
+    content = await file.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="Empty file.")
+    if len(content) > _MAX_IMPORT_BYTES:
+        raise HTTPException(
+            status_code=413,
+            detail=f"File too large (max {_MAX_IMPORT_BYTES // (1024 * 1024)} MB).",
+        )
+
+    parsed = _parse_import_file(file.filename or "", content)
+
+    pool = await _db()
+    async with pool.acquire() as conn:
+        hosp = await conn.fetchrow(
+            "SELECT slug, remind_24h_enabled, remind_2h_enabled FROM hospitals WHERE id=$1",
+            hospital_id,
+        )
+        if not hosp:
+            raise HTTPException(status_code=404, detail="Hospital not found")
+        doctor = await conn.fetchrow(
+            "SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2",
+            doctor_id, hospital_id,
+        )
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor not found for this hospital")
+
+        slug = hosp["slug"] or "default"
+        doctor_name = doctor["name"] or ""
+        imported = 0
+        skipped: list[dict] = []
+
+        for item in parsed:
+            rownum = item["row"]
+            name = (item.get("patient_name") or "").strip()
+            phone = _normalize_phone(item.get("phone") or "")
+            slot = _parse_import_datetime(item.get("datetime"))
+            if not name:
+                skipped.append({"row": rownum, "reason": "missing patient name"})
+                continue
+            if not phone:
+                skipped.append({"row": rownum, "reason": "invalid phone"})
+                continue
+            if not slot:
+                skipped.append({"row": rownum, "reason": "invalid or missing datetime"})
+                continue
+
+            dup = await conn.fetchval(
+                """SELECT 1 FROM appointments
+                   WHERE hospital_id=$1 AND doctor_id=$2
+                     AND patient_phone=$3 AND slot_time=$4""",
+                hospital_id, doctor_id, phone, slot,
+            )
+            if dup:
+                skipped.append({"row": rownum, "reason": "duplicate (already imported)"})
+                continue
+
+            appt_id = str(uuid.uuid4())
+            await conn.execute(
+                """INSERT INTO appointments
+                     (id, hospital_id, patient_name, patient_phone, doctor_id,
+                      slot_time, status, source)
+                   VALUES ($1,$2,$3,$4,$5,$6,'booked','import')""",
+                appt_id, hospital_id, name, phone, doctor_id, slot,
+            )
+            await _enqueue_reminder_calls(
+                conn, hospital_id, slug, appt_id, phone, name, slot, hosp, doctor_name,
+            )
+            imported += 1
+
+    logger.info(
+        "appointments_imported", hospital_id=hospital_id, doctor_id=doctor_id,
+        imported=imported, skipped=len(skipped),
+    )
+    return {"imported": imported, "skipped": skipped}
+
+
+_REMINDER_SETTING_COLS = (
+    "remind_24h_enabled", "remind_2h_enabled", "call_on_doctor_unavailable_enabled",
+)
+
+
+class ReminderSettingsBody(BaseModel):
+    remind_24h_enabled: Optional[bool] = None
+    remind_2h_enabled: Optional[bool] = None
+    call_on_doctor_unavailable_enabled: Optional[bool] = None
+
+
+async def _read_reminder_settings(conn, hospital_id: str) -> dict:
+    row = await conn.fetchrow(
+        f"SELECT {', '.join(_REMINDER_SETTING_COLS)} FROM hospitals WHERE id=$1",
+        hospital_id,
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Hospital not found")
+    return {c: bool(row[c]) for c in _REMINDER_SETTING_COLS}
+
+
+@router.get(
+    "/hospitals/{hospital_id}/reminder-settings",
+    dependencies=[Depends(_require_auth)],
+)
+async def get_reminder_settings(hospital_id: str):
+    """Return the hospital's reminder toggles."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        return await _read_reminder_settings(conn, hospital_id)
+
+
+@router.put(
+    "/hospitals/{hospital_id}/reminder-settings",
+    dependencies=[Depends(_require_auth)],
+)
+async def update_reminder_settings(hospital_id: str, body: ReminderSettingsBody):
+    """Update any subset of the hospital's reminder toggles; returns the new state."""
+    updates = {c: getattr(body, c) for c in _REMINDER_SETTING_COLS
+               if getattr(body, c) is not None}
+    pool = await _db()
+    async with pool.acquire() as conn:
+        if updates:
+            sets = ", ".join(f"{c}=${i}" for i, c in enumerate(updates, start=1))
+            await conn.execute(
+                f"UPDATE hospitals SET {sets} WHERE id=${len(updates) + 1}",
+                *updates.values(), hospital_id,
+            )
+            _invalidate(hospital_id)
+        return await _read_reminder_settings(conn, hospital_id)
+
+
+@router.get(
+    "/hospitals/{hospital_id}/outbound-queue",
+    dependencies=[Depends(_require_auth)],
+)
+async def list_outbound_queue(hospital_id: str, limit: int = 100):
+    """Upcoming + recent outbound reminder calls for the status view."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """SELECT id, appointment_id, call_type, phone, patient_name,
+                      scheduled_at, status, attempt_count
+               FROM outbound_call_queue
+               WHERE hospital_id=$1
+               ORDER BY scheduled_at DESC NULLS LAST
+               LIMIT $2""",
+            hospital_id, min(limit, 500),
+        )
+    return [
+        {
+            "id": str(r["id"]),
+            "appointment_id": str(r["appointment_id"]) if r["appointment_id"] else None,
+            "patient_name": r["patient_name"] or "",
+            "phone": r["phone"] or "",
+            "call_type": r["call_type"],
+            "scheduled_for": r["scheduled_at"].isoformat() if r["scheduled_at"] else None,
+            "status": _QUEUE_STATUS_MAP.get(r["status"], r["status"]),
+            "attempts": r["attempt_count"],
+        }
+        for r in rows
     ]
 
 

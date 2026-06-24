@@ -38,8 +38,9 @@
       </div>
     </div>
     <form @submit.prevent="login()">
-      <label class="label">Admin Password</label>
-      <input x-model="loginPassword" type="password" placeholder="Enter admin password"
+      <input x-model="loginUsername" type="text" placeholder="Username"
+        class="input mb-3" autocomplete="username">
+      <input x-model="loginPassword" type="password" placeholder="Password"
         class="input mb-4" :class="loginError ? 'border-red-400' : ''">
       <div x-show="loginError" class="text-red-500 text-sm mb-3" x-text="loginError"></div>
       <button type="submit" class="btn-primary w-full" :disabled="loginLoading">
@@ -75,7 +76,7 @@
       <template x-if="currentHospital">
         <div>
           <div class="px-2 py-1.5 text-sm font-medium text-gray-900" x-text="currentHospital.name"></div>
-          <button @click="currentHospital=null;tab='hospitals'" class="px-2 text-xs text-gray-400 hover:text-gray-600">
+          <button x-show="role !== 'hospital_admin'" @click="currentHospital=null;tab='hospitals'" class="px-2 text-xs text-gray-400 hover:text-gray-600">
             ← Switch hospital
           </button>
         </div>
@@ -110,7 +111,10 @@
     </nav>
 
     <div class="px-4 py-3 border-t border-gray-200">
-      <button @click="logout()" class="text-sm text-gray-400 hover:text-gray-600">Sign out</button>
+      <div class="text-xs text-gray-400 mb-2 px-1" x-text="role==='super_admin'?'Signed in as Super Admin':'Signed in as Hospital Admin'"></div>
+      <button @click="logout()" class="w-full flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-medium text-red-600 bg-red-50 hover:bg-red-100 transition-colors">
+        <span>↪</span><span>Log out</span>
+      </button>
     </div>
   </aside>
 
@@ -124,7 +128,7 @@
       x-text="notice.msg"></div>
 
     <!-- ── HOSPITALS LIST ── -->
-    <div x-show="tab==='hospitals'">
+    <div x-show="tab==='hospitals' && role !== 'hospital_admin'">
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-xl font-semibold text-gray-900">All Hospitals</h1>
         <button @click="openHospitalModal()" class="btn-primary">+ Add Hospital</button>
@@ -1212,13 +1216,15 @@
 </div>
 
 <script>
-const BASE = '/admin';
+const BASE = '{{ admin_prefix }}';
 const DOW_FULL = {0:'Sunday',1:'Monday',2:'Tuesday',3:'Wednesday',4:'Thursday',5:'Friday',6:'Saturday'};
 
 function app() {
   return {
     token: localStorage.getItem('arteq_token') || '',
-    loginPassword: '', loginError: '', loginLoading: false,
+    role: localStorage.getItem('arteq_role') || '',
+    userTenants: JSON.parse(localStorage.getItem('arteq_tenants') || '[]'),
+    loginUsername: '', loginPassword: '', loginError: '', loginLoading: false,
     tab: 'hospitals',
     hospitals: [],
     tenants: [],
@@ -1249,7 +1255,7 @@ function app() {
       { id:'overview', icon:'📊', label:'Overview' },
       { id:'settings', icon:'⚙️', label:'Settings' },
       { id:'departments', icon:'🏗️', label:'Departments' },
-      { id:'doctors', icon:'👨‍⚕️', label:'Doctors' },
+      // { id:'doctors', icon:'👨‍⚕️', label:'Doctors' },  // disabled
       { id:'billing', icon:'💳', label:'Billing' },
       { id:'emergency', icon:'🚨', label:'Emergency' },
       { id:'faqs', icon:'❓', label:'FAQs' },
@@ -1288,17 +1294,29 @@ function app() {
     async login() {
       this.loginLoading = true; this.loginError = '';
       try {
-        const d = await this.api('/login', { method:'POST', body: JSON.stringify({ password: this.loginPassword }) });
+        const body = this.loginUsername
+          ? { username: this.loginUsername.trim(), password: this.loginPassword }
+          : { password: this.loginPassword };
+        const d = await this.api('/login', { method:'POST', body: JSON.stringify(body) });
         if (d?.access_token) {
           this.token = d.access_token;
+          this.role = d.role || 'super_admin';
+          this.userTenants = d.tenants || [];
           localStorage.setItem('arteq_token', this.token);
+          localStorage.setItem('arteq_role', this.role);
+          localStorage.setItem('arteq_tenants', JSON.stringify(this.userTenants));
           await this.loadHospitals();
+          // Hospital admin: auto-select their hospital
+          if (this.role === 'hospital_admin' && this.userTenants.length > 0) {
+            const h = this.hospitals.find(h => h.slug === this.userTenants[0]);
+            if (h) await this.selectHospital(h);
+          }
         }
       } catch(e) { this.loginError = 'Incorrect password. Try again.'; }
       finally { this.loginLoading = false; }
     },
 
-    logout() { this.token=''; localStorage.removeItem('arteq_token'); this.currentHospital=null; },
+    logout() { this.token=''; this.role=''; this.userTenants=[]; localStorage.removeItem('arteq_token'); localStorage.removeItem('arteq_role'); localStorage.removeItem('arteq_tenants'); this.currentHospital=null; },
 
     async loadHospitals() {
       try { this.hospitals = await this.api('/hospitals') || []; } catch {}

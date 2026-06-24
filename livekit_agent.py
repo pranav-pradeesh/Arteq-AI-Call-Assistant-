@@ -3,7 +3,7 @@ Arteq Hospital Voice Agent — LiveKit 1.5.x edition.
 
 Full-featured AI receptionist for Kerala hospitals:
   • Silero VAD → Sarvam STT (Saarika, transcribes in the caller's own language)
-  • Groq LLaMA 70B (via OpenAI-compatible base_url)
+  • Google AI Studio Gemini (default: gemini-2.5-flash-lite, via OpenAI-compatible base_url)
   • Sarvam TTS (Bulbul v3, Malayalam, "shubh" voice)
   • Acoustic Sensory Layer — detects patient distress from PCM stats
   • Function tools — book/cancel appointments, callbacks, SMS, emergency
@@ -15,7 +15,7 @@ Run:
 
 Required env vars:
   LIVEKIT_URL, LIVEKIT_API_KEY, LIVEKIT_API_SECRET
-  SARVAM_API_KEY, GROQ_API_KEY
+  SARVAM_API_KEY, GOOGLE_API_KEY
   DATABASE_URL
 """
 from __future__ import annotations
@@ -594,43 +594,61 @@ _REPEAT_PATTERNS = [
 
 
 def _build_llm(premium: bool = True):
-    """LLM chain — selectable primary brain with a Sarvam safety net.
+    """Single conversational brain. Sarvam-30B is NOT used as an LLM.
 
-    LLM_PROVIDER selects the PRIMARY conversational brain (default "gemini"):
-      • "gemini" → Google Gemini Flash (gemini-2.5-flash). Low time-to-first-token
-                   (~0.5s vs Sarvam-30B's ~1.9s observed in prod) AND strong
-                   Malayalam, so it cuts latency without the quality hit a
-                   pure-English model brings. REQUIRES a FUNDED Google API key
-                   (real prepaid billing or Vertex) — the Google free-trial credit
-                   CANNOT pay for the Gemini API and 429s every turn. If your key
-                   is unfunded, set LLM_PROVIDER=sarvam, otherwise every turn fails
-                   to Gemini and falls back to Sarvam, ADDING latency.
-      • "sarvam" → Sarvam-30B. Built for Indian languages — very natural Malayalam,
-                   no extra billing — but a higher TTFT. The quality-first / safe
-                   choice. Runs alone.
+    LLM_PROVIDER selects the brain (default "gemini"):
+      • "gemini" → Google AI Studio Gemini (default GOOGLE_MODEL=gemini-2.5-flash-lite)
+                   via Google's own OpenAI-compatible endpoint. Low time-to-first-token
+                   AND strong Malayalam. flash-lite is the cheapest tier; raise
+                   GOOGLE_MODEL to gemini-2.5-flash for higher quality. REQUIRES a
+                   FUNDED Google API key (real prepaid billing or Vertex) — the Google
+                   free-trial credit CANNOT pay for the Gemini API and 429s every turn.
+                   There is NO automatic fallback now, so an unfunded key drops turns;
+                   use LLM_PROVIDER=openrouter if you don't have funded Google billing.
+      • "openrouter" → OpenRouter, an OpenAI-compatible gateway routing to
+                   OPENROUTER_MODEL (default google/gemini-2.5-flash-lite). ONE key
+                   (OPENROUTER_API_KEY) pays for any model OpenRouter hosts, so it
+                   avoids the funded-Google-billing requirement of direct Gemini.
       • "groq"   → Groq llama-3.3-70b-versatile. Lowest TTFT, but OPT-IN: requires
-                   an ACTIVE Groq developer plan (currently inactive).
+                   an ACTIVE Groq developer plan, and its Malayalam is weaker.
 
-    A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback
-    (FallbackAdapter switches only on errors, e.g. a rate-limit), so a provider
-    outage degrades to the Indian-language brain rather than dropping the call.
-    Sarvam-primary runs alone. GEMINI_ENABLED=true still appends Gemini as an
-    extra fallback when it isn't already the primary (back-compat).
-
-    Sarvam authenticates with an `api-subscription-key` header, not Bearer.
+    Sarvam-30B was removed as a conversational brain — it answered terse one-word
+    Malayalam turns poorly. (Sarvam is still used for STT/Saarika and TTS/Bulbul;
+    that is unaffected.) A single brain now answers every turn, with no error
+    fallback: the unknown/legacy "sarvam" provider value resolves to Gemini.
     """
     google_key = os.getenv("GOOGLE_API_KEY", "")
     groq_key = os.getenv("GROQ_API_KEY", "")
-    sarvam_key = os.getenv("SARVAM_API_KEY", "")
+    openrouter_key = os.getenv("OPENROUTER_API_KEY", "")
     # A phone receptionist speaks 1–2 short sentences, so a tight reply ceiling
     # keeps generation time (and therefore latency) low. Shared by all brains.
     _max_tokens = int(os.getenv("LLM_MAX_TOKENS", "300"))
+
+    def _openrouter() -> Optional[object]:
+        if not openrouter_key:
+            return None
+        # OpenRouter is OpenAI-compatible (Bearer auth). The optional HTTP-Referer
+        # and X-Title headers attribute traffic to this app on OpenRouter's
+        # dashboards/leaderboards; both are no-ops if you leave the defaults.
+        return openai.LLM(
+            model=os.getenv("OPENROUTER_MODEL", "google/gemini-2.5-flash-lite"),
+            temperature=0.4,
+            max_completion_tokens=_max_tokens,
+            client=_AsyncOpenAI(
+                api_key=openrouter_key,
+                base_url=os.getenv("OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"),
+                default_headers={
+                    "HTTP-Referer": os.getenv("OPENROUTER_SITE_URL", "https://arteq.ai"),
+                    "X-Title": os.getenv("OPENROUTER_APP_NAME", "Arteq AI Call Assistant"),
+                },
+            ),
+        )
 
     def _gemini() -> Optional[object]:
         if not google_key:
             return None
         return openai.LLM(
-            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash"),
+            model=os.getenv("GOOGLE_MODEL", "gemini-2.5-flash-lite"),
             temperature=0.4,
             max_completion_tokens=_max_tokens,
             client=_AsyncOpenAI(
@@ -652,51 +670,24 @@ def _build_llm(premium: bool = True):
             ),
         )
 
-    def _sarvam() -> Optional[object]:
-        if not sarvam_key:
-            return None
-        return openai.LLM(
-            model=os.getenv("SARVAM_MODEL", "sarvam-30b"),
-            temperature=0.4,
-            max_completion_tokens=_max_tokens,
-            client=_AsyncOpenAI(
-                api_key=sarvam_key,
-                base_url="https://api.sarvam.ai/v1",
-                default_headers={"api-subscription-key": sarvam_key},
-            ),
-        )
-
     provider = (os.getenv("LLM_PROVIDER", "gemini") or "gemini").strip().lower()
-    # A fast primary (gemini/groq) keeps Sarvam as an automatic error-fallback;
-    # Sarvam primary runs alone (no dead fallback parked behind it). An
-    # unrecognised value degrades to the safe Sarvam path.
-    primary = {"gemini": _gemini, "groq": _groq, "sarvam": _sarvam}.get(provider, _sarvam)
-    builders = (primary,) if primary is _sarvam else (primary, _sarvam)
+    # Sarvam is no longer a conversational brain. An unrecognised value — including
+    # the legacy "sarvam" — resolves to Gemini, the default brain.
+    build = {
+        "gemini": _gemini,
+        "openrouter": _openrouter,
+        "groq": _groq,
+    }.get(provider, _gemini)
 
-    chain: list = []
-    gemini_in_chain = False
-    for build in builders:
-        llm = build()
-        if llm is not None:
-            chain.append(llm)
-            gemini_in_chain = gemini_in_chain or (build is _gemini)
-
-    # Back-compat: GEMINI_ENABLED appends Gemini as a further fallback when it is
-    # not already the primary.
-    gemini_on = os.getenv("GEMINI_ENABLED", "false").lower() in ("1", "true", "yes")
-    if gemini_on and not gemini_in_chain:
-        g = _gemini()
-        if g is not None:
-            chain.append(g)
-
-    if not chain:
+    llm = build()
+    if llm is None:
         raise RuntimeError(
-            "No LLM configured. Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
-            "SARVAM_API_KEY, and/or GROQ_API_KEY."
+            f"LLM_PROVIDER={provider!r} selected but its API key is not set. "
+            "Set GOOGLE_API_KEY (LLM_PROVIDER=gemini), "
+            "OPENROUTER_API_KEY (LLM_PROVIDER=openrouter), or GROQ_API_KEY (LLM_PROVIDER=groq)."
         )
-    if len(chain) == 1:
-        return chain[0]
-    return agents_llm.FallbackAdapter(chain)
+    # Single brain, no FallbackAdapter — Sarvam is intentionally not parked behind it.
+    return llm
 
 
 # ==============================================================================
@@ -1006,8 +997,9 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
     # audio is identical per hour-bucket → first call of each bucket warms the TTS
     # cache, every subsequent call is an instant cache hit.
     from src.tts_normalize import name_for_lang
-    # Outbound calls are always English-language, so always use the Latin name.
-    # Inbound uses the native-script name for Indic langs so TTS phonetics are correct.
+    # Hospital name: Latin form for outbound (a proper noun spoken inside the
+    # greeting, even a Malayalam one). Inbound uses the native-script name so the
+    # TTS phonetics are correct.
     if hospital_ctx:
         hosp_name_en = hospital_ctx.name
         hosp_name = (hosp_name_en if outbound_context
@@ -1019,15 +1011,39 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
         call_type = outbound_context.get("call_type", "")
         pname = outbound_context.get("patient_name", "")
         dname = outbound_context.get("doctor_name", "")
+        # Templates add the title themselves, so strip a leading "Dr." from the
+        # stored name — otherwise it reads "Dr. Dr. Meera Joseph".
+        _d = dname.strip()
+        if _d.lower().startswith("dr."):
+            _d = _d[3:].strip()
+        elif _d.lower().startswith("dr "):
+            _d = _d[3:].strip()
+        dname = _d
         date  = outbound_context.get("appointment_date", "")
         ttime = outbound_context.get("appointment_time", "")
+        # Malayalam-first: a ml-IN tenant greets outbound in Malayalam (medical and
+        # proper nouns stay English, the way Keralites actually speak). Other
+        # languages fall back to English.
+        ml = (agent_language or "").lower().startswith("ml")
         if call_type == "confirmation":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ് വിളിക്കുന്നത്. "
+                    f"{date}-ന് {ttime}-ന് {dname} ഡോക്ടറുമായുള്ള നിങ്ങളുടെ appointment "
+                    f"ഉറപ്പിക്കാനാണ് വിളിച്ചത്. വരാൻ പറ്റുമോ?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
                 "Can you attend?"
             )
         elif call_type == "reminder":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{date}-ന് {dname} ഡോക്ടറുമായുള്ള appointment ഓർമിപ്പിക്കാനാണ് വിളിച്ചത്. "
+                    f"എന്തെങ്കിലും സംശയം ഉണ്ടോ?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"This is a reminder of your appointment with Dr. {dname} on {date}. "
@@ -1036,22 +1052,45 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
         elif call_type == "doctor_availability":
             dstatus = outbound_context.get("doctor_status", "")
             if dstatus == "unavailable":
+                if ml:
+                    return (
+                        f"നമസ്കാരം {pname}, ഇന്നത്തെ നിങ്ങളുടെ appointment സംബന്ധിച്ച് "
+                        f"{hosp_name}-ൽ നിന്നാണ്. ക്ഷമിക്കണം, {dname} ഡോക്ടർ ഇന്ന് ലഭ്യമല്ല. "
+                        f"reschedule ചെയ്യാൻ സഹായിക്കട്ടെ?"
+                    )
                 return (
                     f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                     f"Unfortunately Dr. {dname} is unavailable today. May I help you reschedule?"
                 )
             elif dstatus == "delayed":
+                if ml:
+                    return (
+                        f"നമസ്കാരം {pname}, ഇന്നത്തെ appointment സംബന്ധിച്ച് {hosp_name}-ൽ നിന്നാണ്. "
+                        f"{dname} ഡോക്ടർക്ക് ഇന്ന് അൽപം വൈകും. നിങ്ങൾ വരാൻ ആഗ്രഹിക്കുന്നുണ്ടോ?"
+                    )
                 return (
                     f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                     f"Dr. {dname} is running a little late today. Would you still like to come in?"
+                )
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, ഇന്നത്തെ appointment സംബന്ധിച്ച് {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{dname} ഡോക്ടർ planned പ്രകാരം ലഭ്യമാണ്. എന്തെങ്കിലും സംശയം ഉണ്ടോ?"
                 )
             return (
                 f"Hello {pname}, this is {hosp_name} calling about your appointment today. "
                 f"Dr. {dname} is available as scheduled. Do you have any questions?"
             )
         elif call_type == "callback":
+            if ml:
+                return f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. എങ്ങനെ സഹായിക്കാം?"
             return f"Hello {pname}, this is {hosp_name} calling. How can I help you today?"
         elif call_type == "followup":
+            if ml:
+                return (
+                    f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. "
+                    f"{dname} ഡോക്ടറെ കണ്ടതിനു ശേഷം ഇപ്പോൾ എങ്ങനെ ഉണ്ട്?"
+                )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
                 f"How are you feeling after your visit with Dr. {dname}?"
@@ -1155,6 +1194,13 @@ class HospitalVoiceAgent(Agent):
         even the first call on a cold worker is near-instant.
         """
         await self.session.say(self._greeting, allow_interruptions=True)
+        # Mark that the opening greeting actually reached TTS. A turns=0 call
+        # where this is True is a caller who heard Arya and hung up; if it is
+        # False the caller dropped during the pre-greeting setup (dead air).
+        try:
+            self.session.userdata["greeting_delivered"] = True
+        except Exception:
+            pass
 
     async def on_user_turn_completed(
         self,
@@ -1339,30 +1385,30 @@ def _strip_tool_syntax(text: str) -> str:
     return _TOOL_SYNTAX_RE.sub("", text).strip()
 
 
-# Provider rates (paise). Tune via env if pricing changes; defaults reflect
-# Sarvam's published list as of 2026-06 (Saarika STT ₹30/audio-hr, Bulbul TTS
-# ₹0.30 per 1000 chars) and Gemini 2.5-flash for the LLM ($0.30/1M input +
-# $2.50/1M output ≈ ~10 paise per short receptionist turn at ~₹85/$). Set
-# LLM_PAISE_PER_TURN=0 if LLM_PROVIDER=sarvam (bundled, no separate LLM billing).
-_STT_PAISE_PER_MIN = float(os.getenv("STT_PAISE_PER_MIN", "50"))    # ₹30/hr = 50 paise/min
-_TTS_PAISE_PER_KCHAR = float(os.getenv("TTS_PAISE_PER_KCHAR", "30"))  # ₹0.30/1000 chars
-_LLM_PAISE_PER_TURN = float(os.getenv("LLM_PAISE_PER_TURN", "10"))  # Gemini 2.5-flash ≈ 10 paise/turn
+def _spoken_chars(transcript: list[dict]) -> int:
+    """Characters Arya actually spoke (what Sarvam TTS bills on)."""
+    return sum(len(m.get("text", "")) for m in transcript if m.get("role") == "assistant")
 
 
-def _estimate_cost_paise(duration_s: float, transcript: list[dict]) -> int:
-    """Rough per-call cost in paise. STT bills on call duration (it transcribes
-    the whole audio stream), TTS bills on the characters Arya actually spoke, and
-    the LLM (Gemini 2.5-flash) bills ~10 paise per turn. Good enough to surface a
-    per-call rupee figure on the dashboard and catch a runaway-cost regression —
-    not an invoice, and it excludes telephony (Vobiz) and LiveKit minutes."""
-    minutes = max(duration_s, 0.0) / 60.0
-    stt = minutes * _STT_PAISE_PER_MIN
-    spoken_chars = sum(
-        len(m.get("text", "")) for m in transcript if m.get("role") == "assistant"
+def _cost_breakdown_paise(
+    duration_s: float,
+    transcript: list[dict],
+    prompt_tokens: int = 0,
+    completion_tokens: int = 0,
+):
+    """Per-service cost from REAL usage (see src.services.cost_model).
+
+    STT on real audio seconds, TTS on real spoken characters, LLM on real
+    prompt/completion tokens × the provider's published price. Telephony here is
+    the duration-based estimate; the Vobiz CDR job later overwrites it with the
+    real billed INR cost. Returns a CostBreakdown (has .cost_paise + .as_dict())."""
+    from src.services.cost_model import call_cost_breakdown
+    return call_cost_breakdown(
+        duration_s=duration_s,
+        spoken_chars=_spoken_chars(transcript),
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
-    tts = (spoken_chars / 1000.0) * _TTS_PAISE_PER_KCHAR
-    llm = (len(transcript) // 2) * _LLM_PAISE_PER_TURN
-    return max(0, round(stt + tts + llm))
 
 
 class _LatencyMeter:
@@ -1382,6 +1428,9 @@ class _LatencyMeter:
     def __init__(self) -> None:
         self._sum = {"eou": 0.0, "llm": 0.0, "tts": 0.0}
         self._cnt = {"eou": 0, "llm": 0, "tts": 0}
+        # Real LLM token usage accumulated across the call, for per-service cost.
+        self._prompt_tokens = 0
+        self._completion_tokens = 0
 
     def on_item(self, ev) -> None:
         item = getattr(ev, "item", None)
@@ -1398,6 +1447,23 @@ class _LatencyMeter:
             if isinstance(val, (int, float)) and val > 0:
                 self._sum[key] += float(val)
                 self._cnt[key] += 1
+        # Token usage key names vary across livekit-agents versions, so match
+        # defensively on substrings rather than a fixed key (logged once in prod
+        # via the cost line so we can confirm the live shape).
+        for mkey, val in metrics.items():
+            if not isinstance(val, (int, float)) or val <= 0:
+                continue
+            k = mkey.lower()
+            if "token" not in k:
+                continue
+            if "prompt" in k or "input" in k:
+                self._prompt_tokens += int(val)
+            elif "completion" in k or "output" in k:
+                self._completion_tokens += int(val)
+
+    def tokens(self) -> tuple[int, int]:
+        """(prompt_tokens, completion_tokens) accumulated across the call."""
+        return self._prompt_tokens, self._completion_tokens
 
     def avg_ms(self) -> int:
         total_s = sum(
@@ -1644,18 +1710,21 @@ async def entrypoint(ctx: JobContext) -> None:
         vad=ctx.proc.userdata.get("vad"),
     )
 
-    # Groq free-tier TPM is small (12k). Disable preemptive generation (it fires
-    # a second LLM call that our on_user_turn_completed mutation invalidates),
-    # cap retries so a 429 doesn't hammer the same minute 4x, and limit tool
-    # steps so a turn can't chain many large LLM calls.
+    # Groq free-tier TPM is small (12k). Cap retries so a 429 doesn't hammer the
+    # same minute 4x, and limit tool steps so a turn can't chain many large LLM
+    # calls.
     session = AgentSession(
         userdata=session_data,
         # Endpointing + preemptive generation moved under turn_handling in
         # livekit-agents 1.5 (the flat kwargs are deprecated, removed in 2.0);
         # this is the exact equivalent the SDK's own compat shim builds.
-        #   - preemptive_generation: start the LLM the moment the caller pauses,
-        #     before end-of-turn is confirmed, then keep/discard the draft once
-        #     VAD settles — removes most post-speech dead air.
+        #   - preemptive_generation: DISABLED. It starts the LLM the moment the
+        #     caller pauses, on the RAW user message — but this agent rewrites
+        #     new_message.content in on_user_turn_completed (acoustic metadata,
+        #     DTMF remap, repeat-suppression). That mutation invalidates the
+        #     preemptive draft, and the turn can end up producing NO reply at all
+        #     (observed as Arya going silent right after the caller names a
+        #     doctor). Correctness over the small dead-air saving — keep it off.
         #   - endpointing min/max delay: cut the post-speech wait before the LLM
         #     fires (defaults 0.5/3.0s); 0.2/3.0 makes Arya feel near-realtime,
         #     max stays 3.0 so a slow speaker pausing mid-thought isn't cut off.
@@ -1663,7 +1732,7 @@ async def entrypoint(ctx: JobContext) -> None:
             endpointing=EndpointingOptions(
                 min_delay=_ENDPOINT_MIN_DELAY, max_delay=_ENDPOINT_MAX_DELAY
             ),
-            preemptive_generation=PreemptiveGenerationOptions(enabled=True),
+            preemptive_generation=PreemptiveGenerationOptions(enabled=False),
         ),
         max_tool_steps=2,
         conn_options=SessionConnectOptions(
@@ -1674,6 +1743,19 @@ async def entrypoint(ctx: JobContext) -> None:
     # Perceived-latency meter: averages EOU + LLM TTFT + TTS TTFB across the call.
     meter = _LatencyMeter()
     session.on("conversation_item_added", meter.on_item)
+
+    # Immediate-disconnect diagnostics. A caller who drops before any turn
+    # completes (turns=0) is either a benign hangup/misdial or a symptom of
+    # pre-greeting dead air. Record HOW LONG they stayed and whether the
+    # greeting was delivered so the two cases can be told apart in the logs.
+    @ctx.room.on("participant_disconnected")
+    def _on_participant_left(participant):
+        elapsed = (datetime.now(timezone.utc) - call_started_at).total_seconds()
+        _log.info(
+            "participant disconnected room=%s call=%s after=%.1fs greeting_delivered=%s",
+            room_name, call_id[:8], elapsed,
+            session_data.get("greeting_delivered", False),
+        )
 
     # ── Post-call cleanup ─────────────────────────────────────────────────────
     _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
@@ -1715,16 +1797,42 @@ async def entrypoint(ctx: JobContext) -> None:
                 from src.db.queries import write_call_log
                 outcome = transfer_dest if transfer_dest else "completed"
                 duration_s = (ended_at - call_started_at).total_seconds()
-                cost_paise = _estimate_cost_paise(duration_s, transcript)
-                # Log WHERE the per-turn latency is spent so we can see the
-                # bottleneck in the deploy logs (grep "latency_breakdown").
-                _bd = meter.breakdown_ms()
-                print(
-                    f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
-                    f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
-                    f"turns={total_turns}",
-                    file=sys.stderr, flush=True,
-                )
+                # Per-service cost from REAL usage (audio seconds, spoken chars,
+                # LLM tokens) × published rate. Telephony here is the duration
+                # estimate; the Vobiz CDR job overwrites it with the billed cost.
+                _ptok, _ctok = meter.tokens()
+                _cost = _cost_breakdown_paise(duration_s, transcript, _ptok, _ctok)
+                cost_paise = _cost.cost_paise
+                direction = "outbound" if outbound_context else "inbound"
+                if total_turns > 0:
+                    # Log WHERE the per-turn latency is spent so we can see the
+                    # bottleneck in the deploy logs (grep "latency_breakdown"), plus
+                    # the cost split (grep "cost_breakdown" — confirms live token capture).
+                    _bd = meter.breakdown_ms()
+                    print(
+                        f"[arteq] latency_breakdown call={call_id} total={meter.avg_ms()}ms "
+                        f"eou(vad)={_bd['eou']}ms llm_ttft={_bd['llm']}ms tts_ttfb={_bd['tts']}ms "
+                        f"turns={total_turns}",
+                        file=sys.stderr, flush=True,
+                    )
+                    print(
+                        f"[arteq] cost_breakdown call={call_id} total={cost_paise}p "
+                        f"stt={_cost.stt_paise}p tts={_cost.tts_paise}p llm={_cost.llm_paise}p "
+                        f"tel={_cost.telephony_paise}p tokens={_ptok}+{_ctok}",
+                        file=sys.stderr, flush=True,
+                    )
+                else:
+                    # No turn ever completed — the caller dropped before the first
+                    # exchange. This is NOT an error, so log it at info level (not
+                    # stderr) to keep real failures visible. greeting_delivered
+                    # distinguishes a benign hangup (True) from pre-greeting dead
+                    # air where the agent was too slow to speak (False).
+                    _log.info(
+                        "call ended with no turns room=%s call=%s greeting_delivered=%s "
+                        "duration=%.1fs — caller disconnected before first exchange",
+                        room_name, call_id[:8],
+                        session_data.get("greeting_delivered", False), duration_s,
+                    )
                 await write_call_log(
                     hospital_id=hospital_id,
                     call_id=call_id,
@@ -1738,6 +1846,15 @@ async def entrypoint(ctx: JobContext) -> None:
                     intents=intents,
                     outcome=outcome,
                     emotional_state=emotional_state,
+                    stt_paise=_cost.stt_paise,
+                    tts_paise=_cost.tts_paise,
+                    llm_paise=_cost.llm_paise,
+                    telephony_paise=_cost.telephony_paise,
+                    llm_prompt_tokens=_ptok,
+                    llm_completion_tokens=_ctok,
+                    stt_audio_seconds=int(max(duration_s, 0.0)),
+                    tts_chars=_spoken_chars(transcript),
+                    direction=direction,
                 )
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
@@ -1748,6 +1865,38 @@ async def entrypoint(ctx: JobContext) -> None:
                 await emit_call_ended(hospital_id, call_id)
             except Exception:
                 pass
+
+            # Auto-redial on early drop: an outbound queue call that was answered
+            # but where the patient never engaged (total_turns == 0 — instant drop
+            # or dead air) is re-queued once more, capped by the original
+            # max_attempts. A call with real turns is left as completed.
+            try:
+                _rq = (outbound_context or {}).get("_requeue")
+                if _rq and direction == "outbound" and total_turns == 0:
+                    _att = int(_rq.get("attempt", 1))
+                    _max = int(_rq.get("max_attempts", 3))
+                    if _att < _max:
+                        import json as _json2
+                        from src.db.queries import get_pool as _get_pool
+                        _ctx = {k: v for k, v in (outbound_context or {}).items() if k != "_requeue"}
+                        _pool = await _get_pool()
+                        async with _pool.acquire() as _conn:
+                            await _conn.execute(
+                                "INSERT INTO outbound_call_queue "
+                                "(hospital_id, call_type, phone, patient_name, context_json, "
+                                " scheduled_at, attempt_count, max_attempts, status, tenant_slug) "
+                                "VALUES ($1,$2,$3,$4,$5::jsonb, now() + interval '3 minutes', "
+                                " $6, $7, 'pending', $8)",
+                                _rq.get("hospital_id") or hospital_id,
+                                _rq.get("call_type") or "reminder",
+                                _rq.get("phone"), _rq.get("patient_name") or "",
+                                _json2.dumps(_ctx), _att, _max,
+                                _rq.get("tenant_slug") or "default",
+                            )
+                        _log.info("early_drop_requeued call=%s attempt=%s/%s",
+                                  call_id[:8], _att, _max)
+            except Exception as _rq_exc:
+                print(f"[arteq] early-drop requeue failed: {_rq_exc}", file=sys.stderr)
 
             # Increment campaign answered counter if this was an outbound campaign call
             campaign_id = (outbound_context or {}).get("campaign_id", "")

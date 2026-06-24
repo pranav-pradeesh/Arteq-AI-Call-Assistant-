@@ -42,7 +42,7 @@ function ReadOnlyProvider({ children }: { children: React.ReactNode }) {
   const { data: trial = null } = useQuery({
     queryKey: ["trial-status", hospitalId],
     queryFn: () => api.trialStatus(hospitalId as string),
-    enabled: !!hospitalId,
+    enabled: !!hospitalId && !!session?.accessToken,
     retry: false,
   });
   const readOnly =

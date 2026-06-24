@@ -452,8 +452,22 @@ async def write_call_log(
     intents: list,
     outcome: str,
     emotional_state: str = "",
+    stt_paise: int = 0,
+    tts_paise: int = 0,
+    llm_paise: int = 0,
+    telephony_paise: int = 0,
+    llm_prompt_tokens: int = 0,
+    llm_completion_tokens: int = 0,
+    stt_audio_seconds: int = 0,
+    tts_chars: int = 0,
+    direction: str | None = None,
 ) -> None:
-    """Write call log row asynchronously. Non-blocking — called as background task."""
+    """Write call log row asynchronously. Non-blocking — called as background task.
+
+    The per-service cost columns (stt/tts/llm/telephony_paise) plus the raw usage
+    (tokens, audio seconds, chars) record REAL usage × published rate;
+    telephony_paise is the interim estimate the Vobiz CDR job later reconciles.
+    """
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
@@ -461,14 +475,21 @@ async def write_call_log(
                 """INSERT INTO call_logs
                    (hospital_id, call_id, caller, started_at, ended_at,
                     total_turns, latency_avg_ms, cost_paise, transcript, intents,
-                    outcome, emotional_state)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+                    outcome, emotional_state,
+                    stt_paise, tts_paise, llm_paise, telephony_paise,
+                    llm_prompt_tokens, llm_completion_tokens,
+                    stt_audio_seconds, tts_chars, direction)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+                           $13,$14,$15,$16,$17,$18,$19,$20,$21)
                    ON CONFLICT (call_id) DO NOTHING""",
                 hospital_id, call_id, caller, started_at, ended_at,
                 total_turns, latency_avg_ms, cost_paise,
                 __import__("json").dumps(transcript, ensure_ascii=False),
                 __import__("json").dumps(intents, ensure_ascii=False),
                 outcome, emotional_state or "",
+                int(stt_paise), int(tts_paise), int(llm_paise), int(telephony_paise),
+                int(llm_prompt_tokens), int(llm_completion_tokens),
+                int(stt_audio_seconds), int(tts_chars), direction,
             )
     except Exception as e:
         import logging

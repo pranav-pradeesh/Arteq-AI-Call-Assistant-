@@ -70,9 +70,15 @@ class Settings(BaseSettings):
     # Note: Odia uses "od-IN" (Sarvam non-standard), NOT the ISO "or-IN".
     SARVAM_API_KEY: str = ""
 
-    # Google Cloud — Gemini AI brain
+    # OpenRouter — default conversational brain (OpenAI-compatible gateway).
+    # One key pays for any hosted model; default routes to a cheap, low-latency
+    # Gemini variant with strong Malayalam.
+    OPENROUTER_API_KEY: str = ""
+    OPENROUTER_MODEL: str = "google/gemini-2.5-flash-lite"
+
+    # Google AI Studio — Gemini AI brain (default conversational provider)
     GOOGLE_API_KEY: str = ""
-    GOOGLE_MODEL: str = "gemini-2.0-flash"
+    GOOGLE_MODEL: str = "gemini-2.5-flash-lite"
 
     # WhatsApp — Meta Cloud API (patient notifications; no SMS).
     # Business-initiated messages use pre-approved "Utility" templates. Set up
@@ -151,9 +157,13 @@ class Settings(BaseSettings):
     VOBIZ_API_SECRET: str = ""
     VOBIZ_PHONE_NUMBER: str = ""                  # E.164 e.g. +918047XXXXXX
     VOBIZ_SIP_CIDRS: str = ""                     # comma-separated; leave blank for default
-    # Outbound callee number format for Vobiz's dial plan (Vobiz 404s on raw E.164;
-    # inbound caller-IDs are national 0-prefixed). national | cc | local | e164.
-    VOBIZ_DIAL_FORMAT: str = "national"
+    # Vobiz routes each trunk on its OWN domain, <trunkId>.sip.vobiz.ai. LiveKit must
+    # send OUTBOUND calls there, not the generic sip.vobiz.ai (which 404s "Trunk Not
+    # Found"). Get it from the Vobiz console outbound trunk. Empty → generic host.
+    VOBIZ_SIP_OUTBOUND_DOMAIN: str = ""
+    # Outbound callee number format. Vobiz expects E.164 per its docs.
+    # e164 | cc | national | local.
+    VOBIZ_DIAL_FORMAT: str = "e164"
     # SIP credentials LiveKit uses to authenticate OUTBOUND calls to Vobiz. Must
     # match a Vobiz Credentials-List entry on the outbound trunk. Falls back to
     # VOBIZ_API_KEY/SECRET if unset (legacy behaviour).
@@ -166,9 +176,28 @@ class Settings(BaseSettings):
     VOBIZ_RECORDING_FORMAT: str = "mp3"           # mp3 | wav
     VOBIZ_RECORDING_CHANNELS: str = "mono"        # mono | stereo
 
+    # Vobiz CDR cost reconciliation — pulls each call's REAL billed INR cost from
+    # the Vobiz CDR API and writes it to call_logs.telephony_paise. Opt-in: the
+    # exact endpoint path/auth must be confirmed against the Vobiz console/docs,
+    # so it defaults OFF and fails safe (leaves the duration estimate in place).
+    VOBIZ_CDR_ENABLED: bool = False
+    VOBIZ_API_BASE: str = "https://api.vobiz.ai"
+    VOBIZ_CDR_RECENT_PATH: str = "/v1/cdr/recent"  # GET; returns recent CDRs
+    VOBIZ_CDR_RECENT_LIMIT: int = 200
+    VOBIZ_CDR_INTERVAL_SECONDS: int = 600          # reconcile every 10 min
+    # How far back to look for an un-reconciled call's CDR (calls settle quickly).
+    VOBIZ_CDR_LOOKBACK_HOURS: int = 48
+    VOBIZ_CDR_MATCH_WINDOW_SECONDS: int = 180      # CDR vs call_log start tolerance
+
     # Doctor availability scheduler
     DOCTOR_AVAIL_ENABLED: bool = True
     DOCTOR_AVAIL_INTERVAL_SECONDS: int = 600      # poll every 10 min
+
+    # Outbound reminder queue consumer (trial tier — 24h + 2h reminder calls).
+    # Drains outbound_call_queue rows whose scheduled_at has arrived, within the
+    # calling window, honouring the per-hospital reminder toggles.
+    OUTBOUND_QUEUE_ENABLED: bool = True
+    OUTBOUND_QUEUE_INTERVAL_SECONDS: int = 300    # poll every 5 min
 
     # Patient recognition
     PATIENT_RECOGNITION_ENABLED: bool = True

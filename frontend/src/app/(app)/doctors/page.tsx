@@ -293,6 +293,77 @@ function SchedulePanel({
   );
 }
 
+// ── Doctor login provisioning ────────────────────────────────────────────────
+// Admin-only: create a role="doctor" login linked to this doctors row so the
+// doctor can sign in and reach their own self-service dashboard (/doctor).
+
+function DoctorLoginModal({ doctor, onClose }: { doctor: Doctor; onClose: () => void }) {
+  const toast = useToast();
+  const [email, setEmail] = React.useState("");
+  const [password, setPassword] = React.useState("");
+  const [created, setCreated] = React.useState<{ email: string } | null>(null);
+
+  const mut = useMutation({
+    mutationFn: () =>
+      api.createDoctorLogin({ doctor_id: doctor.id, email: email.trim().toLowerCase(), password }),
+    onSuccess: (r) => {
+      setCreated({ email: r.email });
+      toast("Doctor login created", "ok");
+    },
+    onError: (e: Error) => toast(e.message, "err"),
+  });
+
+  return (
+    <FormModal
+      open
+      onClose={onClose}
+      title={`Doctor login — ${doctor.name}`}
+      onSubmit={(e) => { e.preventDefault(); if (created) onClose(); else mut.mutate(); }}
+      saving={mut.isPending}
+      submitLabel={created ? "Done" : "Create login"}
+    >
+      {created ? (
+        <div className="space-y-2 text-sm">
+          <p className="rounded-lg bg-green-50 p-3 text-green-800">
+            Login created for <strong>{created.email}</strong>.
+          </p>
+          <p className="text-gray-600">
+            The doctor can now sign in at the login page and will land on their
+            own dashboard, seeing only their appointments, schedule and
+            availability.
+          </p>
+        </div>
+      ) : (
+        <>
+          <p className="text-xs text-gray-500">
+            Creates a sign-in for Dr. {doctor.name}. They&apos;ll see only their
+            own data — no admin access.
+          </p>
+          <Field label="Email *">
+            <Input
+              type="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="doctor@hospital.com"
+              required
+            />
+          </Field>
+          <Field label="Temporary password *">
+            <Input
+              type="text"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="at least 8 characters"
+              minLength={8}
+              required
+            />
+          </Field>
+        </>
+      )}
+    </FormModal>
+  );
+}
+
 // ── Main Inner component ──────────────────────────────────────────────────────
 
 function Inner({ hospitalId }: { hospitalId: string }) {
@@ -319,6 +390,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   const [editing, setEditing] = React.useState<Doctor | null>(null);
   const [form, setForm] = React.useState<DoctorForm>(BLANK_DOC);
   const [schedDoctor, setSchedDoctor] = React.useState<Doctor | null>(null);
+  const [loginDoctor, setLoginDoctor] = React.useState<Doctor | null>(null);
 
   function openCreate() {
     setEditing(null);
@@ -424,6 +496,9 @@ function Inner({ hospitalId }: { hospitalId: string }) {
           <Button variant="outline" onClick={() => setSchedDoctor(row.original)} className="text-xs">
             Schedules
           </Button>
+          <Button variant="outline" onClick={() => setLoginDoctor(row.original)} className="text-xs">
+            Login
+          </Button>
           <Button
             variant="danger"
             className="text-xs"
@@ -494,6 +569,14 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         <SchedulePanel
           doctor={schedDoctor}
           onClose={() => setSchedDoctor(null)}
+        />
+      )}
+
+      {/* Doctor login provisioning */}
+      {loginDoctor && (
+        <DoctorLoginModal
+          doctor={loginDoctor}
+          onClose={() => setLoginDoctor(null)}
         />
       )}
     </div>

@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { useRouter } from "next/navigation";
-import { signIn } from "next-auth/react";
+import { signIn, getSession } from "next-auth/react";
 import { Button, Card, CardBody, Input, Label, Spinner } from "@/components/ui";
 
 export default function LoginPage() {
@@ -10,6 +10,7 @@ export default function LoginPage() {
   const [password, setPassword] = React.useState("");
   const [error, setError] = React.useState("");
   const [loading, setLoading] = React.useState(false);
+  const [showForgot, setShowForgot] = React.useState(false);
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -18,10 +19,14 @@ export default function LoginPage() {
     const res = await signIn("credentials", { email, password, redirect: false });
     setLoading(false);
     if (res?.error || !res?.ok) {
-      setError("Invalid email or password");
+      setError("Invalid username or password");
       return;
     }
-    router.push("/overview");
+    // Doctors get their own self-service dashboard; everyone else lands on the
+    // admin overview. The role rides in the freshly-issued session.
+    const session = await getSession();
+    const role = (session?.user as { role?: string } | undefined)?.role;
+    router.push(role === "doctor" ? "/doctor" : "/overview");
     router.refresh();
   }
 
@@ -38,13 +43,13 @@ export default function LoginPage() {
           </div>
           <form onSubmit={onSubmit} className="space-y-3">
             <div>
-              <Label>Email</Label>
+              <Label>Username</Label>
               <Input
-                type="email"
+                type="text"
                 autoFocus
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
-                placeholder="you@hospital.com"
+                placeholder="superadmin"
               />
             </div>
             <div>
@@ -60,6 +65,19 @@ export default function LoginPage() {
             <Button type="submit" className="w-full" disabled={loading}>
               {loading && <Spinner />} Sign in
             </Button>
+            <button
+              type="button"
+              onClick={() => setShowForgot((s) => !s)}
+              className="w-full text-center text-xs text-gray-500 hover:underline"
+            >
+              Forgot password?
+            </button>
+            {showForgot && (
+              <p className="rounded-md bg-gray-50 p-2 text-center text-xs text-gray-500">
+                Contact your administrator to reset your password. Hospital admins:
+                ask your Arteq super-admin to set a new password from the Users page.
+              </p>
+            )}
           </form>
         </CardBody>
       </Card>

@@ -50,6 +50,10 @@ services:
         sync: false
       - key: GROQ_API_KEY
         sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
       - key: DATABASE_URL
         sync: false
       - key: SUPABASE_URL
@@ -161,6 +165,10 @@ services:
       - key: SARVAM_API_KEY
         sync: false
       - key: GROQ_API_KEY
+        sync: false
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
         sync: false
       - key: DATABASE_URL
         sync: false

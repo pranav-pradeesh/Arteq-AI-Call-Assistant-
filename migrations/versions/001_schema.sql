@@ -196,55 +196,7 @@ WHERE
     AND dept_id IS NOT NULL
 GROUP BY dept_id;
 
--- ── Seed: default hospital (matches HOSPITAL_ID in .env.example) ──────────────
-INSERT INTO hospitals (id, name, name_ml, address, phone, hours, slug, active)
-VALUES (
-    '00000000-0000-0000-0000-000000000001',
-    'Arteq Demo Hospital',
-    'ആർടെക് ഡെമോ ആശുപത്രി',
-    'Demo Street, Thrissur, Kerala 680001',
-    '+914872442888',
-    '{"mon":["08:00","20:00"],"tue":["08:00","20:00"],"wed":["08:00","20:00"],
-      "thu":["08:00","20:00"],"fri":["08:00","20:00"],"sat":["08:00","17:00"],
-      "sun":["09:00","14:00"]}',
-    'demo',
-    true
-)
-ON CONFLICT (id) DO NOTHING;
-
--- Seed demo departments
-INSERT INTO departments (hospital_id, name, name_ml, floor, location_hint, phone_ext, active)
-SELECT '00000000-0000-0000-0000-000000000001', name, name_ml, floor, hint, ext, true
-FROM (VALUES
-    ('OPD / General Medicine', 'OPD / പൊതുവൈദ്യശാസ്ത്രം', 'Ground Floor', 'Main entrance, turn left', '101'),
-    ('Emergency / Casualty',  'അടിയന്തിരം',              'Ground Floor', 'Separate entrance on north side', '999'),
-    ('Cardiology',            'ഹൃദ്രോഗശാസ്ത്രം',          '2nd Floor',    'Block B', '201'),
-    ('Orthopaedics',          'അസ്ഥിചികിത്സ',             '1st Floor',    'Block A', '151'),
-    ('Paediatrics',           'ശിശുചികിത്സ',              'Ground Floor', 'Block C', '102'),
-    ('Laboratory',            'ലാബ്',                      'Ground Floor', 'Behind pharmacy', '120'),
-    ('Pharmacy',              'ഫാർമസി',                   'Ground Floor', 'Main entrance, right side', '110')
-) AS t(name, name_ml, floor, hint, ext)
-WHERE NOT EXISTS (
-    SELECT 1 FROM departments WHERE hospital_id = '00000000-0000-0000-0000-000000000001' AND name = t.name
-);
-
--- Seed demo FAQs
-INSERT INTO faqs (hospital_id, category, question, answer, answer_ml, tags, priority, active)
-SELECT '00000000-0000-0000-0000-000000000001', category, question, answer, answer_ml, tags::jsonb, priority, true
-FROM (VALUES
-    ('general', 'What are the visiting hours?',
-     'Visiting hours are 9 AM to 11 AM and 4 PM to 6 PM daily.',
-     'സന്ദർശന സമയം രാവിലെ 9 മുതൽ 11 വരെ, വൈകിട്ട് 4 മുതൽ 6 വരെ.',
-     '["visiting","hours","timing"]', 1),
-    ('general', 'Is there parking available?',
-     'Free parking is available in the basement and adjacent lot.',
-     'ബേസ്‌മെന്റിൽ സൗജന്യ പാർക്കിംഗ് ലഭ്യമാണ്.',
-     '["parking","car"]', 1),
-    ('emergency', 'Is the emergency open 24/7?',
-     'Yes, our Emergency and Casualty department is open 24 hours, 7 days a week.',
-     'അതെ, Emergency 24 മണിക്കൂറും തുറന്നിരിക്കും.',
-     '["emergency","24x7","casualty"]', 2)
-) AS t(category, question, answer, answer_ml, tags, priority)
-WHERE NOT EXISTS (
-    SELECT 1 FROM faqs WHERE hospital_id = '00000000-0000-0000-0000-000000000001' AND question = t.question
-);
+-- ── Demo seed removed for multi-tenant deployments ──────────────────────────
+-- Hospitals/clinics are provisioned explicitly via scripts/add_tenant.py.
+-- (Previously this seeded "Arteq Demo Hospital"; that re-created itself on every
+--  boot because the migration runner re-applies all .sql files idempotently.)

@@ -8,7 +8,7 @@ import {
   LayoutDashboard, Phone, MessageSquareText, BarChart3, CalendarCheck, PhoneCall,
   Radio, Settings, Building2, Stethoscope, HelpCircle, Receipt, Siren, BookOpen,
   Network, Users, Boxes, LogOut, PlusCircle, Menu, X,
-  UserPlus, Ticket, MessageCircle,
+  UserPlus, Ticket, MessageCircle, Gauge, Wallet, KeyRound,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useCurrentHospital } from "./providers";
@@ -28,6 +28,7 @@ const SECTIONS: { title: string; items: Item[]; superAdminOnly?: boolean }[] = [
       { href: "/live", label: "Live", icon: Radio },
       { href: "/appointments", label: "Appointments", icon: CalendarCheck },
       { href: "/callbacks", label: "Callbacks", icon: PhoneCall },
+      { href: "/usage", label: "Usage & Cost", icon: Gauge },
     ],
   },
   {
@@ -52,6 +53,7 @@ const SECTIONS: { title: string; items: Item[]; superAdminOnly?: boolean }[] = [
   },
   {
     title: "Telephony",
+    superAdminOnly: true,
     items: [
       { href: "/telephony", label: "Telephony", icon: Phone },
       { href: "/setup", label: "Setup", icon: Network },
@@ -66,16 +68,30 @@ const SECTIONS: { title: string; items: Item[]; superAdminOnly?: boolean }[] = [
       { href: "/onboarding", label: "Onboard hospital", icon: PlusCircle },
       { href: "/tenants", label: "Tenants", icon: Boxes },
       { href: "/users", label: "Users & Roles", icon: Users },
+      { href: "/usage-overview", label: "Usage (all)", icon: Wallet },
+    ],
+  },
+  {
+    title: "Account",
+    items: [
+      { href: "/account", label: "My Account", icon: KeyRound },
     ],
   },
 ];
 
-function HospitalSwitcher() {
+function HospitalSwitcher({ role }: { role?: string }) {
   const { hospitalId, setHospitalId } = useCurrentHospital();
   const { data: hospitals = [] } = useQuery({ queryKey: ["hospitals"], queryFn: api.listHospitals });
   React.useEffect(() => {
     if (!hospitalId && hospitals.length) setHospitalId(hospitals[0].id);
   }, [hospitalId, hospitals, setHospitalId]);
+  // Hospital admins are scoped to a single hospital — show its name, no picker.
+  if (role !== "super_admin") {
+    const current = hospitals.find((h) => h.id === hospitalId) ?? hospitals[0];
+    return current ? (
+      <span className="text-sm font-medium text-gray-700">{current.name}</span>
+    ) : null;
+  }
   return (
     <select
       className="input max-w-[16rem]"
@@ -168,7 +184,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
             <button className="rounded p-1.5 text-gray-600 hover:bg-gray-100 lg:hidden" onClick={() => setMobileOpen(true)} aria-label="Open menu">
               <Menu className="h-5 w-5" />
             </button>
-            <HospitalSwitcher />
+            <HospitalSwitcher role={role} />
           </div>
           <div className="flex items-center gap-3">
             {session?.user?.email && (
