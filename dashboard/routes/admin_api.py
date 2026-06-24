@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, FileResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.templating import Jinja2Templates
 from jose import JWTError, jwt
@@ -3282,3 +3282,25 @@ async def clear_doctor_patients(hospital_id: str, doctor_id: str):
             doctor_id, hospital_id,
         )
     return {"ok": True}
+
+
+
+@router.get(
+    "/hospitals/{hospital_id}/calls/{call_id}/recording",
+    dependencies=[Depends(_require_auth)],
+)
+async def get_call_recording(hospital_id: str, call_id: str):
+    """Stream a call recording. Admin-only and scoped to the owning hospital."""
+    import os as _os
+    pool = await _db()
+    async with pool.acquire() as conn:
+        owns = await conn.fetchval(
+            "SELECT 1 FROM call_logs WHERE call_id=$1 AND hospital_id=$2",
+            call_id, hospital_id,
+        )
+    if not owns:
+        raise HTTPException(status_code=404, detail="Recording not found")
+    path = f"/recordings/{call_id}.ogg"
+    if not _os.path.exists(path):
+        raise HTTPException(status_code=404, detail="Recording not ready yet")
+    return FileResponse(path, media_type="audio/ogg", filename=f"{call_id}.ogg")

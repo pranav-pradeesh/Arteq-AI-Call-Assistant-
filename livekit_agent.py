@@ -1889,6 +1889,19 @@ async def entrypoint(ctx: JobContext) -> None:
             except Exception as log_exc:
                 print(f"[arteq] call log write failed: {log_exc}", file=sys.stderr)
 
+            # Persist the recording URL (egress finalises the file as the room closes).
+            if session_data.get("recording_url"):
+                try:
+                    from src.db.queries import get_pool as _gp_rec
+                    _rp = await _gp_rec()
+                    async with _rp.acquire() as _rc:
+                        await _rc.execute(
+                            "UPDATE call_logs SET recording_url=$1 WHERE call_id=$2",
+                            session_data["recording_url"], call_id,
+                        )
+                except Exception as _ru_exc:
+                    print(f"[arteq] recording_url update failed: {_ru_exc}", file=sys.stderr)
+
             # Tell live-monitoring subscribers the call is over.
             try:
                 from additions.live_events import emit_call_ended
@@ -1985,6 +1998,32 @@ async def entrypoint(ctx: JobContext) -> None:
             ),
         ),
     )
+
+    # ── Call recording (LiveKit Egress -> /recordings/<call>.ogg) ─────────────
+    # Audio-only room composite. The file is served ONLY through the dashboard to
+    # authenticated hospital admins (see /hospitals/{id}/calls/{id}/recording).
+    if os.getenv("RECORD_CALLS", "true").lower() == "true":
+        try:
+            from livekit import api as _eg_api
+            _egc = _eg_api.LiveKitAPI(
+                url=settings.LIVEKIT_URL,
+                api_key=settings.LIVEKIT_API_KEY,
+                api_secret=settings.LIVEKIT_API_SECRET,
+            )
+            await _egc.egress.start_room_composite_egress(
+                _eg_api.RoomCompositeEgressRequest(
+                    room_name=room_name,
+                    audio_only=True,
+                    file_outputs=[_eg_api.EncodedFileOutput(filepath=f"/recordings/{call_id}.ogg")],
+                )
+            )
+            await _egc.aclose()
+            session_data["recording_url"] = (
+                f"/admin/api/hospitals/{hospital_id}/calls/{call_id}/recording"
+            )
+            _log.info("call_recording_started call=%s", call_id[:8])
+        except Exception as _eg_exc:
+            print(f"[arteq] egress start failed: {_eg_exc}", file=sys.stderr)
 
     # Start ambient background noise loop — must be after session.start so the
     # local_participant is fully connected. _on_end_async reads this variable
