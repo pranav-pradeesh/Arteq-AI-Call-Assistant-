@@ -55,7 +55,9 @@ async function request<T>(path: string, opts: RequestInit = {}): Promise<T> {
   const res = await fetch(`${BASE}${path}`, { ...opts, headers });
   if (res.status === 401) {
     _cachedToken = null;
-    if (typeof window !== "undefined" && !path.includes("/login")) {
+    // Only bounce to /login if we are NOT already there — otherwise a 401 from a
+    // background query (e.g. trial-status) on the login page reloads it forever.
+    if (typeof window !== "undefined" && window.location.pathname !== "/login") {
       window.location.href = "/login";
     }
     throw new ApiError(401, "Unauthorized");
