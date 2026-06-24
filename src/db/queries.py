@@ -538,8 +538,9 @@ async def create_appointment(
     pool = await get_pool()
     async with pool.acquire() as conn:
         if slot_time and doctor_id:
-            conflict = await conn.fetchval(
-                """SELECT 1 FROM appointments
+            existing = await conn.fetchrow(
+                """SELECT id, confirmation_code, patient_name, patient_phone, call_id
+                   FROM appointments
                    WHERE hospital_id=$1 AND doctor_id=$2 AND slot_time=$3
                      AND status IN ('booked','confirmed','requested')
                    LIMIT 1""",
@@ -547,7 +548,19 @@ async def create_appointment(
                 _uuid_mod.UUID(doctor_id),
                 slot_time,
             )
-            if conflict:
+            if existing:
+                # Idempotent: a double tool-call from the same caller (e.g. "yes yes")
+                # must NOT be reported as a slot conflict — return the booking we
+                # already made instead of a false "slot taken".
+                same_caller = (
+                    (existing["call_id"] and existing["call_id"] == call_id)
+                    or (patient_phone and existing["patient_phone"] == patient_phone)
+                    or (patient_name and existing["patient_name"]
+                        and existing["patient_name"].strip().lower() == patient_name.strip().lower())
+                )
+                if same_caller:
+                    return {"id": str(existing["id"]),
+                            "confirmation_code": existing["confirmation_code"]}
                 raise ValueError("slot_already_booked")
 
         try:
