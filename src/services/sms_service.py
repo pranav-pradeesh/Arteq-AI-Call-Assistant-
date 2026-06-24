@@ -204,6 +204,52 @@ class SMSService:
         return await self._send(phone, message)
 
     async def _send(self, phone: str, message: str) -> bool:
-        """SMS is not available — Vobiz is a SIP trunk only."""
-        logger.warning("sms_skipped_no_sms_provider", phone=phone[:6] + "****")
-        return False
+        """Send a plain-text SMS via the configured provider.
+
+        Controlled by SMS_PROVIDER: "twilio" | "http" | "" (off). Returns True on
+        success. Never raises — logs and returns False so callers never crash.
+        """
+        from src.config.settings import settings
+        provider = (getattr(settings, "SMS_PROVIDER", "") or "").lower().strip()
+        masked = (phone[:6] + "****") if phone else "?"
+        if not provider:
+            logger.warning("sms_skipped_no_sms_provider", phone=masked)
+            return False
+        try:
+            import httpx
+            if provider == "twilio":
+                sid = getattr(settings, "TWILIO_ACCOUNT_SID", "")
+                token = getattr(settings, "TWILIO_AUTH_TOKEN", "")
+                frm = getattr(settings, "SMS_FROM", "")
+                if not (sid and token and frm):
+                    logger.warning("sms_twilio_not_configured", phone=masked)
+                    return False
+                url = f"https://api.twilio.com/2010-04-01/Accounts/{sid}/Messages.json"
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    r = await c.post(url, data={"From": frm, "To": phone, "Body": message},
+                                     auth=(sid, token))
+                ok = r.status_code in (200, 201)
+                (logger.info if ok else logger.warning)(
+                    "sms_twilio", phone=masked, status=r.status_code,
+                    error=None if ok else r.text[:200])
+                return ok
+            if provider == "http":
+                import urllib.parse as _u
+                tmpl = getattr(settings, "SMS_HTTP_URL", "")
+                if not tmpl:
+                    logger.warning("sms_http_not_configured", phone=masked)
+                    return False
+                url = tmpl.replace("{to}", _u.quote(phone)).replace("{text}", _u.quote(message))
+                method = (getattr(settings, "SMS_HTTP_METHOD", "GET") or "GET").upper()
+                async with httpx.AsyncClient(timeout=10.0) as c:
+                    r = await c.request(method, url)
+                ok = r.is_success
+                (logger.info if ok else logger.warning)(
+                    "sms_http", phone=masked, status=r.status_code,
+                    error=None if ok else r.text[:200])
+                return ok
+            logger.warning("sms_unknown_provider", provider=provider, phone=masked)
+            return False
+        except Exception as exc:
+            logger.error("sms_send_failed", phone=masked, error=str(exc))
+            return False

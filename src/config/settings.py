@@ -98,6 +98,17 @@ class Settings(BaseSettings):
     WHATSAPP_TPL_LOCATION: str = "hospital_location"
     WHATSAPP_TPL_LAB: str = "lab_schedule"
 
+    # SMS fallback (used when WhatsApp is disabled OR a WhatsApp send fails).
+    # SMS_PROVIDER: "" (off) | "twilio" | "http". India: SMS needs DLT-approved
+    # templates — set these once your gateway is registered.
+    SMS_PROVIDER: str = ""
+    SMS_FROM: str = ""                 # sender id / from-number
+    TWILIO_ACCOUNT_SID: str = ""
+    TWILIO_AUTH_TOKEN: str = ""
+    # Generic HTTP gateway (e.g. MSG91/Gupshup): use {to} and {text} placeholders.
+    SMS_HTTP_URL: str = ""
+    SMS_HTTP_METHOD: str = "GET"
+
     # Database
     DATABASE_URL: str = ""
     # SSL mode for the Postgres pool: "auto" | "require" | "disable".

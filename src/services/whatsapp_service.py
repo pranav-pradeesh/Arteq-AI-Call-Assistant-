@@ -203,12 +203,42 @@ class WhatsAppService(SMSService):
         )
 
 
+class _WhatsAppThenSMS:
+    """WhatsApp first; if a send fails (or WhatsApp is misconfigured at runtime),
+    fall back to plain SMS. Duck-types SMSService — every send_* notification is
+    tried on WhatsApp, then on SMS. Non-send attributes delegate to the SMS base.
+    """
+
+    def __init__(self) -> None:
+        self._wa = WhatsAppService()
+        self._sms = SMSService()
+
+    def __getattr__(self, name: str):
+        if not name.startswith("send_"):
+            return getattr(self._sms, name)
+
+        async def _try(*args, **kwargs) -> bool:
+            try:
+                if await getattr(self._wa, name)(*args, **kwargs):
+                    return True
+            except Exception as exc:  # WhatsApp transport error -> fall back
+                logger.warning("whatsapp_send_error_falling_back", method=name, error=str(exc))
+            return await getattr(self._sms, name)(*args, **kwargs)
+
+        return _try
+
+
 def get_messenger() -> SMSService:
     """Return the patient-notification channel.
 
-    WhatsApp (Meta Cloud API) when enabled, otherwise the no-op SMSService
-    base (logs a warning, never crashes). There is no SMS channel by design.
+    - WhatsApp configured  -> WhatsApp first, SMS fallback on failure.
+    - WhatsApp not available -> SMS (real send if SMS_PROVIDER is set, else no-op).
     """
-    if settings.WHATSAPP_ENABLED:
-        return WhatsAppService()
+    wa_ready = (
+        settings.WHATSAPP_ENABLED
+        and settings.WHATSAPP_PHONE_NUMBER_ID
+        and settings.WHATSAPP_ACCESS_TOKEN
+    )
+    if wa_ready:
+        return _WhatsAppThenSMS()  # type: ignore[return-value]
     return SMSService()
