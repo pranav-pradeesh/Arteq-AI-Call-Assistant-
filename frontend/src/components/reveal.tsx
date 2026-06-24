@@ -25,6 +25,7 @@ export function Reveal({
         y: 14,
         duration: 0.45,
         ease: "power2.out",
+        clearProps: "transform",
       });
     }, ref);
     return () => ctx.revert();

@@ -1,5 +1,6 @@
 "use client";
 import * as React from "react";
+import { createPortal } from "react-dom";
 import { X } from "lucide-react";
 import { Button, Spinner } from "./ui";
 
@@ -13,8 +14,13 @@ export function Modal({
   footer?: React.ReactNode;
   wide?: boolean;
 }) {
-  if (!open) return null;
-  return (
+  // Portal to <body> so the overlay escapes any transformed ancestor (the GSAP
+  // Reveal wrapper). A position:fixed element inside a transformed box is
+  // positioned relative to that box, which trapped the modal "inside a frame".
+  const [mounted, setMounted] = React.useState(false);
+  React.useEffect(() => { setMounted(true); }, []);
+  if (!open || !mounted) return null;
+  const node = (
     <div className="fixed inset-0 z-50 flex items-start justify-center overflow-y-auto bg-black/40 p-4 sm:items-center sm:p-8">
       <div
         className={`flex max-h-[calc(100dvh-2rem)] w-full ${wide ? "max-w-3xl" : "max-w-lg"} flex-col overflow-hidden rounded-xl bg-white shadow-xl sm:max-h-[calc(100dvh-4rem)]`}
@@ -30,6 +36,7 @@ export function Modal({
       </div>
     </div>
   );
+  return createPortal(node, document.body);
 }
 
 /** Modal wired for a form submit, with save/cancel + pending state. */
