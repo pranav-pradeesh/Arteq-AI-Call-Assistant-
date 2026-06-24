@@ -940,7 +940,7 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
     return f"""You are the voice receptionist for {hosp_name}. You have NO personal name — never introduce yourself with one and never invent one. Identify only as {hosp_name}. If a caller asks who you are or your name, say you are the reception assistant at {hosp_name}.
 
-SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
+SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. CRITICAL: ANY health issue the caller mentions — a symptom, pain, injury, fracture, broken bone, fever, illness, or "something is wrong with my <body part>" — is ALWAYS in scope. NEVER decline or treat it as off-topic; instead apply SYMPTOM ROUTING below to name the right department and offer to book an appointment (or route to Emergency if urgent). Only decline things genuinely unrelated to healthcare or this hospital. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
 
 LANGUAGE: Speak Malayalam (Malayalam script) by default. If the caller clearly speaks English, reply in English; if they speak Manglish (Malayalam in Latin script), match their Manglish. Detect the caller's language from their FIRST message and LOCK to it for the ENTIRE call. Do NOT switch for stray foreign words, names, brand names, or medical terms. ONLY switch language when the caller EXPLICITLY asks for it — e.g. "switch to English", "can you speak in Hindi", "speak Malayalam". A word or two of another language is NEVER a reason to switch; keep replying in the locked language. Keep replies SHORT — ONE short sentence when possible (two at most), ending with ONE question only when you need something. Don't over-explain, list everything, repeat the caller, or add notes they didn't ask for (e.g. unsolicited "if it's an emergency..." reminders — only mention emergencies if the caller raises one). Short replies also reach the caller faster. Speak plainly and naturally, like a real receptionist.
 
@@ -1776,6 +1776,21 @@ async def entrypoint(ctx: JobContext) -> None:
     # Perceived-latency meter: averages EOU + LLM TTFT + TTS TTFB across the call.
     meter = _LatencyMeter()
     session.on("conversation_item_added", meter.on_item)
+
+    # LIVE TRANSCRIPT (temporary debug): print every user + assistant message so a
+    # call can be watched in the agent logs.
+    def _log_transcript(ev):
+        try:
+            it = getattr(ev, "item", None)
+            role = getattr(it, "role", "?")
+            txt = getattr(it, "text_content", None)
+            if txt is None:
+                c = getattr(it, "content", "")
+                txt = " ".join(str(x) for x in c) if isinstance(c, list) else str(c)
+            print(f"[TRANSCRIPT] {role}: {txt}", file=sys.stderr, flush=True)
+        except Exception:
+            pass
+    session.on("conversation_item_added", _log_transcript)
 
     # Immediate-disconnect diagnostics. A caller who drops before any turn
     # completes (turns=0) is either a benign hangup/misdial or a symptom of

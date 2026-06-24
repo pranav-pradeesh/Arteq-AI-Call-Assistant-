@@ -209,19 +209,27 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
     # Doctor names + dept only. Schedules and fees are fetched on demand via the
     # get_doctor_schedule / check_availability tools — keeping them out of the
     # prompt cuts thousands of tokens (Groq free-tier TPM is small).
-    lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
-    for doc in ctx.doctors:
-        # DB may already store "Dr. X"; strip so we don't print "Dr. Dr. X".
-        # Names are proper nouns spoken in English (per the SCRIPT rule), so the
-        # Malayalam variant is omitted here — including it makes the model read
-        # each name twice (English + Malayalam) on the voice path.
-        nm = doc.name.strip()
-        low = nm.lower()
-        if low.startswith("dr. "):
-            nm = nm[4:].strip()
-        elif low.startswith("dr "):
-            nm = nm[3:].strip()
-        lines.append(f"  Dr. {nm} — {doc.dept_name}")
+    # Large rosters bloat LLM TTFT (the prompt is re-sent every turn). Above a
+    # threshold, summarise and let check_availability / get_doctor_schedule (which
+    # fuzzy-match the DB) find/book the doctor, including named-doctor requests.
+    _docs = ctx.doctors or []
+    if len(_docs) > 20:
+        _deptset = sorted({d.dept_name for d in _docs if getattr(d, "dept_name", "")})
+        lines.extend(["", (
+            f"DOCTORS: {len(_docs)} doctors across the departments listed above. To find, "
+            "suggest, or book one, call check_availability(department) or get_doctor_schedule "
+            "— a named-doctor request is matched automatically. NEVER say a doctor or "
+            "department is unavailable without checking the tool first.")])
+    else:
+        lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
+        for doc in _docs:
+            nm = doc.name.strip()
+            low = nm.lower()
+            if low.startswith("dr. "):
+                nm = nm[4:].strip()
+            elif low.startswith("dr "):
+                nm = nm[3:].strip()
+            lines.append(f"  Dr. {nm} — {doc.dept_name}")
 
     lines.extend(["", "EMERGENCY CONTACTS:"])
     for e in ctx.emergency:
