@@ -979,7 +979,7 @@ PUNCTUATION: Use full, natural punctuation — commas for pauses, a full stop to
 
 ANSWER INSTANTLY from the HOSPITAL section below — NO tool, NO "let me check" — for: whether a department exists, its floor/location, operating hours, open/closed, doctor names and their department, emergency numbers, address, phone, and anything in the HANDBOOK. You already know these; just say the answer.
 
-USE A TOOL ONLY for live data or write actions, and call it SILENTLY: check_availability (is a doctor free), book_appointment (collect name+doctor+date+time), reschedule_appointment, cancel_appointment, get_doctor_schedule (exact timings), request_callback, send_location_sms, transfer_to_department, alert_emergency, end_call (hang up when the caller is done). Before booking, repeat name, doctor, date and time back to confirm.
+USE A TOOL for live data or write actions. For check_availability, book_appointment, reschedule_appointment and get_doctor_schedule (these take a moment to look up), FIRST say a SHORT filler in the caller's language — e.g. Malayalam "ഒരു നിമിഷം, ഞാൻ നോക്കട്ടെ" / English "One moment, let me check" — THEN call the tool, so the caller is never left in silence. Call the other tools (cancel_appointment, request_callback, send_location_sms, transfer_to_department, alert_emergency, end_call) silently. Before booking, repeat name, doctor, date and time back to confirm.
 
 DATE & TIME: Silently convert the caller's words to an absolute date and 24-hour time before calling a tool. Use TODAY (below) as the reference: "tomorrow" = today + 1, "day after" = today + 2, a weekday name = its next occurrence. Pass date as YYYY-MM-DD and time as HH:MM (e.g. "10 in the morning" → 10:00, "3 pm" → 15:00). AM/PM IS CRITICAL: if the caller gives a time WITHOUT saying morning/afternoon/evening or AM/PM (e.g. just "6:30"), do NOT assume — ask "രാവിലെയോ വൈകുന്നേരമോ?" (morning or evening?). Keep the exact minutes (6:30 stays :30, never round to :00). Before booking, read the final time back in the caller's language (e.g. "വൈകുന്നേരം 6:30-ന്, ശരിയാണോ?") and get a yes. NEVER speak the current clock time back. If you can't tell the day or time, ask in one short question — never guess. NEVER book or reschedule for a PAST date/time (e.g. "yesterday"/ഇന്നലെ) — politely say that day has passed and ask for an upcoming day. (Asking ABOUT a past or existing appointment is fine — look it up normally.)
 
@@ -2059,10 +2059,22 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception as _eg_exc:
             print(f"[arteq] egress start failed: {_eg_exc}", file=sys.stderr)
 
-    # Start ambient background noise loop — must be after session.start so the
-    # local_participant is fully connected. _on_end_async reads this variable
-    # by name from the enclosing scope (Python late-binding) and cancels it.
-    _ambient_task = asyncio.create_task(_run_ambient_audio(ctx.room))
+    # Background audio: faint office ambience + a keyboard-typing "thinking" sound
+    # that LiveKit plays automatically while the agent processes a turn (LLM + tool
+    # / DB round-trips) so a lookup never feels like dead silence.
+    try:
+        from livekit.agents import BackgroundAudioPlayer, AudioConfig, BuiltinAudioClip
+        _bg_audio = BackgroundAudioPlayer(
+            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.12),
+            thinking_sound=[
+                AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.7),
+                AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING2, volume=0.6),
+            ],
+        )
+        await _bg_audio.start(room=ctx.room, agent_session=session)
+    except Exception as _bg_exc:
+        print(f"[arteq] background audio failed, falling back to white noise: {_bg_exc}", file=sys.stderr)
+        _ambient_task = asyncio.create_task(_run_ambient_audio(ctx.room))
 
     # ── Live monitoring: announce the call to dashboard subscribers ───────────
     # (additions/routes/live_ws.py forwards these over the /admin/ws/live

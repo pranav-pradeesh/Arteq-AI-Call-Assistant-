@@ -952,6 +952,15 @@ async def get_available_slots(
         py_dow = date.weekday()  # 0=Mon ... 6=Sun
         db_dow = (py_dow + 1) % 7
 
+        # Exclude past slots when the requested date is TODAY (IST). Otherwise the
+        # agent offers slots that have already passed (e.g. 9 AM at 10 PM).
+        try:
+            import pytz as _pytz
+            _now_ist = _dt.datetime.now(_pytz.timezone("Asia/Kolkata"))
+        except Exception:
+            _now_ist = _dt.datetime.utcnow() + _dt.timedelta(hours=5, minutes=30)
+        _min_minutes = (_now_ist.hour * 60 + _now_ist.minute) if date == _now_ist.date() else -1
+
         schedule = await conn.fetch(
             """SELECT to_char(start_time,'HH24:MI') AS start,
                       to_char(end_time,'HH24:MI') AS end
@@ -983,7 +992,7 @@ async def get_available_slots(
             end_total = end_h * 60 + end_m
             while current + slot_duration_minutes <= end_total:
                 slot = f"{current // 60:02d}:{current % 60:02d}"
-                if slot not in booked_times:
+                if slot not in booked_times and current >= _min_minutes:
                     available.append(slot)
                 current += slot_duration_minutes
 
