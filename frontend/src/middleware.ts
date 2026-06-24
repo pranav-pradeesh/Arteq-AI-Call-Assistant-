@@ -9,7 +9,7 @@ export default withAuth(
     const { pathname } = req.nextUrl;
     const role = req.nextauth.token?.role;
     if (SUPER_ADMIN_ONLY.some((p) => pathname.startsWith(p)) && role !== "super_admin") {
-      return NextResponse.redirect(new URL("/overview", req.url));
+      return NextResponse.redirect(new URL("/forbidden", req.url));
     }
     return NextResponse.next();
   },
