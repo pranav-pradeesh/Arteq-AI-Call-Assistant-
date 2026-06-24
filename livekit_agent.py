@@ -2059,6 +2059,19 @@ async def entrypoint(ctx: JobContext) -> None:
             pass
         return
 
+    # DTLN in-process noise suppression — cleans compressed 8kHz phone audio
+    # before VAD/STT. Works on self-hosted LiveKit (unlike BVC/Krisp). Stateful
+    # LSTM, so one instance per call. DTLN_STRENGTH=0 disables it.
+    _dtln_nc = None
+    _dtln_strength = float(os.getenv("DTLN_STRENGTH", "0.5"))
+    if _dtln_strength > 0:
+        try:
+            from livekit.plugins.dtln import DTLNNoiseSuppressor
+            _dtln_nc = DTLNNoiseSuppressor(strength=_dtln_strength)
+            print(f"[arteq] DTLN noise suppression on (strength={_dtln_strength})", file=sys.stderr)
+        except Exception as _dtln_exc:
+            print(f"[arteq] DTLN unavailable, continuing without it: {_dtln_exc}", file=sys.stderr)
+
     await session.start(
         agent=agent,
         room=ctx.room,
@@ -2072,10 +2085,10 @@ async def entrypoint(ctx: JobContext) -> None:
         # favour of RoomOptions; the audio-input defaults are identical, so this
         # is a behaviour-preserving swap.
         room_options=RoomOptions(
-            # No noise_cancellation: BVC/Krisp requires LiveKit Cloud and errors on
-            # self-hosted ("audio filter cannot be enabled"). VAD tuning handles
-            # weak-line capture instead.
-            audio_input=AudioInputOptions(),
+            # DTLN in-process noise suppression (self-hosted compatible). Falls back
+            # to plain input if DTLN failed to load or DTLN_STRENGTH=0.
+            audio_input=(AudioInputOptions(noise_cancellation=_dtln_nc)
+                         if _dtln_nc is not None else AudioInputOptions()),
         ),
     )
 

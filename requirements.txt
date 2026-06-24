@@ -53,6 +53,7 @@ livekit-plugins-openai==1.1.7
 livekit-plugins-sarvam==1.1.7
 sarvamai==0.1.28
 livekit-plugins-silero==1.1.7
+livekit-plugins-dtln==0.1.5
 livekit-plugins-noise-cancellation==0.2.5
 
 # ── Dev / test ─────────────────────────────────────────────────────────────────
