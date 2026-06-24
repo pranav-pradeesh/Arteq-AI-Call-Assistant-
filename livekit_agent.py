@@ -761,7 +761,23 @@ async def _resolve_call_target(room_name: str) -> tuple[str, dict, Optional[dict
                 "slug=$1 OR LOWER(REPLACE(name,' ','-'))=$1 LIMIT 1",
                 slug.lower(),
             )
-        hospital_id = str(row["id"]) if row else settings.HOSPITAL_ID
+            if row:
+                hospital_id = str(row["id"])
+            else:
+                # Slug miss (e.g. the /talk "default" room). Prefer the configured
+                # HOSPITAL_ID, but if that row no longer exists (e.g. the demo
+                # tenant was deleted) fall back to the first active hospital so the
+                # agent never greets with a null context ("welcome to the hospital").
+                exists = await conn.fetchval(
+                    "SELECT 1 FROM hospitals WHERE id = $1", settings.HOSPITAL_ID
+                )
+                if exists:
+                    hospital_id = settings.HOSPITAL_ID
+                else:
+                    fid = await conn.fetchval(
+                        "SELECT id FROM hospitals WHERE active ORDER BY created_at LIMIT 1"
+                    )
+                    hospital_id = str(fid) if fid else settings.HOSPITAL_ID
     except Exception as exc:
         print(f"[warn] hospital ID lookup failed: {exc}", file=sys.stderr)
         hospital_id = settings.HOSPITAL_ID
