@@ -511,17 +511,34 @@ try:
     @function_tool
     async def get_doctor_schedule(
         context: RunContext,
-        doctor_name: str,
+        doctor_name: str = "",
+        department_name: str = "",
         date: str = "",
     ) -> str:
         """
-        Return the consulting schedule for a doctor. Use when caller asks
-        'when is Dr. X available?' or 'what days does Dr. X see patients?'
-        date is optional (YYYY-MM-DD); omit for the weekly schedule.
+        Return the consulting schedule for a doctor, OR list the real doctors in a
+        department. Pass doctor_name for one doctor's schedule; pass department_name
+        (and leave doctor_name empty) to get the actual doctors in that department.
+        NEVER invent doctor names — always call this to get them. date optional.
         """
         hospital_ctx = _ud(context, "hospital_ctx")
         if not hospital_ctx:
             return "Schedule information temporarily unavailable."
+
+        # List real doctors in a department (prevents the model fabricating names).
+        if not doctor_name.strip() and department_name.strip():
+            dept = hospital_ctx.find_dept(department_name)
+            dept_nm = dept.name if dept else department_name
+            docs = [d for d in hospital_ctx.doctors
+                    if (getattr(d, "dept_name", "") or "").lower() == dept_nm.lower()]
+            if not docs:
+                dl = department_name.lower()
+                docs = [d for d in hospital_ctx.doctors
+                        if dl in (getattr(d, "dept_name", "") or "").lower()]
+            if not docs:
+                return f"No doctors are listed for '{department_name}'. Please confirm the department."
+            names = ", ".join(d.name for d in docs[:12])
+            return f"Doctors in {dept_nm}: {names}. Which doctor would you like?"
 
         name_l = doctor_name.lower()
         for doc in hospital_ctx.doctors:

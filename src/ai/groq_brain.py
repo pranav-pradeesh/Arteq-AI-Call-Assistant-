@@ -216,10 +216,12 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
     if len(_docs) > 20:
         _deptset = sorted({d.dept_name for d in _docs if getattr(d, "dept_name", "")})
         lines.extend(["", (
-            f"DOCTORS: {len(_docs)} doctors across the departments listed above. To find, "
-            "suggest, or book one, call check_availability(department) or get_doctor_schedule "
-            "— a named-doctor request is matched automatically. NEVER say a doctor or "
-            "department is unavailable without checking the tool first.")])
+            f"DOCTORS: {len(_docs)} doctors across the departments listed above. NEVER invent, "
+            "guess, or translate doctor names — only state names a tool returns. To LIST the "
+            "doctors in a department, call get_doctor_schedule with department_name. To find or "
+            "book one, call check_availability(department) or get_doctor_schedule — a named-doctor "
+            "request is matched automatically. NEVER say a doctor or department is unavailable "
+            "without checking the tool first.")])
     else:
         lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
         for doc in _docs:
