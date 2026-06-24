@@ -414,6 +414,8 @@ export interface UsageResponse {
   monthly_call_limit?: number | null;
   monthly_minutes_limit?: number | null;
   monthly_cost_limit_paise?: number | null;
+  price_per_minute_paise?: number | null;
+  amount_due_paise?: number | null;
   percent_used?: number | null;
   over_limit: boolean;
 }
@@ -423,5 +425,6 @@ export interface PlanUpdate {
   monthly_call_limit?: number | null;
   monthly_minutes_limit?: number | null;
   monthly_cost_limit_paise?: number | null;
+  price_per_minute_paise?: number | null;
   billing_cycle_day?: number | null;
 }

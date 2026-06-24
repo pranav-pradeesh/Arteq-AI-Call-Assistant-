@@ -26,6 +26,7 @@ type PlanForm = {
   monthly_call_limit: string;
   monthly_minutes_limit: string;
   monthly_cost_limit_rupees: string;
+  price_per_minute_rupees: string;
   billing_cycle_day: string;
 };
 
@@ -45,6 +46,8 @@ function PlanModal({ row, onClose }: { row: UsageResponse; onClose: () => void }
     monthly_minutes_limit: row.monthly_minutes_limit?.toString() ?? "",
     monthly_cost_limit_rupees:
       row.monthly_cost_limit_paise != null ? String(row.monthly_cost_limit_paise / 100) : "",
+    price_per_minute_rupees:
+      row.price_per_minute_paise != null ? String(row.price_per_minute_paise / 100) : "",
     billing_cycle_day: "", // blank keeps the existing cycle day (backend COALESCE)
   });
   const set = (k: keyof PlanForm) => (e: React.ChangeEvent<HTMLInputElement>) =>
@@ -58,6 +61,10 @@ function PlanModal({ row, onClose }: { row: UsageResponse; onClose: () => void }
         monthly_call_limit: num(form.monthly_call_limit),
         monthly_minutes_limit: num(form.monthly_minutes_limit),
         monthly_cost_limit_paise: rupees == null ? null : Math.round(rupees * 100),
+        price_per_minute_paise: (() => {
+          const r = num(form.price_per_minute_rupees);
+          return r == null ? null : Math.round(r * 100);
+        })(),
         billing_cycle_day: num(form.billing_cycle_day),
       };
       return api.setHospitalPlan(row.hospital_id, body);
@@ -91,6 +98,9 @@ function PlanModal({ row, onClose }: { row: UsageResponse; onClose: () => void }
       </Field>
       <Field label="Monthly cost limit (₹)">
         <Input type="number" min={0} value={form.monthly_cost_limit_rupees} onChange={set("monthly_cost_limit_rupees")} />
+      </Field>
+      <Field label="Price per minute (₹) — what the hospital is billed">
+        <Input type="number" min={0} step="0.01" value={form.price_per_minute_rupees} onChange={set("price_per_minute_rupees")} placeholder="e.g. 3" />
       </Field>
       <Field label="Billing cycle day (1–28)">
         <Input type="number" min={1} max={28} value={form.billing_cycle_day} onChange={set("billing_cycle_day")} placeholder="1" />

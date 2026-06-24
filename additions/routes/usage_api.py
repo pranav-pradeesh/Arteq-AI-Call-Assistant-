@@ -74,6 +74,8 @@ class UsageResponse(BaseModel):
     monthly_call_limit: Optional[int] = None
     monthly_minutes_limit: Optional[int] = None
     monthly_cost_limit_paise: Optional[int] = None
+    price_per_minute_paise: Optional[int] = None
+    amount_due_paise: Optional[int] = None
     percent_used: Optional[float] = None
     over_limit: bool = False
 
@@ -147,6 +149,11 @@ async def _usage_for(conn, hosp: dict) -> UsageResponse:
         monthly_call_limit=hosp.get("monthly_call_limit"),
         monthly_minutes_limit=hosp.get("monthly_minutes_limit"),
         monthly_cost_limit_paise=hosp.get("monthly_cost_limit_paise"),
+        price_per_minute_paise=hosp.get("price_per_minute_paise"),
+        amount_due_paise=(
+            int(round(minutes * hosp["price_per_minute_paise"]))
+            if hosp.get("price_per_minute_paise") else None
+        ),
         percent_used=pct,
         over_limit=over,
     )
@@ -154,7 +161,7 @@ async def _usage_for(conn, hosp: dict) -> UsageResponse:
 
 _HOSP_COLS = (
     "id, name, plan_name, monthly_call_limit, monthly_minutes_limit, "
-    "monthly_cost_limit_paise, billing_cycle_day, subscription_status"
+    "monthly_cost_limit_paise, price_per_minute_paise, billing_cycle_day, subscription_status"
 )
 
 
@@ -197,6 +204,7 @@ class PlanIn(BaseModel):
     monthly_call_limit: Optional[int] = Field(None, ge=0)
     monthly_minutes_limit: Optional[int] = Field(None, ge=0)
     monthly_cost_limit_paise: Optional[int] = Field(None, ge=0)
+    price_per_minute_paise: Optional[int] = Field(None, ge=0)
     billing_cycle_day: Optional[int] = Field(None, ge=1, le=28)
 
 
@@ -216,11 +224,12 @@ async def set_plan(hospital_id: str, body: PlanIn, pool: PoolDep) -> dict:
                    monthly_call_limit       = $3,
                    monthly_minutes_limit    = $4,
                    monthly_cost_limit_paise = $5,
-                   billing_cycle_day        = COALESCE($6, billing_cycle_day)
+                   price_per_minute_paise   = $6,
+                   billing_cycle_day        = COALESCE($7, billing_cycle_day)
                WHERE id = $1""",
             hospital_id, body.plan_name, body.monthly_call_limit,
             body.monthly_minutes_limit, body.monthly_cost_limit_paise,
-            body.billing_cycle_day,
+            body.price_per_minute_paise, body.billing_cycle_day,
         )
         hosp = await conn.fetchrow(f"SELECT {_HOSP_COLS} FROM hospitals WHERE id = $1", hospital_id)
         usage = await _usage_for(conn, dict(hosp))

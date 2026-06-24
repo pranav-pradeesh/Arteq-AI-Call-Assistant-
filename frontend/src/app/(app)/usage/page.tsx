@@ -70,7 +70,19 @@ function UsageView({ u }: { u: UsageResponse }) {
       <div className="mb-5 flex flex-wrap gap-3">
         <StatCard label="Total cost (this period)" value={paiseToRupees(u.cost_paise)} />
         <StatCard label="Calls" value={String(u.calls)} hint={`${u.inbound_calls} in · ${u.outbound_calls} out`} />
-        <StatCard label="Minutes" value={u.minutes.toLocaleString("en-IN")} />
+        <StatCard
+          label="Minutes"
+          value={u.minutes.toLocaleString("en-IN")}
+          hint={u.monthly_minutes_limit != null
+            ? `of ${u.monthly_minutes_limit.toLocaleString("en-IN")} · ${Math.max(0, u.monthly_minutes_limit - u.minutes).toLocaleString("en-IN")} left`
+            : undefined}
+        />
+        {u.price_per_minute_paise != null && (
+          <StatCard label="Rate" value={`${paiseToRupees(u.price_per_minute_paise)}/min`} />
+        )}
+        {u.amount_due_paise != null && (
+          <StatCard label="Amount due (minutes)" value={paiseToRupees(u.amount_due_paise)} />
+        )}
       </div>
 
       <div className="grid gap-5 lg:grid-cols-2">
