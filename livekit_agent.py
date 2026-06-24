@@ -1251,7 +1251,10 @@ class HospitalVoiceAgent(Agent):
         # filters most noise bursts, but occasional artefacts still produce a
         # 1-character STT output (a stray vowel, a click). A real utterance is
         # always ≥2 chars. Skip silently — no LLM call, no reply.
-        if stripped and len(stripped) < 2 and stripped not in _DTMF:
+        # Only drop 1-char ASCII noise (stray letter/click/punctuation). Real
+        # Malayalam/Indic acknowledgements like "ആ" (yes) or "എ" are a single
+        # NON-ASCII char and must get through.
+        if stripped and len(stripped) < 2 and stripped not in _DTMF and stripped.isascii():
             return
 
         # Remember the caller's language (script-detected) so the live backchannel
