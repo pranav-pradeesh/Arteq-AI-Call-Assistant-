@@ -942,7 +942,7 @@ def _build_prompt(hospital_ctx, outbound_context: Optional[dict]) -> str:
 
 SCOPE — STAY ON TOPIC: You ONLY help with {hosp_name} and its services: appointments, doctors, departments, timings, open/closed status, the hospital's own address, fees, reports, lab/scan, billing, and medical or emergency assistance. You are NOT a general assistant. CRITICAL: ANY health issue the caller mentions — a symptom, pain, injury, fracture, broken bone, fever, illness, or "something is wrong with my <body part>" — is ALWAYS in scope. NEVER decline or treat it as off-topic; instead apply SYMPTOM ROUTING below to name the right department and offer to book an appointment (or route to Emergency if urgent). Only decline things genuinely unrelated to healthcare or this hospital. If the caller asks about anything unrelated to this hospital — bus/train/KSRTC routes or numbers, traffic, weather, news, general knowledge, sports, other businesses or hospitals, online maps, or any off-topic chit-chat — do NOT answer it and do NOT make up an answer. Decline in ONE short sentence in the caller's own language and steer back to the hospital, e.g. Malayalam "ക്ഷമിക്കണം, എനിക്ക് {hosp_name}-മായി ബന്ധപ്പെട്ട കാര്യങ്ങളിൽ മാത്രമേ സഹായിക്കാൻ കഴിയൂ. എന്താണ് വേണ്ടത്?" / English "Sorry, I can only help with matters related to {hosp_name}. How can I help you here?". To reach the hospital you may give ONLY its address and nearby landmarks from the HOSPITAL section — NEVER invent bus numbers, routes, schedules, or directions that are not listed there.
 
-LANGUAGE: Speak Malayalam (Malayalam script) by default. If the caller clearly speaks English, reply in English; if they speak Manglish (Malayalam in Latin script), match their Manglish. Detect the caller's language from their FIRST message and LOCK to it for the ENTIRE call. Do NOT switch for stray foreign words, names, brand names, or medical terms. ONLY switch language when the caller EXPLICITLY asks for it — e.g. "switch to English", "can you speak in Hindi", "speak Malayalam". A word or two of another language is NEVER a reason to switch; keep replying in the locked language. Keep replies SHORT — ONE short sentence when possible (two at most), ending with ONE question only when you need something. Don't over-explain, list everything, repeat the caller, or add notes they didn't ask for (e.g. unsolicited "if it's an emergency..." reminders — only mention emergencies if the caller raises one). Short replies also reach the caller faster. Speak plainly and naturally, like a real receptionist.
+LANGUAGE: Speak Malayalam (Malayalam script) by default. If the caller clearly speaks English, reply in English; if they speak Manglish (Malayalam in Latin script), match their Manglish. Detect the caller's language from their FIRST message and LOCK to it for the ENTIRE call. Do NOT switch for stray foreign words, names, brand names, or medical terms. ONLY switch language when the caller EXPLICITLY asks for it — e.g. "switch to English", "can you speak in Hindi", "speak Malayalam". A word or two of another language is NEVER a reason to switch; keep replying in the locked language. Keep replies SHORT — ONE short sentence when possible (two at most), ending with ONE question only when you need something. Don't over-explain, list everything, repeat the caller, or add notes they didn't ask for (e.g. unsolicited "if it's an emergency..." reminders — only mention emergencies if the caller raises one). Short replies also reach the caller faster. Speak plainly and naturally, like a real receptionist. NATIVE MALAYALAM: when speaking Malayalam, use everyday SPOKEN Malayalam like a warm local Thrissur receptionist — natural, colloquial, conversational. Use common spoken words and natural particles (ട്ടോ, അല്ലേ, ഒക്കെ, ണ്ട്), light contractions and plain vocabulary. AVOID stiff, formal, literary or Sanskritised Malayalam and word-for-word English translations. Keep English only for proper nouns, doctor names and medical terms people normally say in English.
 
 SCRIPT: Keep these terms in English (Latin script) exactly as Keralites say them — do NOT transliterate: doctor, appointment, OPD, token, lab, scan, report, casualty, emergency, timing, consultation, booking. Bulbul TTS pronounces Latin letters in English automatically; transliterating them breaks pronunciation.
 
@@ -1298,6 +1298,44 @@ class HospitalVoiceAgent(Agent):
             asyncio.create_task(self.session.say(last_utterance, allow_interruptions=True))
             new_message.content = []  # suppress LLM call for this turn
             return
+
+        # Fast info path: answer a few fixed, unambiguous infos (visiting hours,
+        # location, ambulance, parking) straight from the cached hospital context,
+        # skipping the LLM (~1.5s). Guarded so it never fires mid-booking.
+        if stripped and len(stripped) < 80:
+            _ud = self.session.userdata
+            _ctx = _ud.get("hospital_ctx")
+            _last = (_ud.get("last_agent_utterance") or "").lower()
+            _busy = any(m in _last for m in ("പേര്", "വയസ", "തീയതി", "സമയ", "ആണോ പെണ", "ഡോക്ടറെയാണ", "name", "age", "which day", "what time"))
+            _bk = any(b in low_stripped for b in ("appointment", "book", "ബുക്ക", "അപ്പോയിന"))
+            _ans = None
+            if _ctx is not None and not _busy and not _bk:
+                def _faq(*keys):
+                    for f in _ctx.faqs:
+                        ql = (f.question or "").lower()
+                        if any(k in ql for k in keys):
+                            return f.answer_ml or f.answer
+                    return None
+                if any(k in low_stripped for k in ("visiting", "visit hour", "visiting time", "സന്ദര്ശന", "sandarshana")):
+                    _ans = _faq("visit")
+                elif ("parking" in low_stripped or "പാര്ക്കിംഗ" in low_stripped):
+                    _ans = _faq("parking")
+                elif ("ambulance" in low_stripped or "അംബുലന്സ" in low_stripped):
+                    for e in _ctx.emergency:
+                        _lab = (e.label or "").lower()
+                        if "ambulance" in _lab or "casualty" in _lab or "emergency" in _lab:
+                            _ans = f"{e.label}: {e.phone}."
+                            break
+                elif ("ഡോക്ടര്" not in low_stripped and "doctor" not in low_stripped and
+                      any(k in low_stripped for k in ("where is", "address", "location", "how to reach", "directions", "വിലാസം", "എവിടെ", "reach the hospital"))):
+                    if getattr(_ctx, "address", ""):
+                        _nm = _ctx.name_ml or _ctx.name
+                        _ans = f"{_nm} {_ctx.address} എന്ന വിലാസത്തിലാണ്."
+            if _ans:
+                asyncio.create_task(self.session.say(_ans, allow_interruptions=True))
+                new_message.content = []
+                logger.info("fast_faq_hit")
+                return
 
         # DTMF: single digit → remap to natural language phrase
         if stripped in _DTMF:
