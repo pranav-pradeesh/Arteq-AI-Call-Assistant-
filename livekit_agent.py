@@ -2008,9 +2008,10 @@ async def entrypoint(ctx: JobContext) -> None:
         # favour of RoomOptions; the audio-input defaults are identical, so this
         # is a behaviour-preserving swap.
         room_options=RoomOptions(
-            audio_input=AudioInputOptions(
-                noise_cancellation=noise_cancellation.BVCTelephony(),
-            ),
+            # No noise_cancellation: BVC/Krisp requires LiveKit Cloud and errors on
+            # self-hosted ("audio filter cannot be enabled"). VAD tuning handles
+            # weak-line capture instead.
+            audio_input=AudioInputOptions(),
         ),
     )
 

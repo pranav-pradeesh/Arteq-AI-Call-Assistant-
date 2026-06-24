@@ -136,6 +136,8 @@ services:
     environment:
       DB_SSL: require
       LIVEKIT_URL: ws://livekit:7880
+    extra_hosts:
+      - "db.vkvpgrlzbjahhrlqxbvg.supabase.co:172.18.0.1"
     depends_on:
       postgres:
         condition: service_healthy
