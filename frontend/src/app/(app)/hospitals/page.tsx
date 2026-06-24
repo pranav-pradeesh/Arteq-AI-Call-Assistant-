@@ -74,6 +74,16 @@ export default function HospitalsPage() {
     onError: (e: Error) => toast(e.message, "err"),
   });
 
+  const planMut = useMutation({
+    mutationFn: (v: { id: string; plan: "trial" | "full" }) =>
+      api.updateHospital(v.id, { plan: v.plan }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["hospitals"] });
+      toast("Plan updated", "ok");
+    },
+    onError: (e: Error) => toast(e.message, "err"),
+  });
+
   const columns: ColumnDef<Hospital>[] = [
     {
       header: "Name",
@@ -92,6 +102,26 @@ export default function HospitalsPage() {
           {row.original.tier ?? "hospital"}
         </Badge>
       ),
+    },
+    {
+      header: "Plan",
+      accessorKey: "plan",
+      cell: ({ row }) => {
+        const plan = (row.original.plan ?? "trial") as "trial" | "full";
+        return (
+          <button
+            type="button"
+            title="Click to toggle Trial / Full"
+            disabled={planMut.isPending}
+            onClick={() => planMut.mutate({ id: row.original.id, plan: plan === "full" ? "trial" : "full" })}
+            className="cursor-pointer"
+          >
+            <Badge tone={plan === "full" ? "green" : "blue"}>
+              {plan === "full" ? "Full" : "Trial"}
+            </Badge>
+          </button>
+        );
+      },
     },
     {
       header: "Status",

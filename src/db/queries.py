@@ -230,6 +230,7 @@ class HospitalContext:
     emergency: list[EmergencyContact]
     knowledge_base: str = ""   # free-form staff handbook (parking, insurance, policies, …)
     tier: str = "hospital"     # "clinic" | "hospital"
+    plan: str = "trial"        # "trial" | "full"
     agent_name: str = "Arya"         # per-hospital AI persona name
     agent_language: str = "ml-IN"    # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, te-IN, en-IN
     queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
@@ -381,16 +382,18 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         # Extended columns — graceful fallback if column doesn't exist yet (old DB).
         knowledge_base = ""
         tier = "hospital"
+        plan = "trial"
         agent_name = "Arya"
         agent_language = "ml-IN"
         try:
             row = await conn.fetchrow(
-                "SELECT knowledge_base, tier, agent_name, agent_language "
+                "SELECT knowledge_base, tier, plan, agent_name, agent_language "
                 "FROM hospitals WHERE id=$1", hospital_id
             )
             if row:
                 knowledge_base = row["knowledge_base"] or ""
                 tier = row["tier"] or "hospital"
+                plan = row["plan"] or "trial"
                 agent_name = row["agent_name"] or "Arya"
                 agent_language = row["agent_language"] or "ml-IN"
         except Exception:
@@ -411,6 +414,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         emergency=emergency,
         knowledge_base=knowledge_base,
         tier=tier,
+        plan=plan,
         agent_name=agent_name,
         agent_language=agent_language,
         loaded_at=time.time(),

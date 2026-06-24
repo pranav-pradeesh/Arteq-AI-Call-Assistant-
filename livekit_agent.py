@@ -1980,6 +1980,18 @@ async def entrypoint(ctx: JobContext) -> None:
     # record=False disables LiveKit Cloud OTLP telemetry export. The exporter
     # blocks on 10s TLS handshakes to the cloud observability endpoint and floods
     # logs with ReadTimeout tracebacks; we don't use cloud recording.
+    # Plan gate: inbound AI answering is a FULL-plan feature. On the trial plan
+    # only outbound (reminders/confirmations) + dashboard setup are included, so
+    # an inbound call is not AI-answered.
+    if not outbound_context and getattr(hospital_ctx, "plan", "trial") != "full":
+        print(f"[arteq] inbound blocked (trial plan) call={call_id[:8]} hospital={hospital_id}",
+              file=sys.stderr)
+        try:
+            await ctx.room.disconnect()
+        except Exception:
+            pass
+        return
+
     await session.start(
         agent=agent,
         room=ctx.room,

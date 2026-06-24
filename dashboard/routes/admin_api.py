@@ -353,12 +353,12 @@ async def list_hospitals(payload: dict = Depends(_require_auth)):
         if allowed is None:  # super-admin / legacy admin: all hospitals
             rows = await conn.fetch(
                 "SELECT id, name, name_ml, address, phone, hours, active, "
-                "slug, plivo_number, tier, agent_name, agent_language FROM hospitals ORDER BY name"
+                "slug, plivo_number, tier, plan, agent_name, agent_language FROM hospitals ORDER BY name"
             )
         else:  # tenant_admin / viewer: only their assigned hospitals
             rows = await conn.fetch(
                 "SELECT id, name, name_ml, address, phone, hours, active, "
-                "slug, plivo_number, tier, agent_name, agent_language "
+                "slug, plivo_number, tier, plan, agent_name, agent_language "
                 "FROM hospitals WHERE slug = ANY($1) ORDER BY name",
                 list(allowed),
             )
@@ -374,6 +374,7 @@ async def list_hospitals(payload: dict = Depends(_require_auth)):
             "slug": r["slug"] or "",
             "plivo_number": r["plivo_number"] or "",
             "tier": r["tier"] or "hospital",
+            "plan": r["plan"] or "trial",
             "agent_name": r["agent_name"] or "Arya",
             "agent_language": r["agent_language"] or "ml-IN",
             "knowledge_base": "",
@@ -388,7 +389,7 @@ async def get_hospital(hospital_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, knowledge_base, tier, agent_name, agent_language "
+            "slug, plivo_number, knowledge_base, tier, plan, agent_name, agent_language "
             "FROM hospitals WHERE id=$1",
             hospital_id,
         )
@@ -406,6 +407,7 @@ async def get_hospital(hospital_id: str):
         "plivo_number": row["plivo_number"] or "",
         "knowledge_base": row["knowledge_base"] or "",
         "tier": row["tier"] or "hospital",
+        "plan": row["plan"] or "trial",
         "agent_name": row["agent_name"] or "Arya",
         "agent_language": row["agent_language"] or "ml-IN",
     }
@@ -429,6 +431,7 @@ class HospitalUpdate(BaseModel):
     slug: Optional[str] = None
     knowledge_base: Optional[str] = None
     tier: Optional[str] = None           # "clinic" | "hospital"
+    plan: Optional[str] = None           # "trial" | "full"
     agent_name: Optional[str] = None     # AI persona name for this tenant
     agent_language: Optional[str] = None # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, en-IN
 
@@ -494,6 +497,11 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate):
             tier_val = body.tier if body.tier in allowed_tiers else "hospital"
             fields.append(f"tier=${i}")
             values.append(tier_val)
+            i += 1
+        if body.plan is not None:
+            plan_val = body.plan if body.plan in {"trial", "full"} else "trial"
+            fields.append(f"plan=${i}")
+            values.append(plan_val)
             i += 1
         if body.agent_name is not None:
             fields.append(f"agent_name=${i}")

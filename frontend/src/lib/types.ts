@@ -15,6 +15,7 @@ export interface Hospital {
   plivo_number?: string | null; // carrier DID (Exotel); JSON key kept for backend compat
   knowledge_base?: string | null;
   tier?: Tier;
+  plan?: "trial" | "full";
   agent_name?: string | null;
   active: boolean;
   created_at?: string;
