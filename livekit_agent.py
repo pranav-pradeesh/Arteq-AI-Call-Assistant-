@@ -468,6 +468,44 @@ _SARVAM_COMPAT["bulbul:v3"] = {
 _TTS_PACE = float(os.getenv("TTS_PACE", "1.0"))
 
 
+def _build_stt(lang):
+    """Sarvam Saarika STT, with an OpenAI Whisper fallback if OPENAI_API_KEY is
+    set — so a Sarvam credit lapse (402) doesn't kill the call."""
+    primary = sarvam.STT(
+        api_key=os.getenv("SARVAM_API_KEY", ""),
+        model=os.getenv("SARVAM_STT_MODEL", "saarika:v2.5"),
+        language=lang,
+    )
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            from livekit.plugins import openai as _oai
+            from livekit.agents import stt as _stt_mod
+            backup = _oai.STT(model="whisper-1", language="ml")
+            return _stt_mod.FallbackAdapter([primary, backup])
+        except Exception as _e:
+            print(f"[arteq] STT fallback unavailable: {_e}", file=sys.stderr)
+    return primary
+
+
+def _build_tts(lang):
+    """Bulbul v3 TTS, with an OpenAI TTS fallback if OPENAI_API_KEY is set."""
+    primary = BulbulV3TTS(
+        api_key=os.getenv("SARVAM_API_KEY", ""),
+        target_language_code=lang,
+        speaker="priya",
+        pace=_TTS_PACE,
+    )
+    if os.getenv("OPENAI_API_KEY"):
+        try:
+            from livekit.plugins import openai as _oai
+            from livekit.agents import tts as _tts_mod
+            backup = _oai.TTS(model="gpt-4o-mini-tts", voice="shimmer")
+            return _tts_mod.FallbackAdapter([primary, backup])
+        except Exception as _e:
+            print(f"[arteq] TTS fallback unavailable: {_e}", file=sys.stderr)
+    return primary
+
+
 class BulbulV3TTS(_SarvamTTS):
     """Sarvam Bulbul v3 TTS.
 
@@ -963,11 +1001,11 @@ BOOKING FLOW — follow strictly. Ask EXACTLY ONE thing per reply; NEVER list se
 2. Department NOT in the HOSPITAL section → apologise in ONE sentence, then end_call. No transfer, no alternatives.
 3. Department exists → call check_availability for a doctor. No doctor → say so in ONE sentence, then end_call. Doctor available → continue.
 4. Ask WHO it's for (yourself or someone else) — ask this ONCE only. Once you know (e.g. "my younger sister"), NEVER ask it again.
-5. Collect the patient's details ONE PER REPLY, asking only the next missing one: name → age → gender. Gender must be male/female/other (ആൺ/പെൺ); if the answer isn't a valid gender, briefly re-ask once.
+5. Collect the patient's details ONE PER REPLY, asking only the next missing one: name → age → gender. Gender must be male/female/other (ആൺ/പെൺ); if the answer isn't a valid gender, briefly re-ask once. As soon as the caller gives a name — even a single word like "Pranav" — ACCEPT it as the name and move straight to the next question; never re-ask for the name once you have one.
 6. Do NOT ask the patient for a date or time. Call check_availability (today if open slots remain, otherwise the next working day) and OFFER the earliest open slot — e.g. "ഡോ. X-ന് നാളെ രാവിലെ 9:30-ന് ഫ്രീ ഉണ്ട്, അത് ശരിയാണോ?". The patient just accepts, or asks for a different day — then ask ONLY which day and offer that day's earliest open slot. NEVER ask them to name an exact time.
 7. Read the full details (patient name, age, doctor, date, time) back EXACTLY ONCE — only at this final step, never earlier and never again. Get a single "yes", then call book_appointment (pass patient_age, patient_gender, booked_for = "self" or the relation). Do NOT re-state or re-confirm details the caller already gave on earlier turns; once they say yes, book and move on.
 
-NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?"
+PUNCTUATION: Always write replies with proper punctuation — full stops, commas and question marks — so the spoken voice has natural pauses and intonation, and numbers, dates and booking codes are read clearly. NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?"
 
 UNCLEAR / WEAK LINE: Phone audio can break up. If a reply is empty, garbled, a stray fragment, or doesn't fit what you asked, do NOT guess and do NOT move on — say ONE short "ക്ഷമിക്കണം, ഒന്നുകൂടി പറയാമോ?" and re-ask the SAME single thing. ONLY if a name, age, date or time sounds garbled or you are genuinely unsure, briefly repeat JUST that one item back for a yes/no. If it was clear, do NOT echo or acknowledge it — go straight to the next question. Never invent or "auto-correct" a name into something the caller didn't say. SIDE CONVERSATION: If the caller is clearly talking to someone ELSE nearby or having a side / background conversation that is NOT directed at you (addressing a third person, "ഒരു മിനിറ്റ്" / "wait" / "one minute", or unrelated chatter that is not an answer to your question or a request to you), do NOT respond to that content and do NOT advance the booking. Stay quiet; only if it continues, say ONE brief "സാരമില്ല, ഞാൻ കാത്തിരിക്കാം — തയ്യാറാകുമ്പോൾ പറഞ്ഞോളൂ" (no problem, I will wait) and then gently re-ask your last question. Act ONLY on what is actually said TO you.
 
@@ -1164,11 +1202,7 @@ class HospitalVoiceAgent(Agent):
             # Model + language are env-overridable so the version can be bumped or the
             # language pinned (e.g. "ml-IN") without a code change. "unknown" lets one
             # agent auto-detect every caller language; pin it if auto-detect is shaky.
-            stt=sarvam.STT(
-                api_key=os.getenv("SARVAM_API_KEY", ""),
-                model=os.getenv("SARVAM_STT_MODEL", "saarika:v2.5"),
-                language=_stt_lang,
-            ),
+            stt=_build_stt(_stt_lang),
             # Reuse the worker-prewarmed VAD (loaded once in prewarm_fnc) so the
             # Silero model load is off the per-call critical path. Fall back to a
             # fresh load if prewarm was skipped. 0.2s end-of-speech silence →
@@ -1184,15 +1218,7 @@ class HospitalVoiceAgent(Agent):
                 min_speech_duration=_VAD_MIN_SPEECH,
             ),
             llm=_build_llm(premium=premium_llm),
-            tts=BulbulV3TTS(
-                api_key=os.getenv("SARVAM_API_KEY", ""),
-                # Bulbul requires the target language code; without it the
-                # request 400s and no audio is produced. Model (bulbul:v3),
-                # speaker and 24000 Hz sample rate are enforced by BulbulV3TTS.
-                target_language_code=agent_language,
-                speaker="priya",
-                pace=_TTS_PACE,
-            ),
+            tts=_build_tts(agent_language),
         )
         self._greeting = greeting
         self._sensory = sensory

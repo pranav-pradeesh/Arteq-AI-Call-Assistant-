@@ -23,6 +23,10 @@ echo "==> [3/5] Restarting application services..."
 # Migrations run automatically on app startup (idempotent).
 $DC up -d app agent frontend
 
+# Ensure the egress (uid 1001) can write the recordings volume — the named
+# volume resets to root-only if recreated, which silently breaks recordings.
+VOL=$(docker volume inspect arteq_recordings -f '{{.Mountpoint}}' 2>/dev/null) && [ -n "$VOL" ] && chmod 0777 "$VOL" && echo "recordings volume writable: $VOL"
+
 echo "==> [4/5] Reloading nginx (picks up any deploy/nginx.conf change)..."
 $DC up -d --force-recreate nginx
 
