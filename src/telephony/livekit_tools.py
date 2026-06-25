@@ -18,6 +18,7 @@ Tool catalogue:
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import uuid
 from datetime import date as _date
@@ -387,11 +388,18 @@ try:
 
         slot_readable = slot.strftime("%d %B %Y at %I:%M %p") if slot else f"{appointment_date} {appointment_time}"
         spoken_code = " ".join(confirmation_code.replace("ARYA-", ""))  # spell out for clarity
+        # Only claim the details were messaged if a channel is actually configured
+        # (WhatsApp or an SMS provider). Otherwise we'd lie to the caller.
+        _msg_on = (
+            os.getenv("WHATSAPP_ENABLED", "").strip().lower() in ("1", "true", "yes")
+            or os.getenv("SMS_PROVIDER", "").strip().lower() not in ("", "off", "none")
+        )
+        _sent = " I've sent the details to your phone." if _msg_on else ""
         return (
             f"Appointment booked for {patient_name} with Dr. {resolved_name} "
             f"on {slot_readable}. Your booking code is {spoken_code}. "
             "Please pay the consultation fee at the hospital to activate your "
-            "queue token. I've sent the details to your phone."
+            "queue token." + _sent
         )
 
 
