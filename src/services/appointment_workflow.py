@@ -249,6 +249,9 @@ async def place_confirmation_call(
             event_type="call_attempted" if room else "call_missed",
             note=f"confirmation attempt {attempts + 1}/{MAX_ATTEMPTS}, room={room or 'none'}",
         )
+        if not room and (attempts + 1) >= MAX_ATTEMPTS:
+            await update_workflow_status(conn, appt_id, hospital_id, "missed",
+                                         note="max confirmation attempts reached")
 
     return bool(room)
 
@@ -307,6 +310,9 @@ async def place_reminder_call(
             event_type="call_attempted" if room else "call_missed",
             note=f"reminder attempt {attempts + 1}/{MAX_ATTEMPTS}",
         )
+        if not room and (attempts + 1) >= MAX_ATTEMPTS:
+            await update_workflow_status(conn, appt_id, hospital_id, "missed",
+                                         note="max reminder attempts reached")
 
     return bool(room)
 
@@ -496,7 +502,7 @@ async def cancel_appointment(
         """UPDATE appointments
            SET status = 'cancelled', workflow_status = 'cancelled', workflow_updated_at = NOW()
            WHERE id = $1
-           RETURNING patient_phone, patient_name, doctor_name, slot_time""",
+           RETURNING patient_phone, patient_name, slot_time""",
         appointment_id,
     )
     await log_appointment_event(

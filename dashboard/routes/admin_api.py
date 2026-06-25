@@ -464,8 +464,12 @@ async def create_hospital(body: HospitalUpdate):
     return {"id": new_id, "slug": slug, "tier": tier, "status": "created"}
 
 
-@router.put("/hospitals/{hospital_id}", dependencies=[Depends(_require_auth)])
-async def update_hospital(hospital_id: str, body: HospitalUpdate):
+@router.put("/hospitals/{hospital_id}")
+async def update_hospital(hospital_id: str, body: HospitalUpdate, payload: dict = Depends(_require_auth)):
+    if not _is_super(payload) and any(
+        v is not None for v in (body.plan, body.tier, body.slug, body.active)
+    ):
+        raise HTTPException(status_code=403, detail="Only super admin can change plan, tier, slug, or active")
     pool = await _db()
     async with pool.acquire() as conn:
         fields = []
@@ -1239,10 +1243,12 @@ async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptSt
         raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(allowed))}")
     pool = await _db()
     async with pool.acquire() as conn:
-        await conn.execute(
+        res = await conn.execute(
             "UPDATE appointments SET status=$1 WHERE id=$2 AND hospital_id=$3",
             body.status, appt_id, hospital_id,
         )
+    if str(res).endswith(" 0"):
+        raise HTTPException(status_code=404, detail="Appointment not found")
     return {"status": "updated", "appointment_status": body.status}
 
 

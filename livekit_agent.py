@@ -1295,20 +1295,23 @@ class HospitalVoiceAgent(Agent):
         # Malayalam/Indic acknowledgements like "ആ" (yes) or "എ" are a single
         # NON-ASCII char and must get through.
         if stripped and len(stripped) < 2 and stripped not in _DTMF and stripped.isascii():
-            return
+            raise agents_llm.StopResponse()
 
         # Post-greeting cooldown: ignore short/ambiguous transcripts in the first
         # few seconds after the greeting — phone line noise and SIP artefacts
         # often trigger a false turn that makes the agent ask "are you there?"
         # before the caller has had time to respond.
         _GREETING_COOLDOWN_S = float(os.getenv("GREETING_COOLDOWN_S", "4.0"))
+        _cooldown_drop = False
         try:
             _greet_at = self.session.userdata.get("greeting_at", 0)
             if _greet_at and (__import__("time").time() - _greet_at) < _GREETING_COOLDOWN_S:
                 if not stripped or len(stripped) < 5:
-                    return
+                    _cooldown_drop = True
         except Exception:
             pass
+        if _cooldown_drop:
+            raise agents_llm.StopResponse()
 
         # Voicemail detection (OUTBOUND only): if a carrier/iPhone voicemail picked
         # up instead of a human, end the call so the 3x retry rule tries again —
@@ -1329,7 +1332,7 @@ class HospitalVoiceAgent(Agent):
                         print(f"[arteq] voicemail hangup failed: {_vm_exc}", file=sys.stderr)
                 if ud.get("room_name"):
                     asyncio.create_task(_vm_hangup())
-                return
+                raise agents_llm.StopResponse()
 
         # Remember the caller's language (script-detected) so the live backchannel
         # murmurs in their language, not always Malayalam. Lock language on first
@@ -1370,8 +1373,7 @@ class HospitalVoiceAgent(Agent):
                 any(p in low_stripped for p in _REPEAT_PATTERNS)):
             # Replay last utterance without going to LLM
             self.session.say(last_utterance, allow_interruptions=True)
-            new_message.content = []  # suppress LLM call for this turn
-            return
+            raise agents_llm.StopResponse()  # genuinely skip the LLM turn
 
         # Fast info path: answer a few fixed, unambiguous infos (visiting hours,
         # location, ambulance, parking) straight from the cached hospital context,
@@ -1407,9 +1409,8 @@ class HospitalVoiceAgent(Agent):
                         _ans = f"{_nm} {_ctx.address} എന്ന വിലാസത്തിലാണ്."
             if _ans:
                 self.session.say(_ans, allow_interruptions=True)
-                new_message.content = []
                 _log.info("fast_faq_hit")
-                return
+                raise agents_llm.StopResponse()
 
         # DTMF: single digit → remap to natural language phrase
         if stripped in _DTMF:
@@ -2306,11 +2307,12 @@ async def entrypoint(ctx: JobContext) -> None:
                 if user_msgs:
                     last_msg = user_msgs[-1]
                     ts = getattr(last_msg, "created_at", None) or getattr(last_msg, "timestamp", None)
-                    if ts:
-                        if hasattr(ts, "timestamp"):
-                            last_turn = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
-                        else:
-                            last_turn = ts
+                    if isinstance(ts, (int, float)):
+                        last_turn = datetime.fromtimestamp(ts, tz=timezone.utc)
+                    elif isinstance(ts, datetime):
+                        last_turn = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                    elif ts is not None and hasattr(ts, "timestamp"):
+                        last_turn = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
             except Exception:
                 pass
 

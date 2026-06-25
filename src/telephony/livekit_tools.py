@@ -62,7 +62,7 @@ def _parse_date(date_str: str) -> Optional[_date]:
         return None
     today = datetime.now(_IST).date()
     low = s.lower()
-    for word, off in _REL_DAYS.items():
+    for word, off in sorted(_REL_DAYS.items(), key=lambda kv: -len(kv[0])):
         if word in low:
             return _date.fromordinal(today.toordinal() + off)
     for name, wd in _WEEKDAYS.items():
@@ -98,11 +98,20 @@ def _parse_time(time_str: str) -> Optional[_time]:
         if word in s:
             meridiem = meridiem or m
             break
-    m = re.search(r"(\d{1,2})\s*[:.]?\s*(\d{2})?", s)
-    if not m:
-        return None
-    hour = int(m.group(1))
-    minute = int(m.group(2)) if m.group(2) else 0
+    m = re.search(r"(?<!\d)(\d{1,2})\s*[:.]\s*(\d{2})(?!\d)", s)
+    if m:
+        hour = int(m.group(1))
+        minute = int(m.group(2))
+    else:
+        # No HH:MM separator. Avoid pulling digits out of a date like
+        # "2024-03-15" — require an explicit time when a 4-digit year is present.
+        if re.search(r"\d{4}", s):
+            return None
+        m = re.search(r"(?<!\d)(\d{1,2})(?!\d)", s)
+        if not m:
+            return None
+        hour = int(m.group(1))
+        minute = 0
     if meridiem == "pm" and hour < 12:
         hour += 12
     elif meridiem == "am" and hour == 12:
@@ -200,12 +209,13 @@ def _fuzzy_find_doctor(hospital_ctx, name: str):
             c = _strip_honorifics(cand)
             if not c:
                 continue
+            c_tokens = set(_toks(c))
             if q == c:
                 score = 1000.0
-            elif q in c or c in q:
-                score = 100.0 + len(q_tokens & set(_toks(c)))
+            elif (q in c_tokens) or (c in q_tokens) or (q_tokens and q_tokens <= c_tokens):
+                score = 100.0 + len(q_tokens & c_tokens)
             else:
-                overlap = q_tokens & set(_toks(c))
+                overlap = q_tokens & c_tokens
                 score = sum(5.0 if _strong(tok) else 0.5 for tok in overlap)
             if score > best_score:
                 best_score = score

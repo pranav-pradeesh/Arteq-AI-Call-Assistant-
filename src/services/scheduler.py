@@ -544,8 +544,13 @@ _LEADER_LOCK_KEY = 911287  # arbitrary app-wide constant
 
 async def _acquire_leadership() -> bool:
     global _leader_conn
+    import os
+    # Genuine no-DB dev case: run anyway so a single process still schedules.
+    if not os.environ.get("DATABASE_URL"):
+        logger.warning("scheduler_no_database_url_running_anyway")
+        return True
     try:
-        import asyncpg, os
+        import asyncpg
         _leader_conn = await asyncpg.connect(os.environ["DATABASE_URL"])
         got = await _leader_conn.fetchval(
             "SELECT pg_try_advisory_lock($1)", _LEADER_LOCK_KEY
@@ -555,10 +560,16 @@ async def _acquire_leadership() -> bool:
             _leader_conn = None
         return bool(got)
     except Exception as exc:
-        # If the lock check itself fails (e.g. dev with no DB yet), run anyway so
-        # a single-process deployment is never left without a scheduler.
-        logger.warning("scheduler_leader_check_failed_running_anyway", error=str(exc))
-        return True
+        # DB IS configured but the lock attempt failed. Do NOT self-elect — two
+        # workers both running schedulers would double-dial patients. Stand by.
+        logger.warning("scheduler_leader_check_failed_standby", error=str(exc))
+        if _leader_conn is not None:
+            try:
+                await _leader_conn.close()
+            except Exception:
+                pass
+            _leader_conn = None
+        return False
 
 
 async def _bootstrap() -> None:

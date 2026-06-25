@@ -982,7 +982,8 @@ async def get_available_slots(
             """SELECT to_char(start_time,'HH24:MI') AS start,
                       to_char(end_time,'HH24:MI') AS end
                FROM schedules
-               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true""",
+               WHERE doctor_id = $1 AND day_of_week = $2 AND active = true
+               ORDER BY start_time""",
             _uuid_mod.UUID(doctor_id), db_dow,
         )
         if not schedule:
@@ -1013,6 +1014,7 @@ async def get_available_slots(
                     available.append(slot)
                 current += slot_duration_minutes
 
+        available.sort()  # HH:MM zero-padded -> lexical == chronological
         return available[:10]  # return up to 10 next available slots
 
 
