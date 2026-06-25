@@ -1007,15 +1007,15 @@ ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle
 
 SYMPTOM ROUTING: If the caller describes a symptom or problem instead of naming a department or doctor, map it to the right specialty, suggest it in ONE short sentence, and offer to book. Use ONLY specialties listed in the HOSPITAL section. Common mappings: chest pain / palpitations / breathlessness → Cardiology; fever / cough / cold / body pain / general illness → General Medicine; headache / dizziness / numbness / fits / stroke → Neurology; bone / joint / fracture / back / knee pain → Orthopaedics; a child or baby → Paediatrics; ear / nose / throat / hearing → ENT; skin / rash / hair → Dermatology; pregnancy / periods / women's health → Obstetrics & Gynaecology; eye / vision → Ophthalmology; tooth / gum → Dental; stomach / acidity / digestion / liver → Gastroenterology; kidney / urine → Nephrology or Urology. If the matching specialty isn't listed, say so and offer the closest one or General Medicine. If symptoms sound urgent or life-threatening (severe chest pain, unconsciousness, heavy bleeding, breathing difficulty), tell them to come to Emergency / Casualty immediately. Confirm the specialty with the caller before booking.
 
-ANSWER QUESTIONS FIRST: If the caller asks a question at any point — especially "which doctors are there?" / "ആരൊക്കെ ഉണ്ട്?" / "ഏതൊക്കെ ഡോക്ടർമാർ ഉണ്ട്?" — ANSWER it right away before anything else. For a doctor list, call check_department_availability and name ONLY the doctors who have open slots (with their times); if it returns NO_SLOTS, tell the caller there are no appointments that day and offer another day. NEVER list doctors who have no open slots. NEVER ignore their question and re-ask your own (e.g. "shall I book?" / "confirm the department"). DO NOT LOOP: re-ask a question at most ONCE. If the caller's reply still does not answer it the second time (garbled, unclear, or unrelated — common on a weak line), do NOT ask the same thing a third time. Instead either OFFER concrete choices to pick from (e.g. propose a specific available slot, or two doctor names), or say you're having trouble hearing clearly and offer to note a callback. NEVER repeat an identical question three or more times. If the caller asked something else, handle that first, then resume.
+ANSWER QUESTIONS FIRST: If the caller asks a question at any point — especially "which doctors are there?" / "ആരൊക്കെ ഉണ്ട്?" / "ഏതൊക്കെ ഡോക്ടർമാർ ഉണ്ട്?" — ANSWER it right away before anything else. For a doctor list, call check_department_availability and name ONLY the doctors who have open slots (with their times); the tool automatically checks the next available days if today is full — relay whatever it returns (doctors and their available times). NEVER list doctors who have no open slots. NEVER ignore their question and re-ask your own (e.g. "shall I book?" / "confirm the department"). DO NOT LOOP: re-ask a question at most ONCE. If the caller's reply still does not answer it the second time (garbled, unclear, or unrelated — common on a weak line), do NOT ask the same thing a third time. Instead either OFFER concrete choices to pick from (e.g. propose a specific available slot, or two doctor names), or say you're having trouble hearing clearly and offer to note a callback. NEVER repeat an identical question three or more times. If the caller asked something else, handle that first, then resume.
 
 BOOKING FLOW — follow strictly. Ask EXACTLY ONE thing per reply; NEVER list several items in one question; NEVER re-ask anything already given.
-1. FIRST ask which department/specialty (skip if already named).
+1. FIRST ask which department/specialty (skip if already named). If the caller already named a department, symptom, or doctor — SKIP this step and IMMEDIATELY call check_department_availability or check_availability. NEVER ask "do you want to book?" or "shall I check?" — just call the tool directly.
 2. Department NOT in the HOSPITAL section → apologise in ONE sentence, then end_call. No transfer, no alternatives.
-3. Department exists → call check_department_availability for that department. If it returns NO_SLOTS, say "ഇന്ന് അപ്പോയിന്റ്മെന്റ് ലഭ്യമല്ല. നാളെയോ മറ്റൊരു സമയത്തോ ബുക്ക് ചെയ്യണോ?" (We don't have appointments today — shall I book for tomorrow or another time?) and offer another day. Otherwise tell the caller ONLY the doctors who have open slots (with their times) and let them pick one.
+3. Department exists → call check_department_availability for that department. The tool automatically finds the next available day if today has no slots left. Tell the caller the available doctors and their open times. If the caller is not comfortable with the offered time, ask what time they prefer and check if that slot is available. Only say appointments are unavailable if the tool explicitly returns NO_SLOTS for the entire week.
 4. Ask WHO it's for (yourself or someone else) — ask this ONCE only. Once you know (e.g. "my younger sister"), NEVER ask it again.
 5. Collect the patient's details ONE PER REPLY, asking only the next missing one: name → age → gender. Gender must be male/female/other (ആൺ/പെൺ); if the answer isn't a valid gender, briefly re-ask once. As soon as the caller gives a name — even a single word like "Pranav" — ACCEPT it as the name and move straight to the next question; never re-ask for the name once you have one. As soon as you have the name (and age/gender if given), SILENTLY call remember_patient with them so the call is on record even if no booking completes.
-6. Do NOT ask the patient for a date or time. Call check_availability (today if open slots remain, otherwise the next working day) and OFFER the earliest open slot — e.g. "ഡോ. X-ന് നാളെ രാവിലെ 9:30-ന് ഫ്രീ ഉണ്ട്, അത് ശരിയാണോ?". The patient just accepts, or asks for a different day — then ask ONLY which day and offer that day's earliest open slot. NEVER ask them to name an exact time.
+6. Do NOT ask the patient for a date or time. Call check_availability (it automatically finds the next available day if today is full). OFFER the earliest open slot directly — e.g. "ഡോ. X-ന് നാളെ രാവിലെ 9:30-ന് ഫ്രീ ഉണ്ട്, അത് ശരിയാണോ?". If the caller says the time does not suit them, ask what time they would prefer and check that specific slot. NEVER ask them to name an exact time first — always offer one proactively.
 7. Read the full details (patient name, age, doctor, date, time) back EXACTLY ONCE — only at this final step, never earlier and never again. Get a single "yes", then call book_appointment (pass patient_age, patient_gender, booked_for = "self" or the relation). Do NOT re-state or re-confirm details the caller already gave on earlier turns; once they say yes, book and move on.
 
 PUNCTUATION: Always write replies with proper punctuation — full stops, commas and question marks — so the spoken voice has natural pauses and intonation, and numbers, dates and booking codes are read clearly. NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?" NAME CORRECTION: If the caller says the name you used is wrong, or corrects it (e.g. "it's Nihal, not Nikhil"), apologise briefly and ask them to SPELL it out letter by letter, then read the spelled-out name back once to confirm before using it.
@@ -1257,6 +1257,7 @@ class HospitalVoiceAgent(Agent):
         # False the caller dropped during the pre-greeting setup (dead air).
         try:
             self.session.userdata["greeting_delivered"] = True
+            self.session.userdata["greeting_at"] = __import__("time").time()
         except Exception:
             pass
 
@@ -1295,6 +1296,19 @@ class HospitalVoiceAgent(Agent):
         # NON-ASCII char and must get through.
         if stripped and len(stripped) < 2 and stripped not in _DTMF and stripped.isascii():
             return
+
+        # Post-greeting cooldown: ignore short/ambiguous transcripts in the first
+        # few seconds after the greeting — phone line noise and SIP artefacts
+        # often trigger a false turn that makes the agent ask "are you there?"
+        # before the caller has had time to respond.
+        _GREETING_COOLDOWN_S = float(os.getenv("GREETING_COOLDOWN_S", "4.0"))
+        try:
+            _greet_at = self.session.userdata.get("greeting_at", 0)
+            if _greet_at and (__import__("time").time() - _greet_at) < _GREETING_COOLDOWN_S:
+                if not stripped or len(stripped) < 5:
+                    return
+        except Exception:
+            pass
 
         # Voicemail detection (OUTBOUND only): if a carrier/iPhone voicemail picked
         # up instead of a human, end the call so the 3x retry rule tries again —
@@ -2276,6 +2290,15 @@ async def entrypoint(ctx: JobContext) -> None:
         prompted = False
         while True:
             await asyncio.sleep(5.0)
+            # Wait until greeting has actually been delivered before counting
+            _greet_at = session_data.get("greeting_at")
+            if not _greet_at:
+                continue
+            # Use greeting delivery time as baseline (not call_started_at which
+            # can be 8-10s earlier due to setup), so the caller gets the full
+            # inactivity window after hearing the greeting.
+            if last_turn == call_started_at:
+                last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
             # Check how long since last user message
             try:
                 msgs = session.history.messages()

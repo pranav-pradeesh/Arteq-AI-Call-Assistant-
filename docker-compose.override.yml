@@ -4,3 +4,9 @@ services:
   nginx:
     ports:
       - "80:80"
+  agent:
+    volumes:
+      - ./livekit_agent.py:/app/livekit_agent.py:ro
+      - ./src/telephony/livekit_tools.py:/app/src/telephony/livekit_tools.py:ro
+      - ./src/db/queries.py:/app/src/db/queries.py:ro
+      - ./src/ai/groq_brain.py:/app/src/ai/groq_brain.py:ro

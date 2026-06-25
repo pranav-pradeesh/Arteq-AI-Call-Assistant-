@@ -837,6 +837,26 @@ try:
                 return "Could not check availability right now — please try a specific time."
 
         if not slots:
+            import datetime as _dt3
+            try:
+                req_date = _dt3.date.fromisoformat(date)
+                import pytz as _pytz3
+                _today = _dt3.datetime.now(_pytz3.timezone("Asia/Kolkata")).date()
+            except Exception:
+                _today = _dt3.date.today()
+                req_date = _today
+            if req_date <= _today:
+                for offset in range(1, 7):
+                    next_d = _today + _dt3.timedelta(days=offset)
+                    try:
+                        next_slots = await get_available_slots(doctor_id, next_d.isoformat(), hospital_id)
+                    except Exception:
+                        next_slots = []
+                    if next_slots:
+                        day_label = next_d.strftime("%A, %d %B")
+                        shown = ", ".join(next_slots[:6])
+                        return (f"Dr. {resolved_name} has no slots left today. "
+                                f"Next available on {day_label} at: {shown}. Does that work?")
             return (
                 f"Dr. {resolved_name} has no open slots on {date}. "
                 "Would you like another day or another doctor?"
@@ -1071,6 +1091,24 @@ try:
                 slots = []
             if slots:
                 avail.append((doc.name, slots[:4]))
+        if not avail and d == today:
+            for offset in range(1, 7):
+                next_d = today + _dt2.timedelta(days=offset)
+                next_avail = []
+                for doc in docs:
+                    try:
+                        slots = await get_available_slots(str(doc.id), next_d.isoformat(), hospital_id)
+                    except Exception:
+                        slots = []
+                    if slots:
+                        next_avail.append((doc.name, slots[:4]))
+                if next_avail:
+                    day_label = next_d.strftime("%A, %d %B")
+                    parts = [f"{nm} ({', '.join(s)})" for nm, s in next_avail]
+                    return (f"No slots left today in {dept_nm}. "
+                            f"Next available on {day_label}: " + "; ".join(parts) + ". Which doctor and time?")
+            return (f"NO_SLOTS: no doctor in {dept_nm} has an open slot in the next week. "
+                    "Apologise and offer to take a callback request.")
         if not avail:
             return (f"NO_SLOTS: no doctor in {dept_nm} has an open slot on {d.isoformat()}. "
                     "Tell the caller there are no appointments that day and offer another day.")
