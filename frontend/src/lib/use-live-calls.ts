@@ -31,8 +31,13 @@ export function useLiveCalls(hospitalId: string): { calls: CallLog[]; status: Li
     let pollTimer: ReturnType<typeof setInterval> | null = null;
     let openTimeout: ReturnType<typeof setTimeout> | null = null;
 
-    const apiBase = process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000";
-    const wsBase = apiBase.replace(/^http/, "ws");
+    // WebSocket must hit the SAME origin the page is served from (nginx proxies
+    // /admin/ws/ to the backend). NEXT_PUBLIC_API_BASE is an internal docker host
+    // (app:8000) the browser can't resolve, so derive the WS base from the page.
+    const wsBase =
+      typeof window !== "undefined" && window.location?.origin
+        ? window.location.origin.replace(/^http/, "ws")
+        : (process.env.NEXT_PUBLIC_API_BASE || "http://localhost:8000").replace(/^http/, "ws");
 
     function startPolling() {
       if (cancelled || pollTimer) return;
