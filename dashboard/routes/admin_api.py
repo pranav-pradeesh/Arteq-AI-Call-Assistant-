@@ -3343,7 +3343,7 @@ async def get_call_recording(hospital_id: str, call_id: str):
     try:
         async with pool.acquire() as conn:
             ap = await conn.fetchrow(
-                "SELECT a.patient_name, a.slot_time, d.name AS doctor "
+                "SELECT a.patient_name, a.patient_age, a.patient_gender, a.slot_time, d.name AS doctor "
                 "FROM appointments a LEFT JOIN doctors d ON d.id = a.doctor_id "
                 "WHERE a.call_id=$1 AND a.hospital_id=$2 "
                 "ORDER BY a.created_at DESC LIMIT 1",
@@ -3351,6 +3351,10 @@ async def get_call_recording(hospital_id: str, call_id: str):
             )
         if ap:
             bits = [ap["patient_name"] or "patient"]
+            if ap["patient_age"] is not None:
+                bits.append(f"{ap['patient_age']}y")
+            if ap["patient_gender"]:
+                bits.append(str(ap["patient_gender"]))
             if ap["slot_time"]:
                 bits.append(ap["slot_time"].strftime("%Y-%m-%d"))
             if ap["doctor"]:

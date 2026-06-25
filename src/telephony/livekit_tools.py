@@ -327,6 +327,9 @@ try:
             his_sync_status = "failed"
             logger.error("his_book_failed_fallback_to_db", error=str(exc))
 
+        _digits = re.sub(r"\D", "", patient_age or "")
+        _pt_age = int(_digits) if _digits else None
+        _pt_gender = (patient_gender or "").strip().lower() or None
         try:
             from src.db.queries import create_appointment
             result = await create_appointment(
@@ -341,6 +344,8 @@ try:
                 his_appointment_id=his_appt_id,
                 priority=priority,
                 his_sync_status=his_sync_status,
+                patient_age=_pt_age,
+                patient_gender=_pt_gender,
             )
             appt_id = result["id"]
             confirmation_code = result["confirmation_code"]
