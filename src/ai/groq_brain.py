@@ -218,7 +218,8 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
         lines.extend(["", (
             f"DOCTORS: {len(_docs)} doctors across the departments listed above. NEVER invent, "
             "guess, or translate doctor names — only state names a tool returns. To LIST the "
-            "doctors in a department, call get_doctor_schedule with department_name. To find or "
+            "doctors in a department, call check_department_availability (it returns ONLY doctors "
+            "with open slots and their times). To find or "
             "book one, call check_availability(department) or get_doctor_schedule — a named-doctor "
             "request is matched automatically. NEVER say a doctor or department is unavailable "
             "without checking the tool first.")])

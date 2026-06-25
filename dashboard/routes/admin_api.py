@@ -3349,16 +3349,36 @@ async def get_call_recording(hospital_id: str, call_id: str):
                 "ORDER BY a.created_at DESC LIMIT 1",
                 call_id, hospital_id,
             )
-        if ap:
-            bits = [ap["patient_name"] or "patient"]
-            if ap["patient_age"] is not None:
-                bits.append(f"{ap['patient_age']}y")
-            if ap["patient_gender"]:
-                bits.append(str(ap["patient_gender"]))
-            if ap["slot_time"]:
-                bits.append(ap["slot_time"].strftime("%Y-%m-%d"))
-            if ap["doctor"]:
-                bits.append("Dr-" + ap["doctor"].replace("Dr.", "").strip())
+            cl = await conn.fetchrow(
+                "SELECT patient_name, patient_age, patient_gender, started_at "
+                "FROM call_logs WHERE call_id=$1 AND hospital_id=$2",
+                call_id, hospital_id,
+            )
+
+        def _g(*vals):
+            for v in vals:
+                if v is not None and v != "":
+                    return v
+            return None
+
+        name = _g(ap and ap["patient_name"], cl and cl["patient_name"])
+        age = _g(ap and ap["patient_age"], cl and cl["patient_age"])
+        gender = _g(ap and ap["patient_gender"], cl and cl["patient_gender"])
+        when = _g(ap and ap["slot_time"], cl and cl["started_at"])
+        doctor = ap["doctor"] if ap else None
+        if name or doctor:
+            bits = [name or "patient"]
+            if age is not None:
+                bits.append(f"{age}y")
+            if gender:
+                bits.append(str(gender))
+            if when is not None:
+                try:
+                    bits.append(when.strftime("%Y-%m-%d"))
+                except Exception:
+                    pass
+            if doctor:
+                bits.append("Dr-" + doctor.replace("Dr.", "").strip())
             label = _re.sub(r"[^\w.-]+", "_", "_".join(str(b) for b in bits if b)).strip("_")
             if label:
                 fname = f"{label}.ogg"

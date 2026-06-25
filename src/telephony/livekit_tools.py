@@ -1028,11 +1028,89 @@ try:
         logger.info("tool_end_call", room=room_name)
         return goodbye
 
+    @function_tool
+    async def check_department_availability(
+        context: RunContext,
+        department_name: str,
+        date: str = "",
+    ) -> str:
+        """List ONLY the doctors in a department who have OPEN appointment slots on
+        a date (default today), with their available times. Use this whenever the
+        caller asks who is available / which doctors / wants to book in a department.
+        Returns NO_SLOTS when nobody has an opening that day so you can offer another
+        day. NEVER mention doctors who have no open slots."""
+        hospital_id = _ud(context, "hospital_id", "")
+        hospital_ctx = _ud(context, "hospital_ctx")
+        if not hospital_ctx:
+            return "Availability temporarily unavailable."
+        dept = hospital_ctx.find_dept(department_name)
+        dept_nm = dept.name if dept else department_name
+        docs = [d for d in hospital_ctx.doctors
+                if (getattr(d, "dept_name", "") or "").lower() == dept_nm.lower()]
+        if not docs:
+            dl = department_name.lower()
+            docs = [d for d in hospital_ctx.doctors
+                    if dl in (getattr(d, "dept_name", "") or "").lower()]
+        if not docs:
+            return f"No doctors are listed for '{department_name}'."
+        import datetime as _dt2
+        try:
+            import pytz as _pytz2
+            today = _dt2.datetime.now(_pytz2.timezone("Asia/Kolkata")).date()
+        except Exception:
+            today = _dt2.date.today()
+        d = _parse_date(date) if date else today
+        if not d:
+            d = today
+        from src.db.queries import get_available_slots
+        avail = []
+        for doc in docs:
+            try:
+                slots = await get_available_slots(str(doc.id), d.isoformat(), hospital_id)
+            except Exception:
+                slots = []
+            if slots:
+                avail.append((doc.name, slots[:4]))
+        if not avail:
+            return (f"NO_SLOTS: no doctor in {dept_nm} has an open slot on {d.isoformat()}. "
+                    "Tell the caller there are no appointments that day and offer another day.")
+        parts = [f"{nm} ({', '.join(s)})" for nm, s in avail]
+        return f"Available in {dept_nm} on {d.isoformat()}: " + "; ".join(parts) + ". Which doctor?"
+
+    @function_tool
+    async def remember_patient(
+        context: RunContext,
+        name: str,
+        age: str = "",
+        gender: str = "",
+    ) -> str:
+        """Silently record the caller's patient details (name; age/gender if given)
+        as soon as you have them, so the call/recording is on record by patient even
+        if no booking completes. Call once. Returns nothing to speak."""
+        try:
+            ud = context.userdata
+        except AttributeError:
+            try:
+                ud = context.session.userdata
+            except AttributeError:
+                return ""
+        try:
+            ud["pmeta"] = {
+                "name": (name or "").strip(),
+                "age": (age or "").strip(),
+                "gender": (gender or "").strip(),
+            }
+        except Exception:
+            pass
+        return ""
+
     # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
         confirm_appointment,
         check_availability,
+        check_department_availability,
+        remember_patient,
         reschedule_appointment,
         cancel_appointment,
         request_callback,
@@ -1049,6 +1127,8 @@ try:
         book_appointment,
         confirm_appointment,
         check_availability,
+        check_department_availability,
+        remember_patient,
         reschedule_appointment,
         cancel_appointment,
         request_callback,
