@@ -1394,7 +1394,7 @@ class HospitalVoiceAgent(Agent):
             if _ans:
                 self.session.say(_ans, allow_interruptions=True)
                 new_message.content = []
-                logger.info("fast_faq_hit")
+                _log.info("fast_faq_hit")
                 return
 
         # DTMF: single digit → remap to natural language phrase
