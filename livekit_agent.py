@@ -2212,7 +2212,6 @@ async def entrypoint(ctx: JobContext) -> None:
     try:
         from livekit.agents import BackgroundAudioPlayer, AudioConfig, BuiltinAudioClip
         _bg_audio = BackgroundAudioPlayer(
-            ambient_sound=AudioConfig(BuiltinAudioClip.OFFICE_AMBIENCE, volume=0.12),
             thinking_sound=[
                 AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING, volume=0.7),
                 AudioConfig(BuiltinAudioClip.KEYBOARD_TYPING2, volume=0.6),
