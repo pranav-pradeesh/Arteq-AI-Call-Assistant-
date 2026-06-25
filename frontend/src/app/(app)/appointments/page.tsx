@@ -104,6 +104,15 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
     onError: (e: Error) => toast(e.message, "err"),
   });
 
+  const deleteMutation = useMutation({
+    mutationFn: (apptId: string) => api.deleteAppointment(hospitalId, apptId),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["appointments", hospitalId] });
+      toast("Appointment removed");
+    },
+    onError: (e: Error) => toast(e.message, "err"),
+  });
+
   const columns: ColumnDef<Appointment, unknown>[] = [
     {
       header: "Patient",
@@ -177,6 +186,19 @@ function AppointmentsInner({ hospitalId }: { hospitalId: string }) {
                 onClick={() => updateMutation.mutate({ apptId: appt.id, status: "cancelled" })}
               >
                 Cancel
+              </Button>
+            )}
+            {appt.status === "cancelled" && (
+              <Button
+                variant="danger"
+                className="px-2 py-1 text-xs"
+                disabled={deleteMutation.isPending}
+                onClick={() => {
+                  if (confirm("Remove this cancelled appointment permanently?"))
+                    deleteMutation.mutate(appt.id);
+                }}
+              >
+                Remove
               </Button>
             )}
           </div>

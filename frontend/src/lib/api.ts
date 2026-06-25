@@ -175,6 +175,8 @@ export const api = {
     get<Appointment[]>(`/hospitals/${hid}/appointments${qs({ status, limit })}`),
   updateAppointmentStatus: (hid: string, apptId: string, status: AppointmentStatus) =>
     put<Appointment>(`/hospitals/${hid}/appointments/${apptId}/status`, { status }),
+  deleteAppointment: (hid: string, apptId: string) =>
+    del<{ ok: boolean }>(`/hospitals/${hid}/appointments/${apptId}`),
   listCallbacks: (hid: string, status?: string) => get<Callback[]>(`/hospitals/${hid}/callbacks${qs({ status })}`),
 
   // ── Telephony / setup ─────────────────────────────────

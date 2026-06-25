@@ -1207,6 +1207,31 @@ class ApptStatusBody(BaseModel):
     status: str
 
 
+@router.delete("/hospitals/{hospital_id}/appointments/{appt_id}", dependencies=[Depends(_require_auth)])
+async def delete_appointment(hospital_id: str, appt_id: str):
+    """Hard-delete an appointment. Allowed only once it is cancelled, so the
+    dashboard Remove button can clear out cancelled rows."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        st = await conn.fetchval(
+            "SELECT status FROM appointments WHERE id=$1 AND hospital_id=$2",
+            appt_id, hospital_id,
+        )
+        if st is None:
+            raise HTTPException(status_code=404, detail="Appointment not found")
+        if st != "cancelled":
+            raise HTTPException(status_code=409, detail="Only cancelled appointments can be removed")
+        try:
+            await conn.execute("DELETE FROM appointment_events WHERE appointment_id=$1", appt_id)
+        except Exception:
+            pass
+        await conn.execute(
+            "DELETE FROM appointments WHERE id=$1 AND hospital_id=$2",
+            appt_id, hospital_id,
+        )
+    return {"ok": True}
+
+
 @router.put("/hospitals/{hospital_id}/appointments/{appt_id}/status", dependencies=[Depends(_require_auth)])
 async def update_appointment_status(hospital_id: str, appt_id: str, body: ApptStatusBody):
     allowed = {"requested", "confirmed", "cancelled", "completed", "no_show"}
@@ -3311,4 +3336,28 @@ async def get_call_recording(hospital_id: str, call_id: str):
     path = f"/recordings/{call_id}.ogg"
     if not _os.path.exists(path):
         raise HTTPException(status_code=404, detail="Recording not ready yet")
-    return FileResponse(path, media_type="audio/ogg", filename=f"{call_id}.ogg")
+    # Friendly download name from the booking made on this call:
+    # <patient>_<YYYY-MM-DD>_Dr-<doctor>.ogg. Falls back to the call_id.
+    import re as _re
+    fname = f"{call_id}.ogg"
+    try:
+        async with pool.acquire() as conn:
+            ap = await conn.fetchrow(
+                "SELECT a.patient_name, a.slot_time, d.name AS doctor "
+                "FROM appointments a LEFT JOIN doctors d ON d.id = a.doctor_id "
+                "WHERE a.call_id=$1 AND a.hospital_id=$2 "
+                "ORDER BY a.created_at DESC LIMIT 1",
+                call_id, hospital_id,
+            )
+        if ap:
+            bits = [ap["patient_name"] or "patient"]
+            if ap["slot_time"]:
+                bits.append(ap["slot_time"].strftime("%Y-%m-%d"))
+            if ap["doctor"]:
+                bits.append("Dr-" + ap["doctor"].replace("Dr.", "").strip())
+            label = _re.sub(r"[^\w.-]+", "_", "_".join(str(b) for b in bits if b)).strip("_")
+            if label:
+                fname = f"{label}.ogg"
+    except Exception:
+        pass
+    return FileResponse(path, media_type="audio/ogg", filename=fname)
