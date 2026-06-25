@@ -1295,7 +1295,7 @@ class HospitalVoiceAgent(Agent):
         if (last_utterance and stripped and len(stripped) < 60 and
                 any(p in low_stripped for p in _REPEAT_PATTERNS)):
             # Replay last utterance without going to LLM
-            asyncio.create_task(self.session.say(last_utterance, allow_interruptions=True))
+            self.session.say(last_utterance, allow_interruptions=True)
             new_message.content = []  # suppress LLM call for this turn
             return
 
@@ -1332,7 +1332,7 @@ class HospitalVoiceAgent(Agent):
                         _nm = _ctx.name_ml or _ctx.name
                         _ans = f"{_nm} {_ctx.address} എന്ന വിലാസത്തിലാണ്."
             if _ans:
-                asyncio.create_task(self.session.say(_ans, allow_interruptions=True))
+                self.session.say(_ans, allow_interruptions=True)
                 new_message.content = []
                 logger.info("fast_faq_hit")
                 return
@@ -1858,6 +1858,9 @@ async def entrypoint(ctx: JobContext) -> None:
     _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
 
     async def _on_end_async(_event=None):
+        if session_data.get("_ended_once"):
+            return
+        session_data["_ended_once"] = True
         if _ambient_task:
             _ambient_task.cancel()
         for _t in _drain_tasks:
@@ -2038,6 +2041,11 @@ async def entrypoint(ctx: JobContext) -> None:
             print(f"[arteq] post-call cleanup error: {exc}", file=sys.stderr)
 
     session.on("close", lambda e=None: asyncio.ensure_future(_on_end_async(e)))
+    # Also run end-handling as an AWAITED shutdown callback so the call_log write
+    # finishes before the job tears down (the close task above gets cancelled
+    # mid-write -> CancelledError, which "except Exception" never catches, so the
+    # row was silently lost). _ended_once guard + ON CONFLICT make a 2nd run a no-op.
+    ctx.add_shutdown_callback(_on_end_async)
 
     # Start the session immediately — caller is already waiting in silence.
     # The prewarm task runs in the background; if it finishes before on_enter
