@@ -630,6 +630,17 @@ _REPEAT_PATTERNS = [
     "மீண்டும்", "திரும்ப", "கேட்கவில்லை",
 ]
 
+# Carrier / iPhone voicemail greetings — if an OUTBOUND call is answered by a
+# voicemail machine (not a human), end the call and let the retry rule try again.
+_VOICEMAIL_PATTERNS = [
+    "leave a message", "after the tone", "after the beep", "at the tone",
+    "record your message", "record your voice", "leave your message",
+    "leave a message after", "voicemail", "voice mail", "please leave",
+    "you have reached", "not available", "is unavailable", "not reachable",
+    "currently not available", "person you are trying", "unable to take your call",
+    "call is being forwarded", "call has been forwarded", "please record",
+]
+
 
 def _build_llm(premium: bool = True):
     """Single conversational brain. Sarvam-30B is NOT used as an LLM.
@@ -1009,7 +1020,7 @@ BOOKING FLOW — follow strictly. Ask EXACTLY ONE thing per reply; NEVER list se
 
 PUNCTUATION: Always write replies with proper punctuation — full stops, commas and question marks — so the spoken voice has natural pauses and intonation, and numbers, dates and booking codes are read clearly. NAME COLLECTION: Ask warmly, not robotically — Malayalam/Manglish → "ഒന്ന് പേര് പറഞ്ഞോ?"; English → "Could I get your name?" NAME CORRECTION: If the caller says the name you used is wrong, or corrects it (e.g. "it's Nihal, not Nikhil"), apologise briefly and ask them to SPELL it out letter by letter, then read the spelled-out name back once to confirm before using it.
 
-UNCLEAR / WEAK LINE: Phone audio can break up. If a reply is empty, garbled, a stray fragment, or doesn't fit what you asked, do NOT guess and do NOT move on — say ONE short "ക്ഷമിക്കണം, ഒന്നുകൂടി പറയാമോ?" and re-ask the SAME single thing. ONLY if a name, age, date or time sounds garbled or you are genuinely unsure, briefly repeat JUST that one item back for a yes/no. If it was clear, do NOT echo or acknowledge it — go straight to the next question. Never invent or "auto-correct" a name into something the caller didn't say. SIDE CONVERSATION: If the caller is clearly talking to someone ELSE nearby or having a side / background conversation that is NOT directed at you (addressing a third person, "ഒരു മിനിറ്റ്" / "wait" / "one minute", or unrelated chatter that is not an answer to your question or a request to you), do NOT respond to that content and do NOT advance the booking. Stay quiet; only if it continues, say ONE brief "സാരമില്ല, ഞാൻ കാത്തിരിക്കാം — തയ്യാറാകുമ്പോൾ പറഞ്ഞോളൂ" (no problem, I will wait) and then gently re-ask your last question. Act ONLY on what is actually said TO you.
+UNCLEAR / WEAK LINE: Phone audio can break up. If a reply is empty, garbled, a stray fragment, or doesn't fit what you asked, do NOT guess and do NOT move on — say ONE short "ക്ഷമിക്കണം, ഒന്നുകൂടി പറയാമോ?" and re-ask the SAME single thing. ONLY if a name, age, date or time sounds garbled or you are genuinely unsure, ASK "... X ആണോ?" / "did you mean X?" with your single best guess and let the caller confirm or correct it — for that ONE item only. Never confirm or repeat back values that were clear. If it was clear, do NOT echo or acknowledge it — go straight to the next question. Never invent or "auto-correct" a name into something the caller didn't say. SIDE CONVERSATION: If the caller is clearly talking to someone ELSE nearby or having a side / background conversation that is NOT directed at you (addressing a third person, "ഒരു മിനിറ്റ്" / "wait" / "one minute", or unrelated chatter that is not an answer to your question or a request to you), do NOT respond to that content and do NOT advance the booking. Stay quiet; only if it continues, say ONE brief "സാരമില്ല, ഞാൻ കാത്തിരിക്കാം — തയ്യാറാകുമ്പോൾ പറഞ്ഞോളൂ" (no problem, I will wait) and then gently re-ask your last question. Act ONLY on what is actually said TO you.
 
 CONTEXT MEMORY: Your full conversation history is visible — use it actively. Never re-ask for something the caller already said this call: their name, doctor preference, date, symptoms, reason. Reference what they told you: "ഡോ. രാജൻ — Monday 10 AM ആണോ?" or "You mentioned Dr. Rajan — confirming Monday at 10?" If a caller corrects you, update and confirm the new value. Never say "I don't have that information" about something they said earlier in this same call. NEVER claim you have already told or given the caller something (doctor names, available times, an answer) unless you ACTUALLY said it in an earlier turn — if you have not yet, just provide it now via the right tool. Keep the conversation FLOWING and continuous — briefly acknowledge what the caller just said (ശരി / മനസ്സിലായി) and build on the previous turns so it feels like one natural chat, never disconnected one-off answers.
 
@@ -1284,6 +1295,27 @@ class HospitalVoiceAgent(Agent):
         # NON-ASCII char and must get through.
         if stripped and len(stripped) < 2 and stripped not in _DTMF and stripped.isascii():
             return
+
+        # Voicemail detection (OUTBOUND only): if a carrier/iPhone voicemail picked
+        # up instead of a human, end the call so the 3x retry rule tries again —
+        # never talk to a machine.
+        if stripped and self.session.userdata.get("is_outbound"):
+            if any(p in stripped.lower() for p in _VOICEMAIL_PATTERNS):
+                ud = self.session.userdata
+                ud["voicemail_detected"] = True
+                new_message.content = []
+                print(f"[arteq] voicemail_detected call={ud.get('call_id','')[:8]}",
+                      file=sys.stderr, flush=True)
+
+                async def _vm_hangup(rn=ud.get("room_name", "")):
+                    try:
+                        from src.services.livekit_sip import delete_room
+                        await delete_room(rn)
+                    except Exception as _vm_exc:
+                        print(f"[arteq] voicemail hangup failed: {_vm_exc}", file=sys.stderr)
+                if ud.get("room_name"):
+                    asyncio.create_task(_vm_hangup())
+                return
 
         # Remember the caller's language (script-detected) so the live backchannel
         # murmurs in their language, not always Malayalam. Lock language on first
@@ -1789,6 +1821,7 @@ async def entrypoint(ctx: JobContext) -> None:
         "caller_phone":        caller_phone,
         "call_id":             call_id,
         "room_name":           room_name,
+        "is_outbound":         bool(outbound_context),
         "transfer_requested":  False,
         "transfer_destination": "",
         "caller_lang":         "ml-IN",
@@ -2032,7 +2065,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # max_attempts. A call with real turns is left as completed.
             try:
                 _rq = (outbound_context or {}).get("_requeue")
-                if _rq and direction == "outbound" and total_turns == 0:
+                if _rq and direction == "outbound" and (total_turns == 0 or session_data.get("voicemail_detected")):
                     _att = int(_rq.get("attempt", 1))
                     _max = int(_rq.get("max_attempts", 3))
                     if _att < _max:
