@@ -2298,10 +2298,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 try:
                     lang = session_data.get("caller_lang", agent_language)
                     _SILENCE_PROMPTS = {
-                        "ml-IN": "നിങ്ങൾ അവിടെ ഉണ്ടോ? ഒന്നും കേൾക്കുന്നില്ല.",
-                        "en-IN": "Are you still there? I can't hear you.",
-                        "hi-IN": "क्या आप वहाँ हैं? मुझे कुछ सुनाई नहीं दे रहा।",
-                        "ta-IN": "நீங்கள் அங்கே இருக்கிறீர்களா? எதுவும் கேட்கவில்லை.",
+                        "ml-IN": "നിങ്ങൾ എന്തെങ്കിലും പറയുന്നുണ്ടോ? എനിക്ക് വ്യക്തമായി കേൾക്കാൻ കഴിയുന്നില്ല.",
+                        "en-IN": "Are you saying something? I can't hear you clearly.",
+                        "hi-IN": "क्या आप कुछ कह रहे हैं? मुझे ठीक से सुनाई नहीं दे रहा।",
+                        "ta-IN": "நீங்கள் ஏதாவது சொல்கிறீர்களா? எனக்கு தெளிவாகக் கேட்கவில்லை.",
                     }
                     prompt_text = _SILENCE_PROMPTS.get(lang, _SILENCE_PROMPTS["en-IN"])
                     await session.say(prompt_text, allow_interruptions=True)
