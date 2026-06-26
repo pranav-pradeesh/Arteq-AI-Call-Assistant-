@@ -15,9 +15,10 @@ type DeptForm = {
   floor: string;
   location_hint: string;
   phone_ext: string;
+  timings: string;
 };
 
-const BLANK: DeptForm = { name: "", name_ml: "", floor: "", location_hint: "", phone_ext: "" };
+const BLANK: DeptForm = { name: "", name_ml: "", floor: "", location_hint: "", phone_ext: "", timings: "" };
 
 function Inner({ hospitalId }: { hospitalId: string }) {
   const toast = useToast();
@@ -46,6 +47,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
       floor: d.floor ?? "",
       location_hint: d.location_hint ?? "",
       phone_ext: d.phone_ext ?? "",
+      timings: d.timings ?? "",
     });
     setOpen(true);
   }
@@ -157,6 +159,9 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         </Field>
         <Field label="Phone Extension">
           <Input value={form.phone_ext} onChange={set("phone_ext")} placeholder="e.g. 201" />
+        </Field>
+        <Field label="Timings (what the agent tells callers)">
+          <Input value={form.timings} onChange={set("timings")} placeholder="e.g. Mon-Sat 9 AM-1 PM, 5-8 PM" />
         </Field>
       </FormModal>
     </div>

@@ -25,6 +25,8 @@ type ProfileForm = {
   tier: "hospital" | "clinic";
   agent_name: string;
   agent_language: string;
+  greeting: string;
+  staff_alert_phone: string;
 };
 
 type HoursState = Record<DowKey, { enabled: boolean; open: string; close: string }>;
@@ -58,7 +60,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   });
 
   const [profile, setProfile] = React.useState<ProfileForm>({
-    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "", agent_language: "ml-IN",
+    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "", agent_language: "ml-IN", greeting: "", staff_alert_phone: "",
   });
   const [hours, setHours] = React.useState<HoursState>(buildHoursState(null));
   const [initialized, setInitialized] = React.useState(false);
@@ -74,6 +76,8 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         tier: hospital.tier ?? "hospital",
         agent_name: hospital.agent_name ?? "",
         agent_language: hospital.agent_language ?? "ml-IN",
+        greeting: hospital.greeting ?? "",
+        staff_alert_phone: hospital.staff_alert_phone ?? "",
       });
       setHours(buildHoursState(hospital.hours));
       setInitialized(true);
@@ -153,6 +157,12 @@ function Inner({ hospitalId }: { hospitalId: string }) {
                 <option value="kn-IN">Kannada</option>
                 <option value="te-IN">Telugu</option>
               </Select>
+            </Field>
+            <Field label="Custom Greeting (optional — overrides the default opening line)">
+              <Input value={profile.greeting} onChange={setP("greeting")} placeholder="e.g. Namaskaram, Mother Hospital. How can I help you?" />
+            </Field>
+            <Field label="Staff Alert Phone (emergency SMS recipient)">
+              <Input value={profile.staff_alert_phone} onChange={setP("staff_alert_phone")} placeholder="+91…" />
             </Field>
           </form>
         </CardBody>

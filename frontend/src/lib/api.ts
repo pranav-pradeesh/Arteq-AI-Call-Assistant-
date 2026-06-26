@@ -6,6 +6,7 @@
 // in sync by <AuthTokenSync/> in components/providers.tsx.
 
 import type {
+  Holiday,
   Hospital, Department, Doctor, Schedule, BillingItem, EmergencyContact,
   Faq, Appointment, AppointmentStatus, Callback, CallLog, Stats, Tenant,
   TelephonyStatus, SetupStatus, HisConfig, AnalyticsPoint, AnalyticsSummary,
@@ -138,6 +139,9 @@ export const api = {
   listDepartments: (hid: string) => get<Department[]>(`/hospitals/${hid}/departments`),
   createDepartment: (hid: string, b: Partial<Department>) => post<Department>(`/hospitals/${hid}/departments`, b),
   updateDepartment: (hid: string, id: string, b: Partial<Department>) => put<Department>(`/hospitals/${hid}/departments/${id}`, b),
+  listHolidays: (hid: string) => get<Holiday[]>(`/hospitals/${hid}/holidays`),
+  createHoliday: (hid: string, b: Partial<Holiday>) => post<{ status: string }>(`/hospitals/${hid}/holidays`, b),
+  deleteHoliday: (hid: string, id: string) => del<{ ok: boolean }>(`/hospitals/${hid}/holidays/${id}`),
   deleteDepartment: (hid: string, id: string) => del<void>(`/hospitals/${hid}/departments/${id}`),
 
   // ── Doctors + schedules ───────────────────────────────
@@ -178,6 +182,8 @@ export const api = {
   deleteAppointment: (hid: string, apptId: string) =>
     del<{ ok: boolean }>(`/hospitals/${hid}/appointments/${apptId}`),
   listCallbacks: (hid: string, status?: string) => get<Callback[]>(`/hospitals/${hid}/callbacks${qs({ status })}`),
+  updateCallbackStatus: (hid: string, id: string, status: string) => put<{ status: string }>(`/hospitals/${hid}/callbacks/${id}/status`, { status }),
+  redialCallback: (hid: string, id: string) => post<{ status: string }>(`/hospitals/${hid}/callbacks/${id}/redial`),
 
   // ── Telephony / setup ─────────────────────────────────
   telephonyStatus: (hid: string) => get<TelephonyStatus>(`/telephony/status${qs({ hospital_id: hid })}`),

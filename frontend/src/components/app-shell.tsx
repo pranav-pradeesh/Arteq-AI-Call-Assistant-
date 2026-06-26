@@ -44,6 +44,7 @@ const SECTIONS: { title: string; items: Item[]; superAdminOnly?: boolean }[] = [
     items: [
       { href: "/settings", label: "Settings", icon: Settings },
       { href: "/departments", label: "Departments", icon: Building2 },
+      { href: "/holidays", label: "Holidays", icon: CalendarCheck },
       { href: "/doctors", label: "Doctors", icon: Stethoscope },
       { href: "/faqs", label: "FAQs", icon: HelpCircle },
       { href: "/billing", label: "Billing", icon: Receipt },

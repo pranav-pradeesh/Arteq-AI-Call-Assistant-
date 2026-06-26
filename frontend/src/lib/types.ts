@@ -18,6 +18,8 @@ export interface Hospital {
   plan?: "trial" | "full";
   agent_name?: string | null;
   agent_language?: string | null;
+  greeting?: string | null;
+  staff_alert_phone?: string | null;
   active: boolean;
   created_at?: string;
 }
@@ -30,7 +32,17 @@ export interface Department {
   floor?: string | null;
   location_hint?: string | null;
   phone_ext?: string | null;
+  timings?: string | null;
   active: boolean;
+}
+
+export interface Holiday {
+  id: string;
+  holiday_date: string;
+  reason?: string | null;
+  closed: boolean;
+  open_time?: string | null;
+  close_time?: string | null;
 }
 
 export interface Schedule {
