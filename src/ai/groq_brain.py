@@ -102,7 +102,7 @@ _MAX_HISTORY = 8
 # Hard cap on the hospital "handbook" free-text injected into the prompt.
 # The full KB (insurance + lab + policies) can be several thousand tokens;
 # capping keeps each request well under the Groq free-tier TPM limit.
-_MAX_KB_CHARS = 500
+_MAX_KB_CHARS = 4000
 
 # Limit concurrent API calls across all active calls (free-tier rate limits).
 # Groq free tier: 30 RPM per model. Sarvam: per-plan.
@@ -243,6 +243,19 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
         lines.extend(["", "OPD QUEUE TODAY (approximate):"])
         for dept_name, count in ctx.queue_data.items():
             lines.append(f"  {dept_name}: ~{count} patients in queue")
+
+    _faqs = getattr(ctx, "faqs", None) or []
+    if _faqs:
+        lines.extend(["", "FREQUENTLY ASKED QUESTIONS (answer from these; reply in the language the caller is using):"])
+        for f in _faqs[:30]:
+            q = (getattr(f, "question", "") or "").strip()
+            a = (getattr(f, "answer", "") or "").strip()
+            a_ml = (getattr(f, "answer_ml", "") or "").strip()
+            if not q or not (a or a_ml):
+                continue
+            ans = a if a else a_ml
+            ml_part = f"  |  ML: {a_ml}" if a_ml and a_ml != ans else ""
+            lines.append(f"  Q: {q}\n    A: {ans}{ml_part}")
 
     kb = (getattr(ctx, "knowledge_base", "") or "").strip()
     if kb:

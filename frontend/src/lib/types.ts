@@ -17,6 +17,7 @@ export interface Hospital {
   tier?: Tier;
   plan?: "trial" | "full";
   agent_name?: string | null;
+  agent_language?: string | null;
   active: boolean;
   created_at?: string;
 }

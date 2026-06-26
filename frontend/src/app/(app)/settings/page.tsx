@@ -24,6 +24,7 @@ type ProfileForm = {
   slug: string;
   tier: "hospital" | "clinic";
   agent_name: string;
+  agent_language: string;
 };
 
 type HoursState = Record<DowKey, { enabled: boolean; open: string; close: string }>;
@@ -57,7 +58,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   });
 
   const [profile, setProfile] = React.useState<ProfileForm>({
-    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "",
+    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "", agent_language: "ml-IN",
   });
   const [hours, setHours] = React.useState<HoursState>(buildHoursState(null));
   const [initialized, setInitialized] = React.useState(false);
@@ -72,6 +73,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         slug: hospital.slug ?? "",
         tier: hospital.tier ?? "hospital",
         agent_name: hospital.agent_name ?? "",
+        agent_language: hospital.agent_language ?? "ml-IN",
       });
       setHours(buildHoursState(hospital.hours));
       setInitialized(true);
@@ -141,6 +143,16 @@ function Inner({ hospitalId }: { hospitalId: string }) {
             </Field>
             <Field label="Agent Name">
               <Input value={profile.agent_name} onChange={setP("agent_name")} />
+            </Field>
+            <Field label="Agent Language">
+              <Select value={profile.agent_language} onChange={setP("agent_language")}>
+                <option value="ml-IN">Malayalam</option>
+                <option value="en-IN">English</option>
+                <option value="hi-IN">Hindi</option>
+                <option value="ta-IN">Tamil</option>
+                <option value="kn-IN">Kannada</option>
+                <option value="te-IN">Telugu</option>
+              </Select>
             </Field>
           </form>
         </CardBody>

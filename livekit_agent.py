@@ -1386,23 +1386,35 @@ class HospitalVoiceAgent(Agent):
             _bk = any(b in low_stripped for b in ("appointment", "book", "ബുക്ക", "അപ്പോയിന"))
             _ans = None
             if _ctx is not None and not _busy and not _bk:
-                def _faq(*keys):
-                    for f in _ctx.faqs:
-                        ql = (f.question or "").lower()
-                        if any(k in ql for k in keys):
-                            return f.answer_ml or f.answer
-                    return None
-                if any(k in low_stripped for k in ("visiting", "visit hour", "visiting time", "സന്ദര്ശന", "sandarshana")):
-                    _ans = _faq("visit")
-                elif ("parking" in low_stripped or "പാര്ക്കിംഗ" in low_stripped):
-                    _ans = _faq("parking")
-                elif ("ambulance" in low_stripped or "അംബുലന്സ" in low_stripped):
+                # Language-aware answer picker: Malayalam answer only when the call
+                # is in Malayalam, else the English answer.
+                _lang = str(_ud.get("caller_lang") or getattr(self, "_agent_language", "") or "ml-IN").lower()
+                _is_ml = _lang.startswith("ml")
+                def _pick(f):
+                    a = (getattr(f, "answer", "") or "").strip()
+                    a_ml = (getattr(f, "answer_ml", "") or "").strip()
+                    return (a_ml or a) if _is_ml else (a or a_ml)
+                # Generic match across ALL dashboard FAQs (question words + tags),
+                # not just hardcoded visit/parking.
+                _best = None
+                _best_score = 0
+                for f in (_ctx.faqs or []):
+                    ql = (getattr(f, "question", "") or "").lower()
+                    qwords = [w for w in ql.replace("?", " ").replace(",", " ").split() if len(w) > 3]
+                    score = sum(1 for w in qwords if w in low_stripped)
+                    score += sum(2 for t in (getattr(f, "tags", None) or []) if str(t).lower() in low_stripped)
+                    if score > _best_score:
+                        _best_score = score
+                        _best = f
+                if _best is not None and _best_score >= 2:
+                    _ans = _pick(_best)
+                if not _ans and ("ambulance" in low_stripped or "അംബുലന്സ" in low_stripped):
                     for e in _ctx.emergency:
                         _lab = (e.label or "").lower()
                         if "ambulance" in _lab or "casualty" in _lab or "emergency" in _lab:
                             _ans = f"{e.label}: {e.phone}."
                             break
-                elif ("ഡോക്ടര്" not in low_stripped and "doctor" not in low_stripped and
+                if not _ans and ("ഡോക്ടര്" not in low_stripped and "doctor" not in low_stripped and
                       any(k in low_stripped for k in ("where is", "address", "location", "how to reach", "directions", "വിലാസം", "എവിടെ", "reach the hospital"))):
                     if getattr(_ctx, "address", ""):
                         _nm = _ctx.name_ml or _ctx.name
@@ -1800,8 +1812,11 @@ async def entrypoint(ctx: JobContext) -> None:
     tools = list(CLINIC_TOOLS if hospital_tier == "clinic" else ALL_TOOLS)
     def _tool_name(t) -> str:
         return getattr(t, "name", None) or getattr(t, "__name__", "")
-    if not _feat_on(tenant_features, "multi_department_routing"):
-        tools = [t for t in tools if _tool_name(t) != "transfer_to_department"]
+    # Department transfer is core IVR-replacement behaviour — every hospital that
+    # has set department phone numbers should be able to transfer, not just tenants
+    # with the multi_department_routing feature flag. Tool no-ops safely when no
+    # number is configured, so it is always safe to expose.
+    # (transfer_to_department intentionally left enabled for all tiers)
 
     # ── Acoustic sensory layer ────────────────────────────────────────────────
     sensory = AcousticSensoryLayer()
