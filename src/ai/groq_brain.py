@@ -204,7 +204,8 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
         ml_part = f" ({d.name_ml})" if d.name_ml else ""
         floor_part = f" — Floor {d.floor}" if d.floor else ""
         ext_part = f" — Ext {d.phone_ext}" if d.phone_ext else ""
-        lines.append(f"  • {d.name}{ml_part}{floor_part}{ext_part}")
+        tim_part = f" — Timings: {d.timings}" if getattr(d, "timings", "") else ""
+        lines.append(f"  • {d.name}{ml_part}{floor_part}{ext_part}{tim_part}")
 
     # Doctor names + dept only. Schedules and fees are fetched on demand via the
     # get_doctor_schedule / check_availability tools — keeping them out of the

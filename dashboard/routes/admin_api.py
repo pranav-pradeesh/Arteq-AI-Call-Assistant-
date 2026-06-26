@@ -434,6 +434,8 @@ class HospitalUpdate(BaseModel):
     plan: Optional[str] = None           # "trial" | "full"
     agent_name: Optional[str] = None     # AI persona name for this tenant
     agent_language: Optional[str] = None # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, en-IN
+    greeting: Optional[str] = None       # custom inbound greeting
+    staff_alert_phone: Optional[str] = None  # duty-manager SMS recipient
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_super)])
@@ -515,6 +517,14 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate, payload: dict 
             fields.append(f"agent_language=${i}")
             values.append(body.agent_language)
             i += 1
+        if body.greeting is not None:
+            fields.append(f"greeting=${i}")
+            values.append(body.greeting)
+            i += 1
+        if body.staff_alert_phone is not None:
+            fields.append(f"staff_alert_phone=${i}")
+            values.append(body.staff_alert_phone)
+            i += 1
         if not fields:
             return {"status": "no_changes"}
         values.append(hospital_id)
@@ -588,6 +598,7 @@ class DeptBody(BaseModel):
     floor: Optional[str] = ""
     location_hint: Optional[str] = ""
     phone_ext: Optional[str] = ""
+    timings: Optional[str] = ""
     active: Optional[bool] = True
 
 
@@ -598,11 +609,12 @@ async def create_department(hospital_id: str, body: DeptBody):
     async with pool.acquire() as conn:
         await conn.execute(
             """INSERT INTO departments
-               (id, hospital_id, name, name_ml, floor, location_hint, phone_ext, active)
-               VALUES ($1,$2,$3,$4,$5,$6,$7,$8)""",
+               (id, hospital_id, name, name_ml, floor, location_hint, phone_ext, timings, active)
+               VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)""",
             new_id, hospital_id, body.name, body.name_ml or "",
             body.floor or "", body.location_hint or "",
-            body.phone_ext or "", body.active if body.active is not None else True,
+            body.phone_ext or "", body.timings or "",
+            body.active if body.active is not None else True,
         )
     _invalidate(hospital_id)
     return {"id": new_id, "status": "created"}
@@ -614,10 +626,10 @@ async def update_department(hospital_id: str, dept_id: str, body: DeptBody):
     async with pool.acquire() as conn:
         await conn.execute(
             """UPDATE departments SET name=$1, name_ml=$2, floor=$3,
-               location_hint=$4, phone_ext=$5, active=$6
-               WHERE id=$7 AND hospital_id=$8""",
+               location_hint=$4, phone_ext=$5, timings=$6, active=$7
+               WHERE id=$8 AND hospital_id=$9""",
             body.name, body.name_ml or "", body.floor or "",
-            body.location_hint or "", body.phone_ext or "",
+            body.location_hint or "", body.phone_ext or "", body.timings or "",
             body.active if body.active is not None else True,
             dept_id, hospital_id,
         )
@@ -1337,6 +1349,112 @@ async def list_callbacks(hospital_id: str, status: str = "", limit: int = 50):
         }
         for r in rows
     ]
+
+
+# ── Holidays / special closures ───────────────────────────────────────────────
+class HolidayBody(BaseModel):
+    holiday_date: str                      # YYYY-MM-DD
+    reason: Optional[str] = ""
+    closed: Optional[bool] = True
+    open_time: Optional[str] = None
+    close_time: Optional[str] = None
+
+
+@router.get("/hospitals/{hospital_id}/holidays", dependencies=[Depends(_require_auth)])
+async def list_holidays(hospital_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT id, to_char(holiday_date,'YYYY-MM-DD') AS holiday_date, reason, "
+            "closed, open_time, close_time FROM hospital_holidays "
+            "WHERE hospital_id=$1 ORDER BY holiday_date",
+            hospital_id,
+        )
+    return [
+        {"id": str(r["id"]), "holiday_date": r["holiday_date"], "reason": r["reason"] or "",
+         "closed": bool(r["closed"]), "open_time": r["open_time"] or "", "close_time": r["close_time"] or ""}
+        for r in rows
+    ]
+
+
+@router.post("/hospitals/{hospital_id}/holidays", dependencies=[Depends(_require_auth)])
+async def create_holiday(hospital_id: str, body: HolidayBody):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            """INSERT INTO hospital_holidays
+               (hospital_id, holiday_date, reason, closed, open_time, close_time)
+               VALUES ($1,$2::date,$3,$4,$5,$6)
+               ON CONFLICT (hospital_id, holiday_date)
+               DO UPDATE SET reason=EXCLUDED.reason, closed=EXCLUDED.closed,
+                             open_time=EXCLUDED.open_time, close_time=EXCLUDED.close_time""",
+            hospital_id, body.holiday_date, body.reason or "",
+            body.closed if body.closed is not None else True,
+            body.open_time, body.close_time,
+        )
+    _invalidate(hospital_id)
+    return {"status": "saved"}
+
+
+@router.delete("/hospitals/{hospital_id}/holidays/{holiday_id}", dependencies=[Depends(_require_auth)])
+async def delete_holiday(hospital_id: str, holiday_id: str):
+    pool = await _db()
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "DELETE FROM hospital_holidays WHERE id=$1 AND hospital_id=$2",
+            holiday_id, hospital_id,
+        )
+    _invalidate(hospital_id)
+    return {"ok": True}
+
+
+# ── Callback actions (status update + re-dial) ────────────────────────────────
+class CallbackStatusBody(BaseModel):
+    status: str
+
+
+@router.put("/hospitals/{hospital_id}/callbacks/{callback_id}/status", dependencies=[Depends(_require_auth)])
+async def update_callback_status(hospital_id: str, callback_id: str, body: CallbackStatusBody):
+    allowed = {"pending", "queued", "completed", "cancelled", "failed"}
+    if body.status not in allowed:
+        raise HTTPException(status_code=400, detail=f"status must be one of: {', '.join(sorted(allowed))}")
+    pool = await _db()
+    async with pool.acquire() as conn:
+        res = await conn.execute(
+            "UPDATE callbacks SET status=$1 WHERE id=$2 AND hospital_id=$3",
+            body.status, callback_id, hospital_id,
+        )
+    if str(res).endswith(" 0"):
+        raise HTTPException(status_code=404, detail="Callback not found")
+    return {"status": "updated"}
+
+
+@router.post("/hospitals/{hospital_id}/callbacks/{callback_id}/redial", dependencies=[Depends(_require_auth)])
+async def redial_callback(hospital_id: str, callback_id: str):
+    """Queue an outbound call for a captured callback so the AI rings the patient back."""
+    pool = await _db()
+    async with pool.acquire() as conn:
+        cb = await conn.fetchrow(
+            "SELECT patient_name, patient_phone FROM callbacks WHERE id=$1 AND hospital_id=$2",
+            callback_id, hospital_id,
+        )
+        if not cb:
+            raise HTTPException(status_code=404, detail="Callback not found")
+        if not (cb["patient_phone"] or "").strip():
+            raise HTTPException(status_code=400, detail="Callback has no phone number")
+        slug = await conn.fetchval("SELECT slug FROM hospitals WHERE id=$1", hospital_id) or "default"
+        await conn.execute(
+            """INSERT INTO outbound_call_queue
+               (hospital_id, call_type, phone, patient_name, context_json, scheduled_at,
+                attempt_count, max_attempts, status, tenant_slug)
+               VALUES ($1,'callback',$2,$3,'{}'::jsonb, now(), 0, 3, 'pending', $4)""",
+            hospital_id, cb["patient_phone"], cb["patient_name"] or "", slug,
+        )
+        await conn.execute(
+            "UPDATE callbacks SET status='queued' WHERE id=$1 AND hospital_id=$2",
+            callback_id, hospital_id,
+        )
+    return {"status": "queued"}
 
 
 # ── Telephony Status ──────────────────────────────────────────────────────────

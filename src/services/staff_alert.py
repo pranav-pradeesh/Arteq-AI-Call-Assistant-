@@ -23,9 +23,10 @@ logger = get_logger(__name__)
 class StaffAlertService:
     """Fire-and-forget SMS alerts to the duty manager."""
 
-    def __init__(self) -> None:
+    def __init__(self, phone: str = "") -> None:
         self._sms = SMSService()
-        self._phone: str = getattr(settings, "STAFF_ALERT_PHONE", "")
+        # Per-hospital dashboard recipient wins; else the global env default.
+        self._phone: str = phone or getattr(settings, "STAFF_ALERT_PHONE", "")
 
     def _enabled(self) -> bool:
         return bool(self._phone)

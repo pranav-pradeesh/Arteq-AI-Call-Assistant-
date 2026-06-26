@@ -166,6 +166,7 @@ class DeptInfo:
     floor: str
     location_hint: str
     phone_ext: str
+    timings: str = ""
 
 
 @dataclass
@@ -233,6 +234,9 @@ class HospitalContext:
     plan: str = "trial"        # "trial" | "full"
     agent_name: str = "Arya"         # per-hospital AI persona name
     agent_language: str = "ml-IN"    # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, te-IN, en-IN
+    greeting: str = ""               # custom inbound greeting (overrides default)
+    staff_alert_phone: str = ""      # per-hospital duty-manager SMS recipient
+    holidays: list = field(default_factory=list)  # [{date,reason,closed,open_time,close_time}]
     queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
     loaded_at: float = 0.0
 
@@ -264,6 +268,15 @@ class HospitalContext:
         h = self.hours.get(key)
         return (h[0], h[1]) if h else None
 
+    def closure_for(self, d) -> Optional[dict]:
+        """Return the holiday/closure record for date d, or None. Date d may be a
+        date or anything with isoformat()."""
+        ds = d.isoformat() if hasattr(d, "isoformat") else str(d)
+        for h in (self.holidays or []):
+            if str(h.get("date")) == ds:
+                return h
+        return None
+
     def faqs_by_tags(self, tags: list[str]) -> list[FaqRow]:
         result = []
         for faq in self.faqs:
@@ -293,13 +306,15 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
 
         # Departments
         dept_rows = await conn.fetch(
-            "SELECT id, name, name_ml, floor, location_hint, phone_ext "
+            "SELECT id, name, name_ml, floor, location_hint, phone_ext, "
+            "COALESCE(timings,'') AS timings "
             "FROM departments WHERE hospital_id=$1 AND active=true ORDER BY name",
             hospital_id,
         )
         departments = [
             DeptInfo(str(r["id"]), r["name"], r["name_ml"] or "",
-                     r["floor"] or "", r["location_hint"] or "", r["phone_ext"] or "")
+                     r["floor"] or "", r["location_hint"] or "", r["phone_ext"] or "",
+                     r["timings"] or "")
             for r in dept_rows
         ]
 
@@ -385,9 +400,12 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         plan = "trial"
         agent_name = "Arya"
         agent_language = "ml-IN"
+        greeting = ""
+        staff_alert_phone = ""
         try:
             row = await conn.fetchrow(
-                "SELECT knowledge_base, tier, plan, agent_name, agent_language "
+                "SELECT knowledge_base, tier, plan, agent_name, agent_language, "
+                "COALESCE(greeting,'') AS greeting, COALESCE(staff_alert_phone,'') AS staff_alert_phone "
                 "FROM hospitals WHERE id=$1", hospital_id
             )
             if row:
@@ -396,6 +414,24 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
                 plan = row["plan"] or "trial"
                 agent_name = row["agent_name"] or "Arya"
                 agent_language = row["agent_language"] or "ml-IN"
+                greeting = row["greeting"] or ""
+                staff_alert_phone = row["staff_alert_phone"] or ""
+        except Exception:
+            pass
+
+        # Holidays / special closures (graceful if table absent on old DBs).
+        holidays = []
+        try:
+            hol_rows = await conn.fetch(
+                "SELECT to_char(holiday_date,'YYYY-MM-DD') AS d, reason, closed, "
+                "open_time, close_time FROM hospital_holidays WHERE hospital_id=$1",
+                hospital_id,
+            )
+            holidays = [
+                {"date": r["d"], "reason": r["reason"] or "", "closed": bool(r["closed"]),
+                 "open_time": r["open_time"] or "", "close_time": r["close_time"] or ""}
+                for r in hol_rows
+            ]
         except Exception:
             pass
 
@@ -417,6 +453,9 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         plan=plan,
         agent_name=agent_name,
         agent_language=agent_language,
+        greeting=greeting,
+        staff_alert_phone=staff_alert_phone,
+        holidays=holidays,
         loaded_at=time.time(),
     )
 

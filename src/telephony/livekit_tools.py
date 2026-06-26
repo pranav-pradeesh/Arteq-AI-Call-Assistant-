@@ -689,7 +689,8 @@ try:
         async def _alert():
             try:
                 from src.services.staff_alert import StaffAlertService
-                await StaffAlertService().alert_emergency(
+                _sap = getattr(hospital_ctx, "staff_alert_phone", "") if hospital_ctx else ""
+                await StaffAlertService(phone=_sap).alert_emergency(
                     patient_phone=caller_phone,
                     transcript_snippet=emergency_description[:80],
                     call_id=call_id,
