@@ -661,9 +661,9 @@ async def list_doctors(hospital_id: str):
                       dep.name as dept_name, dep.id as dept_id,
                       json_agg(json_build_object(
                           'id', s.id,
-                          'dow', s.day_of_week,
-                          'start', to_char(s.start_time,'HH24:MI'),
-                          'end', to_char(s.end_time,'HH24:MI'),
+                          'doctor_id', s.doctor_id, 'day_of_week', s.day_of_week,
+                          'start_time', to_char(s.start_time,'HH24:MI'),
+                          'end_time', to_char(s.end_time,'HH24:MI'),
                           'room', s.room,
                           'active', s.active
                       ) ORDER BY s.day_of_week, s.start_time)
