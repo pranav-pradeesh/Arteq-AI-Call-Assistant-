@@ -1774,10 +1774,20 @@ async def entrypoint(ctx: JobContext) -> None:
     caller_phone = ""
     patient_profile: Optional[dict] = None
     try:
+        import re as _re_id
         for p in ctx.room.remote_participants.values():
-            ident = p.identity or p.name or ""
-            if ident.startswith("+") or (ident.startswith("91") and len(ident) >= 12):
-                caller_phone = ident if ident.startswith("+") else f"+{ident}"
+            ident = (p.identity or p.name or "").strip()
+            # SIP identities look like "sip_09061409927" / "Phone 09061409927";
+            # pull the digits and normalise to E.164 (+91...).
+            _digits = _re_id.sub(r"\D", "", ident)
+            if len(_digits) >= 10:
+                _d = _digits.lstrip("0")
+                if len(_d) == 10:
+                    caller_phone = "+91" + _d
+                elif _d.startswith("91") and len(_d) >= 12:
+                    caller_phone = "+" + _d
+                else:
+                    caller_phone = "+" + _d
                 break
         from src.tenancy.features import enabled as _feat_on
         if caller_phone:
