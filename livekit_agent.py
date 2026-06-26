@@ -1957,21 +1957,6 @@ async def entrypoint(ctx: JobContext) -> None:
     meter = _LatencyMeter()
     session.on("conversation_item_added", meter.on_item)
 
-    # LIVE TRANSCRIPT (temporary debug): print every user + assistant message so a
-    # call can be watched in the agent logs.
-    def _log_transcript(ev):
-        try:
-            it = getattr(ev, "item", None)
-            role = getattr(it, "role", "?")
-            txt = getattr(it, "text_content", None)
-            if txt is None:
-                c = getattr(it, "content", "")
-                txt = " ".join(str(x) for x in c) if isinstance(c, list) else str(c)
-            print(f"[TRANSCRIPT] {role}: {txt}", file=sys.stderr, flush=True)
-        except Exception:
-            pass
-    session.on("conversation_item_added", _log_transcript)
-
     # Immediate-disconnect diagnostics. A caller who drops before any turn
     # completes (turns=0) is either a benign hangup/misdial or a symptom of
     # pre-greeting dead air. Record HOW LONG they stayed and whether the
