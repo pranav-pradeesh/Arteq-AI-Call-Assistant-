@@ -563,6 +563,7 @@ async def create_appointment(
     priority: int = 0,
     his_sync_status: Optional[str] = None,
     patient_age: Optional[int] = None,
+    patient_age_unit: Optional[str] = None,
     patient_gender: Optional[str] = None,
 ) -> dict:
     """Insert a new appointment; returns {"id", "confirmation_code"}.
@@ -610,8 +611,8 @@ async def create_appointment(
                    (hospital_id, patient_name, patient_phone, doctor_id, dept_id,
                     slot_time, notes, call_id, status, reminder_sent,
                     his_appointment_id, confirmation_code, priority, payment_status,
-                    his_sync_status, patient_age, patient_gender)
-                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9,$10,$11,'unpaid',$12,$13,$14)
+                    his_sync_status, patient_age, patient_gender, patient_age_unit)
+                   VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'booked',false,$9,$10,$11,'unpaid',$12,$13,$14,$15)
                    RETURNING id""",
                 hospital_id,
                 patient_name,
@@ -627,6 +628,7 @@ async def create_appointment(
                 his_sync_status,
                 patient_age,
                 patient_gender,
+                patient_age_unit or "years",
             )
         except asyncpg.UniqueViolationError as exc:
             # Lost the race for this slot (ix_appt_no_double_book).

@@ -3469,14 +3469,14 @@ async def get_call_recording(hospital_id: str, call_id: str, payload: dict = Dep
     try:
         async with pool.acquire() as conn:
             ap = await conn.fetchrow(
-                "SELECT a.patient_name, a.patient_age, a.patient_gender, a.slot_time, d.name AS doctor "
+                "SELECT a.patient_name, a.patient_age, COALESCE(a.patient_age_unit,'years') AS patient_age_unit, a.patient_gender, a.slot_time, d.name AS doctor "
                 "FROM appointments a LEFT JOIN doctors d ON d.id = a.doctor_id "
                 "WHERE a.call_id=$1 AND a.hospital_id=$2 "
                 "ORDER BY a.created_at DESC LIMIT 1",
                 call_id, hospital_id,
             )
             cl = await conn.fetchrow(
-                "SELECT patient_name, patient_age, patient_gender, started_at "
+                "SELECT patient_name, patient_age, COALESCE(patient_age_unit,'years') AS patient_age_unit, patient_gender, started_at "
                 "FROM call_logs WHERE call_id=$1 AND hospital_id=$2",
                 call_id, hospital_id,
             )
@@ -3489,13 +3489,15 @@ async def get_call_recording(hospital_id: str, call_id: str, payload: dict = Dep
 
         name = _g(ap and ap["patient_name"], cl and cl["patient_name"])
         age = _g(ap and ap["patient_age"], cl and cl["patient_age"])
+        age_unit = _g(ap and ap["patient_age_unit"], cl and cl["patient_age_unit"]) or "years"
+        _unit_abbr = {"years": "y", "months": "mo", "weeks": "wk", "days": "d"}.get(str(age_unit), "y")
         gender = _g(ap and ap["patient_gender"], cl and cl["patient_gender"])
         when = _g(ap and ap["slot_time"], cl and cl["started_at"])
         doctor = ap["doctor"] if ap else None
         if name or doctor:
             bits = [name or "patient"]
             if age is not None:
-                bits.append(f"{age}y")
+                bits.append(f"{age}{_unit_abbr}")
             if gender:
                 bits.append(str(gender))
             if when is not None:

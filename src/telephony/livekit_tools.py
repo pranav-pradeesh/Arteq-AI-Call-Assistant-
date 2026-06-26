@@ -181,6 +181,22 @@ def _strip_honorifics(s: str) -> str:
     return s.strip(" .")
 
 
+def _parse_age(s: str):
+    """(number, unit) from a spoken age. Unit is years|months|weeks|days; a bare
+    number with no unit defaults to years. Patients can be any age."""
+    s = (s or "").lower()
+    m = re.search(r"\d+", s)
+    n = int(m.group()) if m else None
+    unit = "years"
+    if any(w in s for w in ("month", "മാസ", "mas")):
+        unit = "months"
+    elif any(w in s for w in ("week", "ആഴ്ച", "vaara", "vāra")):
+        unit = "weeks"
+    elif any(w in s for w in ("day", "ദിവസ", "divas")):
+        unit = "days"
+    return n, unit
+
+
 def _fuzzy_find_doctor(hospital_ctx, name: str):
     """Honorific-tolerant, bidirectional name match. Returns (doctor_id, dept_id, full_name).
 
@@ -380,8 +396,7 @@ try:
             his_sync_status = "failed"
             logger.error("his_book_failed_fallback_to_db", error=str(exc))
 
-        _digits = re.sub(r"\D", "", patient_age or "")
-        _pt_age = int(_digits) if _digits else None
+        _pt_age, _pt_age_unit = _parse_age(patient_age)
         _pt_gender = (patient_gender or "").strip().lower() or None
         try:
             from src.db.queries import create_appointment
@@ -398,6 +413,7 @@ try:
                 priority=priority,
                 his_sync_status=his_sync_status,
                 patient_age=_pt_age,
+                patient_age_unit=_pt_age_unit,
                 patient_gender=_pt_gender,
             )
             appt_id = result["id"]
@@ -1191,9 +1207,12 @@ try:
             except AttributeError:
                 return ""
         try:
+            _pa_n, _pa_u = _parse_age(age)
             ud["pmeta"] = {
                 "name": (name or "").strip(),
                 "age": (age or "").strip(),
+                "age_num": _pa_n,
+                "age_unit": _pa_u,
                 "gender": (gender or "").strip(),
             }
         except Exception:
