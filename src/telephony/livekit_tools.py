@@ -228,6 +228,44 @@ def _fuzzy_find_doctor(hospital_ctx, name: str):
     return None, None, name
 
 
+def _doctor_name_candidates(hospital_ctx, name: str) -> list:
+    """All distinct doctors whose name STRONGLY matches the query — by full name
+    OR by any shared real name word (first name, last name, or middle). Used to
+    disambiguate when a caller gives only a first/last name shared by several
+    doctors. An exact full-name match returns just that one doctor."""
+    q = _strip_honorifics(name or "")
+    if not q or not hospital_ctx:
+        return []
+
+    def _toks(s):
+        return [t for t in s.split() if len(t) > 1]
+
+    q_tokens = set(_toks(q))
+    exact, partial, seen = [], [], set()
+    for doc in (hospital_ctx.doctors or []):
+        for cand in (doc.name, getattr(doc, "name_ml", "") or ""):
+            c = _strip_honorifics(cand)
+            if not c:
+                continue
+            c_tokens = set(_toks(c))
+            if q == c:
+                if str(doc.id) not in seen:
+                    seen.add(str(doc.id)); exact.append(doc)
+                break
+            if (q in c_tokens) or (c in q_tokens) or (q_tokens and q_tokens <= c_tokens):
+                if str(doc.id) not in seen:
+                    seen.add(str(doc.id)); partial.append(doc)
+                break
+    # An exact full-name hit is unambiguous; otherwise return all partials.
+    return exact if exact else partial
+
+
+def _disambiguation_reply(cands: list, spoken: str) -> str:
+    names = ", ".join(f"Dr. {d.name.replace('Dr.', '').strip()}" for d in cands[:6])
+    return (f"We have more than one doctor by that name — {names}. "
+            "Which one would you like?")
+
+
 # ── tools ──────────────────────────────────────────────────────────────────
 
 try:
@@ -272,6 +310,11 @@ try:
             logger.info("tool_book_past_slot", date=appointment_date, time=appointment_time)
             return ("That date and time has already passed — appointments can only be booked "
                     "for an upcoming date. Which future day and time would you like?")
+
+        # If a first/last name matches several doctors, ask which one (don't guess).
+        _cands = _doctor_name_candidates(hospital_ctx, doctor_name)
+        if len(_cands) > 1:
+            return _disambiguation_reply(_cands, doctor_name)
 
         doctor_id, dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
 
@@ -805,6 +848,10 @@ try:
         _mark_intent(context, "check_availability")
         hospital_id  = _ud(context, "hospital_id", "")
         hospital_ctx = _ud(context, "hospital_ctx")
+
+        _cands = _doctor_name_candidates(hospital_ctx, doctor_name)
+        if len(_cands) > 1:
+            return _disambiguation_reply(_cands, doctor_name)
 
         doctor_id, _dept_id, resolved_name = _fuzzy_find_doctor(hospital_ctx, doctor_name)
 

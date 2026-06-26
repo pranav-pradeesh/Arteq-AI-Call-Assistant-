@@ -222,7 +222,7 @@ def _build_hospital_summary(ctx: HospitalContext) -> str:
             "doctors in a department, call check_department_availability (it returns ONLY doctors "
             "with open slots and their times). To find or "
             "book one, call check_availability(department) or get_doctor_schedule — a named-doctor "
-            "request is matched automatically. NEVER say a doctor or department is unavailable "
+            "request is matched automatically. Callers may give only a first name or only a last name — pass exactly what they said; if more than one doctor shares it, the tool will ask which one. NEVER say a doctor or department is unavailable "
             "without checking the tool first.")])
     else:
         lines.extend(["", "DOCTORS (use get_doctor_schedule / check_availability for timings):"])
