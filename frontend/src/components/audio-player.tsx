@@ -1,7 +1,7 @@
 "use client";
 import * as React from "react";
 import { AudioLines } from "lucide-react";
-import { getSession } from "next-auth/react";
+import { getSession, useSession } from "next-auth/react";
 
 /**
  * Call-recording player. `src` is the dashboard API path for the recording; we
@@ -9,11 +9,13 @@ import { getSession } from "next-auth/react";
  * the blob. Admin-only and tenant-scoped server-side.
  */
 export function RecordingPlayer({ src }: { src?: string | null }) {
+  const { data: session } = useSession();
+  const isSuper = (session?.user as { role?: string } | undefined)?.role === "super_admin";
   const [url, setUrl] = React.useState<string | null>(null);
   const [err, setErr] = React.useState(false);
 
   React.useEffect(() => {
-    if (!src) return;
+    if (!src || isSuper) return;
     let alive = true;
     let objectUrl: string | null = null;
     (async () => {
@@ -36,8 +38,15 @@ export function RecordingPlayer({ src }: { src?: string | null }) {
       alive = false;
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [src]);
+  }, [src, isSuper]);
 
+  if (isSuper) {
+    return (
+      <div className="rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">
+        Call recordings are available to the hospital admin only.
+      </div>
+    );
+  }
   if (!src || err) {
     return (
       <div className="flex items-center gap-2 rounded-lg border border-dashed border-gray-200 bg-gray-50 px-3 py-2 text-xs text-gray-500">

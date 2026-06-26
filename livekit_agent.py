@@ -1962,9 +1962,12 @@ async def entrypoint(ctx: JobContext) -> None:
     _ambient_task: Optional[asyncio.Task] = None  # assigned after session.start
 
     async def _on_end_async(_event=None):
-        if session_data.get("_ended_once"):
+        # Only short-circuit if a PRIOR run fully persisted the call. Setting the
+        # flag at the TOP let the close-event task set it then get cancelled
+        # mid-write, so the reliable awaited shutdown callback skipped the write and
+        # the call_log row (+ recording link) was lost. Set it AFTER the write.
+        if session_data.get("_ended_done"):
             return
-        session_data["_ended_once"] = True
         if _ambient_task:
             _ambient_task.cancel()
         for _t in _drain_tasks:
@@ -2095,6 +2098,10 @@ async def entrypoint(ctx: JobContext) -> None:
                 except Exception as _pm_exc:
                     print(f"[arteq] pmeta update failed: {_pm_exc}", file=sys.stderr)
 
+            # Critical persistence (call_log + recording + patient details) is done;
+            # mark complete so a duplicate close/shutdown run no-ops cleanly.
+            session_data["_ended_done"] = True
+
             # Tell live-monitoring subscribers the call is over.
             try:
                 from additions.live_events import emit_call_ended
@@ -2108,7 +2115,9 @@ async def entrypoint(ctx: JobContext) -> None:
             # max_attempts. A call with real turns is left as completed.
             try:
                 _rq = (outbound_context or {}).get("_requeue")
-                if _rq and direction == "outbound" and (total_turns == 0 or session_data.get("voicemail_detected")):
+                if (_rq and direction == "outbound" and not session_data.get("_requeued")
+                        and (total_turns == 0 or session_data.get("voicemail_detected"))):
+                    session_data["_requeued"] = True
                     _att = int(_rq.get("attempt", 1))
                     _max = int(_rq.get("max_attempts", 3))
                     if _att < _max:

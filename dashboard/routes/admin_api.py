@@ -3444,11 +3444,13 @@ async def clear_doctor_patients(hospital_id: str, doctor_id: str):
 
 @router.get(
     "/hospitals/{hospital_id}/calls/{call_id}/recording",
-    dependencies=[Depends(_require_auth)],
 )
-async def get_call_recording(hospital_id: str, call_id: str):
-    """Stream a call recording. Admin-only and scoped to the owning hospital."""
+async def get_call_recording(hospital_id: str, call_id: str, payload: dict = Depends(_require_auth)):
+    """Stream a call recording. Hospital-admin only and scoped to the owning hospital;
+    super admins do not get patient call recordings."""
     import os as _os
+    if _is_super(payload):
+        raise HTTPException(status_code=403, detail="Recordings are not available to super admins")
     pool = await _db()
     async with pool.acquire() as conn:
         owns = await conn.fetchval(
