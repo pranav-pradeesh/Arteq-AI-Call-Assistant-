@@ -150,6 +150,26 @@ async def _delete_existing_inbound(lk, lk_api, did_number: str) -> None:
         logger.warning("vobiz_inbound_cleanup_skipped", error=str(exc))
 
 
+def _did_variants(did: str) -> list:
+    """All formats a carrier might deliver the DID as, so an inbound call matches
+    whether or not the caller dialed the country code: +91XXXXXXXXXX, 91XXXXXXXXXX,
+    0XXXXXXXXXX, and the bare 10-digit number."""
+    import re as _re
+    digits = _re.sub(r"\D", "", did or "")
+    digits = digits.lstrip("0")
+    if not digits:
+        return [did] if did else []
+    if digits.startswith("91") and len(digits) >= 12:
+        local = digits[2:]
+    else:
+        local = digits[-10:]
+    out = []
+    for v in (did, "+91" + local, "91" + local, local, "0" + local):
+        if v and v not in out:
+            out.append(v)
+    return out
+
+
 async def setup_hospital_inbound_vobiz(
     hospital_slug: str,
     did_number: str,
@@ -175,7 +195,7 @@ async def setup_hospital_inbound_vobiz(
             lk_api.CreateSIPInboundTrunkRequest(
                 trunk=lk_api.SIPInboundTrunkInfo(
                     name=f"{hospital_slug} inbound (vobiz)",
-                    numbers=[did_number],
+                    numbers=_did_variants(did_number),
                     allowed_addresses=_vobiz_cidrs(),
                     krisp_enabled=True,
                 )
