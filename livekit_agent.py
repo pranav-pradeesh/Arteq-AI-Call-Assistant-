@@ -1785,6 +1785,21 @@ async def entrypoint(ctx: JobContext) -> None:
     except Exception:
         pass
 
+    # Stub call_log row up front so the recording is ALWAYS linkable, even if the
+    # end-of-call handler is killed (LLM crash / hard job shutdown). The end
+    # handler upserts the full transcript + cost over this stub.
+    try:
+        from src.db.queries import write_call_log as _wcl_stub
+        asyncio.create_task(_wcl_stub(
+            hospital_id=hospital_id, call_id=call_id, caller=caller_phone or "unknown",
+            started_at=call_started_at, ended_at=call_started_at, total_turns=0,
+            latency_avg_ms=0, cost_paise=0, transcript=[], intents=[],
+            outcome="in_progress", emotional_state="",
+            direction="outbound" if outbound_context else "inbound", upsert=False,
+        ))
+    except Exception:
+        pass
+
     # ── Build system prompt ───────────────────────────────────────────────────
     from src.config.settings import settings
     # Per-hospital language overrides the global env var default. The agent has no

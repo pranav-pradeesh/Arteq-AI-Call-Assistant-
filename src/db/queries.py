@@ -504,6 +504,7 @@ async def write_call_log(
     stt_audio_seconds: int = 0,
     tts_chars: int = 0,
     direction: str | None = None,
+    upsert: bool = True,
 ) -> None:
     """Write call log row asynchronously. Non-blocking — called as background task.
 
@@ -514,8 +515,18 @@ async def write_call_log(
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
+            _conflict = ("DO UPDATE SET caller=EXCLUDED.caller, started_at=EXCLUDED.started_at, "
+                "ended_at=EXCLUDED.ended_at, total_turns=EXCLUDED.total_turns, "
+                "latency_avg_ms=EXCLUDED.latency_avg_ms, cost_paise=EXCLUDED.cost_paise, "
+                "transcript=EXCLUDED.transcript, intents=EXCLUDED.intents, outcome=EXCLUDED.outcome, "
+                "emotional_state=EXCLUDED.emotional_state, stt_paise=EXCLUDED.stt_paise, "
+                "tts_paise=EXCLUDED.tts_paise, llm_paise=EXCLUDED.llm_paise, "
+                "telephony_paise=EXCLUDED.telephony_paise, llm_prompt_tokens=EXCLUDED.llm_prompt_tokens, "
+                "llm_completion_tokens=EXCLUDED.llm_completion_tokens, "
+                "stt_audio_seconds=EXCLUDED.stt_audio_seconds, tts_chars=EXCLUDED.tts_chars, "
+                "direction=EXCLUDED.direction") if upsert else "DO NOTHING"
             await conn.execute(
-                """INSERT INTO call_logs
+                f"""INSERT INTO call_logs
                    (hospital_id, call_id, caller, started_at, ended_at,
                     total_turns, latency_avg_ms, cost_paise, transcript, intents,
                     outcome, emotional_state,
@@ -524,7 +535,7 @@ async def write_call_log(
                     stt_audio_seconds, tts_chars, direction)
                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
                            $13,$14,$15,$16,$17,$18,$19,$20,$21)
-                   ON CONFLICT (call_id) DO NOTHING""",
+                   ON CONFLICT (call_id) {_conflict}""",
                 hospital_id, call_id, caller, started_at, ended_at,
                 total_turns, latency_avg_ms, cost_paise,
                 __import__("json").dumps(transcript, ensure_ascii=False),
