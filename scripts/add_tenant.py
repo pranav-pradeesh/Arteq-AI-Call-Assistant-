@@ -51,6 +51,8 @@ def parse_args():
     p.add_argument("--agent-name", default="Arya")
     p.add_argument("--language", default="ml-IN")
     p.add_argument("--tier", default="hospital", choices=["hospital", "clinic"])
+    p.add_argument("--plan", default="full", choices=["trial", "full"],
+                   help="full = inbound AI + outbound + dashboard; trial = outbound + dashboard only")
     p.add_argument("--trial-days", type=int, default=14)
     p.add_argument("--kb-file", default=None)
     p.add_argument("--did", default=None, help="Vobiz DID (+E.164) for inbound SIP")
@@ -84,22 +86,22 @@ async def main():
             hid = existing["id"]
             await conn.execute(
                 "UPDATE hospitals SET name=$1, name_ml=$2, address=$3, phone=$4, "
-                "agent_name=$5, agent_language=$6, tier=$7, active=true, "
-                "subscription_status=$8, trial_expires_at=$9, knowledge_base=$10 "
-                "WHERE id=$11",
+                "agent_name=$5, agent_language=$6, tier=$7, plan=$8, active=true, "
+                "subscription_status=$9, trial_expires_at=$10, knowledge_base=$11 "
+                "WHERE id=$12",
                 a.name, a.name_ml or a.name, a.address, a.phone,
-                a.agent_name, a.language, a.tier, sub_status, expires, kb, hid,
+                a.agent_name, a.language, a.tier, a.plan, sub_status, expires, kb, hid,
             )
             print(f"updated hospital {a.name!r} (slug={slug}, id={hid})")
         else:
             hid = str(uuid.uuid4())
             await conn.execute(
                 "INSERT INTO hospitals (id, name, name_ml, address, phone, hours, slug, "
-                "active, tier, agent_name, agent_language, subscription_status, "
+                "active, tier, plan, agent_name, agent_language, subscription_status, "
                 "trial_expires_at, knowledge_base) "
-                "VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,true,$8,$9,$10,$11,$12,$13)",
+                "VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,true,$8,$9,$10,$11,$12,$13,$14)",
                 hid, a.name, a.name_ml or a.name, a.address, a.phone, DEFAULT_HOURS,
-                slug, a.tier, a.agent_name, a.language, sub_status, expires, kb,
+                slug, a.tier, a.plan, a.agent_name, a.language, sub_status, expires, kb,
             )
             print(f"created hospital {a.name!r} (slug={slug}, id={hid})")
 
@@ -151,7 +153,7 @@ async def main():
         print(f"  Hospital : {a.name} ({slug}) — {sub_status}"
               + (f", trial until {expires:%Y-%m-%d}" if expires else ""))
         print(f"  Login    : username={username}  (dashboard at http://187.127.153.87/login)")
-        print(f"  Agent    : {a.agent_name} [{a.language}], tier={a.tier}")
+        print(f"  Agent    : {a.agent_name} [{a.language}], tier={a.tier}, plan={a.plan}")
         if sip_line:
             print(sip_line)
     finally:
