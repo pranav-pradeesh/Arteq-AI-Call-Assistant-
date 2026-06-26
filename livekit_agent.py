@@ -1018,7 +1018,7 @@ ONE QUESTION AT A TIME: Ask for only ONE missing piece per turn — never bundle
 
 SYMPTOM ROUTING: If the caller describes a symptom or problem instead of naming a department or doctor, map it to the right specialty, suggest it in ONE short sentence, and offer to book. Use ONLY specialties listed in the HOSPITAL section. Common mappings: chest pain / palpitations / breathlessness → Cardiology; fever / cough / cold / body pain / general illness → General Medicine; headache / dizziness / numbness / fits / stroke → Neurology; bone / joint / fracture / back / knee pain → Orthopaedics; a child or baby → Paediatrics; ear / nose / throat / hearing → ENT; skin / rash / hair → Dermatology; pregnancy / periods / women's health → Obstetrics & Gynaecology; eye / vision → Ophthalmology; tooth / gum → Dental; stomach / acidity / digestion / liver → Gastroenterology; kidney / urine → Nephrology or Urology. If the matching specialty isn't listed, say so and offer the closest one or General Medicine. If symptoms sound urgent or life-threatening (severe chest pain, unconsciousness, heavy bleeding, breathing difficulty), tell them to come to Emergency / Casualty immediately. Confirm the specialty with the caller before booking.
 
-ANSWER QUESTIONS FIRST: If the caller asks a question at any point — especially "which doctors are there?" / "ആരൊക്കെ ഉണ്ട്?" / "ഏതൊക്കെ ഡോക്ടർമാർ ഉണ്ട്?" — ANSWER it right away before anything else. For a doctor list, call check_department_availability and name ONLY the doctors who have open slots (with their times); the tool automatically checks the next available days if today is full — relay whatever it returns (doctors and their available times). NEVER list doctors who have no open slots. NEVER ignore their question and re-ask your own (e.g. "shall I book?" / "confirm the department"). DO NOT LOOP: re-ask a question at most ONCE. If the caller's reply still does not answer it the second time (garbled, unclear, or unrelated — common on a weak line), do NOT ask the same thing a third time. Instead either OFFER concrete choices to pick from (e.g. propose a specific available slot, or two doctor names), or say you're having trouble hearing clearly and offer to note a callback. NEVER repeat an identical question three or more times. If the caller asked something else, handle that first, then resume.
+ANSWER QUESTIONS FIRST: If the caller asks a question at any point — especially "which doctors are there?" / "ആരൊക്കെ ഉണ്ട്?" / "ഏതൊക്കെ ഡോക്ടർമാർ ഉണ്ട്?" — ANSWER it right away before anything else. For a doctor list, call check_department_availability and name ONLY the doctors who have open slots (with their times); the tool automatically checks the next available days if today is full. Say ONLY the doctor NAMES first and ask which doctor; give that doctor's available time(s) ONLY AFTER the caller picks one (then call check_availability). NEVER list doctors who have no open slots. NEVER ignore their question and re-ask your own (e.g. "shall I book?" / "confirm the department"). DO NOT LOOP: re-ask a question at most ONCE. If the caller's reply still does not answer it the second time (garbled, unclear, or unrelated — common on a weak line), do NOT ask the same thing a third time. Instead either OFFER concrete choices to pick from (e.g. propose a specific available slot, or two doctor names), or say you're having trouble hearing clearly and offer to note a callback. NEVER repeat an identical question three or more times. If the caller asked something else, handle that first, then resume.
 
 BOOKING — the steps below are a CHECKLIST of what you eventually need, NOT a rigid script: gather these naturally as the conversation flows, in whatever order they come up, and skip anything the caller already told you. Still ask only ONE thing per reply; never bundle several questions; never re-ask something already answered.
 1. FIRST ask which department/specialty (skip if already named). If the caller already named a department, symptom, or doctor — SKIP this step and IMMEDIATELY call check_department_availability or check_availability. NEVER ask "do you want to book?" or "shall I check?" — just call the tool directly.
@@ -2343,46 +2343,51 @@ async def entrypoint(ctx: JobContext) -> None:
     _INACTIVITY_HANGUP_S = float(os.getenv("INACTIVITY_HANGUP_S", "40"))
 
     async def _inactivity_watchdog() -> None:
-        last_turn = call_started_at
-        prompted = False
+        last_prompt_at = None
         while True:
-            await asyncio.sleep(5.0)
-            # Wait until greeting has actually been delivered before counting
+            await asyncio.sleep(3.0)
             _greet_at = session_data.get("greeting_at")
             if not _greet_at:
                 continue
-            # Use greeting delivery time as baseline (not call_started_at which
-            # can be 8-10s earlier due to setup), so the caller gets the full
-            # inactivity window after hearing the greeting.
-            if last_turn == call_started_at:
-                last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
-            # Check how long since last user message
+            # Idle = time since the LAST activity by EITHER side. Counting the last
+            # ASSISTANT turn too means that right after Arya finishes a (possibly long)
+            # reply the caller still gets the full think-time window before any
+            # "are you there?" nudge — not counted from their previous message.
+            last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
             try:
-                msgs = session.history.messages()
-                user_msgs = [m for m in msgs if getattr(m, "role", "") == "user"]
-                if user_msgs:
-                    last_msg = user_msgs[-1]
-                    ts = getattr(last_msg, "created_at", None) or getattr(last_msg, "timestamp", None)
+                for _m in session.history.messages():
+                    if getattr(_m, "role", "") not in ("user", "assistant"):
+                        continue
+                    ts = getattr(_m, "created_at", None) or getattr(_m, "timestamp", None)
                     if isinstance(ts, (int, float)):
-                        last_turn = datetime.fromtimestamp(ts, tz=timezone.utc)
+                        _dt = datetime.fromtimestamp(ts, tz=timezone.utc)
                     elif isinstance(ts, datetime):
-                        last_turn = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+                        _dt = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
                     elif ts is not None and hasattr(ts, "timestamp"):
-                        last_turn = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
+                        _dt = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
+                    else:
+                        continue
+                    if _dt > last_turn:
+                        last_turn = _dt
             except Exception:
                 pass
 
             silence_s = (datetime.now(timezone.utc) - last_turn).total_seconds()
 
-            if not prompted and silence_s >= _INACTIVITY_PROMPT_S:
-                prompted = True
+            # Prompt after PROMPT_S of silence and RE-PROMPT every PROMPT_S while the
+            # caller stays silent (was: prompted only once).
+            if silence_s >= _INACTIVITY_PROMPT_S and (
+                last_prompt_at is None
+                or (datetime.now(timezone.utc) - last_prompt_at).total_seconds() >= _INACTIVITY_PROMPT_S
+            ):
+                last_prompt_at = datetime.now(timezone.utc)
                 try:
                     lang = session_data.get("caller_lang", agent_language)
                     _SILENCE_PROMPTS = {
-                        "ml-IN": "നിങ്ങൾ എന്തെങ്കിലും പറയുന്നുണ്ടോ? എനിക്ക് വ്യക്തമായി കേൾക്കാൻ കഴിയുന്നില്ല.",
-                        "en-IN": "Are you saying something? I can't hear you clearly.",
-                        "hi-IN": "क्या आप कुछ कह रहे हैं? मुझे ठीक से सुनाई नहीं दे रहा।",
-                        "ta-IN": "நீங்கள் ஏதாவது சொல்கிறீர்களா? எனக்கு தெளிவாகக் கேட்கவில்லை.",
+                        "ml-IN": "നിങ്ങൾ അവിടെ ഉണ്ടോ? എനിക്ക് കേൾക്കാൻ കഴിയുന്നില്ല.",
+                        "en-IN": "Are you there? I can't hear you.",
+                        "hi-IN": "क्या आप वहाँ हैं? मुझे सुनाई नहीं दे रहा।",
+                        "ta-IN": "நீங்கள் அங்கே இருக்கிறீர்களா? கேட்கவில்லை.",
                     }
                     prompt_text = _SILENCE_PROMPTS.get(lang, _SILENCE_PROMPTS["en-IN"])
                     await session.say(prompt_text, allow_interruptions=True)

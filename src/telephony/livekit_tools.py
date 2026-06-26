@@ -197,6 +197,39 @@ def _parse_age(s: str):
     return n, unit
 
 
+_ML_HOURW = {1: "ഒരു", 2: "രണ്ട്", 3: "മൂന്ന്", 4: "നാല്", 5: "അഞ്ച്", 6: "ആറ്",
+             7: "ഏഴ്", 8: "എട്ട്", 9: "ഒമ്പത്", 10: "പത്ത്", 11: "പതിനൊന്ന്", 12: "പന്ത്രണ്ട്"}
+_ML_MINW = {0: "", 5: "അഞ്ച്", 10: "പത്ത്", 15: "പതിനഞ്ച്", 20: "ഇരുപത്", 25: "ഇരുപത്തിയഞ്ച്",
+            30: "മുപ്പത്", 35: "മുപ്പത്തിയഞ്ച്", 40: "നാല്പത്", 45: "നാല്പത്തിയഞ്ച്",
+            50: "അമ്പത്", 55: "അമ്പത്തിയഞ്ച്"}
+
+
+def _ml_part(h: int) -> str:
+    return "രാവിലെ" if h < 12 else ("ഉച്ച കഴിഞ്ഞ്" if h < 16 else ("വൈകിട്ട്" if h < 20 else "രാത്രി"))
+
+
+def _ml_time(hhmm: str) -> str:
+    """"09:45" -> "രാവിലെ ഒമ്പത് മണി നാല്പത്തിയഞ്ച്" (spoken Malayalam, not digits)."""
+    try:
+        h = int(hhmm[:2]); m = int(hhmm[3:5])
+    except Exception:
+        return hhmm
+    h12 = h % 12 or 12
+    mn = _ML_MINW.get(m, str(m))
+    base = f"{_ml_part(h)} {_ML_HOURW.get(h12, str(h12))} മണി"
+    return base + (f" {mn}" if mn else "")
+
+
+def _ml_slot_range(slots: list, lang: str) -> str:
+    """A sayable range from the earliest to the latest slot."""
+    if not slots:
+        return ""
+    first, last = slots[0], slots[-1]
+    if str(lang or "").lower().startswith("ml"):
+        return _ml_time(first) if first == last else f"{_ml_time(first)} മുതൽ {_ml_time(last)} വരെ"
+    return first if first == last else f"from {first} to {last}"
+
+
 def _fuzzy_find_doctor(hospital_ctx, name: str):
     """Honorific-tolerant, bidirectional name match. Returns (doctor_id, dept_id, full_name).
 
@@ -928,15 +961,17 @@ try:
                         next_slots = []
                     if next_slots:
                         day_label = next_d.strftime("%A, %d %B")
-                        shown = ", ".join(next_slots[:6])
+                        _lang = getattr(hospital_ctx, "agent_language", "ml-IN") if hospital_ctx else "ml-IN"
+                        _rng = _ml_slot_range(next_slots, _lang)
                         return (f"Dr. {resolved_name} has no slots left today. "
-                                f"Next available on {day_label} at: {shown}. Does that work?")
+                                f"Next available on {day_label}: {_rng}. Which time works for you?")
             return (
                 f"Dr. {resolved_name} has no open slots on {date}. "
                 "Would you like another day or another doctor?"
             )
-        shown = ", ".join(slots[:6])
-        return f"Dr. {resolved_name} is available on {date} at: {shown}. Which time works for you?"
+        _lang = getattr(hospital_ctx, "agent_language", "ml-IN") if hospital_ctx else "ml-IN"
+        _rng = _ml_slot_range(slots, _lang)
+        return f"Dr. {resolved_name} is available on {date}: {_rng}. Which time works for you?"
 
 
     @function_tool
@@ -1178,16 +1213,17 @@ try:
                         next_avail.append((doc.name, slots[:4]))
                 if next_avail:
                     day_label = next_d.strftime("%A, %d %B")
-                    parts = [f"{nm} ({', '.join(s)})" for nm, s in next_avail]
-                    return (f"No slots left today in {dept_nm}. "
-                            f"Next available on {day_label}: " + "; ".join(parts) + ". Which doctor and time?")
+                    names = ", ".join(nm for nm, _ in next_avail)
+                    return (f"No slots left today in {dept_nm}. Next available {day_label} — doctors: {names}. "
+                            "Say ONLY these names and ask which doctor; give times only after they pick one.")
             return (f"NO_SLOTS: no doctor in {dept_nm} has an open slot in the next week. "
                     "Apologise and offer to take a callback request.")
         if not avail:
             return (f"NO_SLOTS: no doctor in {dept_nm} has an open slot on {d.isoformat()}. "
                     "Tell the caller there are no appointments that day and offer another day.")
-        parts = [f"{nm} ({', '.join(s)})" for nm, s in avail]
-        return f"Available in {dept_nm} on {d.isoformat()}: " + "; ".join(parts) + ". Which doctor?"
+        names = ", ".join(nm for nm, _ in avail)
+        return (f"Doctors available today in {dept_nm}: {names}. Say ONLY these names and ask which "
+                "doctor; give the time slots only AFTER the caller picks a doctor (via check_availability).")
 
     @function_tool
     async def remember_patient(
