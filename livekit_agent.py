@@ -1064,6 +1064,8 @@ EMERGENCY (chest pain, severe bleeding, unconscious, can't breathe, stroke, pois
 DIGITS: 1=OPD/doctor 2=emergency 3=lab 4=pharmacy 5=billing 0=reception *=repeat
 
 AFTER HOURS: if CLOSED, give next opening and offer (a) book for then, (b) callback, or (c) emergency. Never say "closed, goodbye".
+
+EXISTING APPOINTMENT: you do NOT know the caller in advance and have NO record of their past calls or bookings. If they ask about an appointment they ALREADY have — when it is, which doctor or department, or whether it is confirmed — call get_my_appointments (it looks them up by their phone number) and answer ONLY from what it returns. Never guess or claim to remember them. If it returns nothing for their number, say there is nothing on record and offer to book.
 {outbound_block}
 HOSPITAL:
 {hosp_block}
@@ -1789,9 +1791,14 @@ async def entrypoint(ctx: JobContext) -> None:
                 else:
                     caller_phone = "+" + _d
                 break
-        from src.tenancy.features import enabled as _feat_on
-        if caller_phone:
-            patient_profile = await _load_patient_profile(caller_phone, hospital_id)
+        # Cross-call recall disabled by request: do NOT auto-load the caller's
+        # name or past appointments and do NOT greet them by name. Patient details
+        # are captured fresh each call (remember_patient -> pmeta) and used only to
+        # name the recording. A caller can still ask about an existing booking on
+        # demand — the LLM calls the get_my_appointments tool, which looks it up by
+        # phone at that moment. caller_phone is still resolved above for the
+        # recording / call_log row and that on-demand lookup.
+        patient_profile = None
     except Exception:
         pass
 
@@ -1961,7 +1968,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # (entered the listening state). The inactivity watchdog uses this so the
     # "are you there?" nudge starts counting only once she is actually waiting for
     # the caller — never during or right after her own reply.
-    _speech = {"speaking": False, "since_listening": None}
+    _speech = {"speaking": False, "thinking": False, "since_listening": None}
 
     def _on_agent_state(ev):
         try:
@@ -1969,10 +1976,22 @@ async def entrypoint(ctx: JobContext) -> None:
             st = str(st).lower()
             if st == "speaking":
                 _speech["speaking"] = True
+                _speech["thinking"] = False
+            elif st == "thinking":
+                # LLM is generating and/or a tool (e.g. a multi-doctor availability
+                # lookup) is running. Arya — not the caller — is busy here, so the
+                # inactivity watchdog must NOT count this window as caller silence.
+                # Previously "thinking" fell through as idle, so a slow availability
+                # turn tripped the 20s "are you there? I can't hear you." nudge.
+                _speech["thinking"] = True
             elif st in ("listening", "idle"):
-                if _speech["speaking"]:
+                # Leaving speaking OR thinking → Arya just finished working; restart
+                # the silence window from now so the caller gets the full think-time
+                # before any nudge.
+                if _speech["speaking"] or _speech["thinking"]:
                     _speech["since_listening"] = datetime.now(timezone.utc)
                 _speech["speaking"] = False
+                _speech["thinking"] = False
         except Exception:
             pass
     session.on("agent_state_changed", _on_agent_state)
@@ -2368,8 +2387,10 @@ async def entrypoint(ctx: JobContext) -> None:
             # ASSISTANT turn too means that right after Arya finishes a (possibly long)
             # reply the caller still gets the full think-time window before any
             # "are you there?" nudge — not counted from their previous message.
-            # Never nudge while Arya is speaking.
-            if _speech.get("speaking"):
+            # Never nudge while Arya is speaking OR thinking (running a tool /
+            # generating her reply) — that processing time is Arya's, not the
+            # caller's silence.
+            if _speech.get("speaking") or _speech.get("thinking"):
                 continue
             last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
             # Start the silence timer from when Arya last FINISHED speaking (not when

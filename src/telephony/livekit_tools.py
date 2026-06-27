@@ -953,12 +953,17 @@ try:
                 _today = _dt3.date.today()
                 req_date = _today
             if req_date <= _today:
-                for offset in range(1, 7):
-                    next_d = _today + _dt3.timedelta(days=offset)
+                # Scan the next 6 days CONCURRENTLY (was sequential — up to 6 × ~0.4s
+                # warm / ~2.7s cold round-trips), then pick the EARLIEST day that has
+                # an opening so the offer is still the soonest slot.
+                _days = [_today + _dt3.timedelta(days=o) for o in range(1, 7)]
+                async def _slots_on(day):
                     try:
-                        next_slots = await get_available_slots(doctor_id, next_d.isoformat(), hospital_id)
+                        return await get_available_slots(doctor_id, day.isoformat(), hospital_id)
                     except Exception:
-                        next_slots = []
+                        return []
+                _week = await asyncio.gather(*[_slots_on(dd) for dd in _days])
+                for next_d, next_slots in zip(_days, _week):
                     if next_slots:
                         day_label = next_d.strftime("%A, %d %B")
                         _lang = getattr(hospital_ctx, "agent_language", "ml-IN") if hospital_ctx else "ml-IN"
@@ -1192,25 +1197,25 @@ try:
         if not d:
             d = today
         from src.db.queries import get_available_slots
-        avail = []
-        for doc in docs:
-            try:
-                slots = await get_available_slots(str(doc.id), d.isoformat(), hospital_id)
-            except Exception:
-                slots = []
-            if slots:
-                avail.append((doc.name, slots[:4]))
+
+        # Query every doctor for a given day CONCURRENTLY (was sequential: with
+        # ~0.4s warm / ~2.7s cold per query and up to 6 doctors, a department lookup
+        # could take 15-40s, long enough to trip the inactivity watchdog). gather
+        # preserves doctor order, so the spoken name list stays stable.
+        async def _avail_for_day(day_iso: str):
+            async def _one(doc):
+                try:
+                    return doc.name, await get_available_slots(str(doc.id), day_iso, hospital_id)
+                except Exception:
+                    return doc.name, []
+            results = await asyncio.gather(*[_one(doc) for doc in docs])
+            return [(nm, slots[:4]) for nm, slots in results if slots]
+
+        avail = await _avail_for_day(d.isoformat())
         if not avail and d == today:
             for offset in range(1, 7):
                 next_d = today + _dt2.timedelta(days=offset)
-                next_avail = []
-                for doc in docs:
-                    try:
-                        slots = await get_available_slots(str(doc.id), next_d.isoformat(), hospital_id)
-                    except Exception:
-                        slots = []
-                    if slots:
-                        next_avail.append((doc.name, slots[:4]))
+                next_avail = await _avail_for_day(next_d.isoformat())
                 if next_avail:
                     day_label = next_d.strftime("%A, %d %B")
                     names = ", ".join(nm for nm, _ in next_avail)
@@ -1255,6 +1260,50 @@ try:
             pass
         return ""
 
+    @function_tool
+    async def get_my_appointments(context: RunContext) -> str:
+        """Look up THIS caller's own existing appointment(s) by their phone number,
+        ON DEMAND, only when they ASK about a booking they already have — e.g.
+        "when is my appointment?", "which doctor am I booked with?", "is my
+        appointment confirmed?", "എന്റെ അപ്പോയിന്റ്മെന്റ് എപ്പോഴാണ്?". Returns the
+        caller's active appointments (date, time, doctor, department, status) so you
+        can answer. Do NOT call this proactively or to greet — ONLY when the caller
+        asks about their existing appointment."""
+        _mark_intent(context, "get_my_appointments")
+        hospital_id  = _ud(context, "hospital_id", "")
+        caller_phone = _ud(context, "caller_phone", "")
+        if not caller_phone:
+            return ("I can't tell which number you're calling from, so I can't look up "
+                    "your appointment. Could you tell me the name it was booked under?")
+        try:
+            from src.db.queries import get_appointments_by_phone
+            appts = await get_appointments_by_phone(caller_phone, hospital_id)
+        except Exception as exc:
+            logger.warning("tool_get_my_appointments_failed", error=str(exc))
+            return "I couldn't look that up right now — please try again in a moment."
+        if not appts:
+            return ("No active appointment is on record for this number. "
+                    "Would you like to book one?")
+        _lines = []
+        for a in appts:
+            st = a.get("slot_time")
+            try:
+                if isinstance(st, datetime):
+                    _st = st.astimezone(_IST) if st.tzinfo else _IST.localize(st)
+                    when = _st.strftime("%A, %d %B at %I:%M %p")
+                else:
+                    when = str(st) if st else "time not set"
+            except Exception:
+                when = str(st) if st else "time not set"
+            seg = f"  - {when} with Dr. {a.get('doctor_name') or '?'}"
+            if a.get("dept_name"):
+                seg += f" ({a['dept_name']})"
+            if a.get("status"):
+                seg += f" [{a['status']}]"
+            _lines.append(seg)
+        return ("This caller's appointments on record (speak the date and time "
+                "naturally in their language):\n" + "\n".join(_lines))
+
     # Full tool set for hospital tier
     ALL_TOOLS = [
         book_appointment,
@@ -1262,6 +1311,7 @@ try:
         check_availability,
         check_department_availability,
         remember_patient,
+        get_my_appointments,
         reschedule_appointment,
         cancel_appointment,
         request_callback,
@@ -1280,6 +1330,7 @@ try:
         check_availability,
         check_department_availability,
         remember_patient,
+        get_my_appointments,
         reschedule_appointment,
         cancel_appointment,
         request_callback,
