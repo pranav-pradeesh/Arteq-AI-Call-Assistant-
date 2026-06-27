@@ -230,6 +230,71 @@ def _ml_slot_range(slots: list, lang: str) -> str:
     return first if first == last else f"from {first} to {last}"
 
 
+_ML_MONTHS = {1: "ജനുവരി", 2: "ഫെബ്രുവരി", 3: "മാർച്ച്", 4: "ഏപ്രിൽ", 5: "മേയ്",
+              6: "ജൂൺ", 7: "ജൂലൈ", 8: "ഓഗസ്റ്റ്", 9: "സെപ്റ്റംബർ", 10: "ഒക്ടോബർ",
+              11: "നവംബർ", 12: "ഡിസംബർ"}
+# Relative day words (English + Malayalam) → offset from today.
+_REL_DATE_WORDS = {"today": 0, "tonight": 0, "soon": 0, "tomorrow": 1,
+                   "day after tomorrow": 2, "ഇന്ന്": 0, "നാളെ": 1, "മറ്റന്നാൾ": 2}
+
+
+def _spoken_appt_date(date_str: str, ml: bool) -> str:
+    """Turn an appointment date into a naturally sayable fragment for a greeting.
+
+    Accepts an ISO date (YYYY-MM-DD) or a relative word ("today"/"tomorrow"),
+    and returns e.g. "ഇന്ന്", "നാളെ", "ജൂൺ 28-ന്" (ml) or "today", "tomorrow",
+    "June 28" (en). Falls back to the input UNCHANGED if it can't be parsed, so a
+    bad value never crashes the call — it just speaks as given. This exists because
+    outbound reminder/confirmation greetings used to interpolate the raw date
+    string, so a ml-IN call would say the literal "2026-06-28" or "today".
+    """
+    s = (date_str or "").strip()
+    if not s:
+        return s
+    import datetime as _d
+    try:
+        import pytz as _pz
+        today = _d.datetime.now(_pz.timezone("Asia/Kolkata")).date()
+    except Exception:
+        today = _d.date.today()
+    d = None
+    if s.lower() in _REL_DATE_WORDS:
+        d = today + _d.timedelta(days=_REL_DATE_WORDS[s.lower()])
+    else:
+        try:
+            d = _d.date.fromisoformat(s[:10])
+        except Exception:
+            d = None
+    if d is None:
+        return s  # unknown format — best effort, speak as given
+    delta = (d - today).days
+    if ml:
+        if delta == 0:
+            return "ഇന്ന്"
+        if delta == 1:
+            return "നാളെ"
+        if delta == 2:
+            return "മറ്റന്നാൾ"
+        return f"{_ML_MONTHS.get(d.month, str(d.month))} {d.day}-ന്"
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "tomorrow"
+    if delta == 2:
+        return "the day after tomorrow"
+    return f"{d.strftime('%B')} {d.day}"
+
+
+def _spoken_time_en(hhmm: str) -> str:
+    """"14:30" -> "2:30 PM". Returns the input unchanged if not HH:MM."""
+    try:
+        h = int(hhmm[:2]); m = int(hhmm[3:5])
+    except Exception:
+        return hhmm
+    ap = "AM" if h < 12 else "PM"
+    return f"{h % 12 or 12}:{m:02d} {ap}"
+
+
 def _fuzzy_find_doctor(hospital_ctx, name: str):
     """Honorific-tolerant, bidirectional name match. Returns (doctor_id, dept_id, full_name).
 

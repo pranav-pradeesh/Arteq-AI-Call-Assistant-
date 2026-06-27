@@ -293,6 +293,12 @@ async def dial_outbound_vobiz(
     phone = patient_phone if patient_phone.startswith("+") else f"+{patient_phone}"
     dial_to = _format_vobiz_dest(phone)  # Vobiz dial-plan format (default E.164)
 
+    # Carry the dialed number in the room metadata so the agent can attribute the
+    # call_log to the right recipient. The SIP participant joins only after the
+    # callee answers and its identity is just the last 4 digits ("patient-XXXX"),
+    # so without this an outbound call_log records the caller as "unknown".
+    context = {**(context or {}), "patient_phone": phone}
+
     lk = None
     try:
         from livekit import api as lk_api

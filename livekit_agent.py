@@ -1108,28 +1108,39 @@ def _build_greeting(hospital_ctx, outbound_context: Optional[dict],
         # proper nouns stay English, the way Keralites actually speak). Other
         # languages fall back to English.
         ml = (agent_language or "").lower().startswith("ml")
+        # Localize date/time so the greeting speaks naturally ("നാളെ", "ജൂൺ 28-ന്",
+        # "tomorrow") instead of the raw stored value — a real reminder carries an
+        # ISO date like "2026-06-28" and a "14:30" time, which used to be read out
+        # verbatim. Falls back to the raw value if it can't be parsed.
+        from src.telephony.livekit_tools import _spoken_appt_date, _spoken_time_en, _ml_time
+        _date_ml = _spoken_appt_date(date, True)
+        _date_en = _spoken_appt_date(date, False)
+        _time_ml = _ml_time(ttime) if ttime else ""
+        _time_en = _spoken_time_en(ttime) if ttime else ""
         if call_type == "confirmation":
             if ml:
+                _at = f"{_time_ml}-ന് " if _time_ml else ""
                 return (
                     f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ് വിളിക്കുന്നത്. "
-                    f"{date}-ന് {ttime}-ന് {dname} ഡോക്ടറുമായുള്ള നിങ്ങളുടെ appointment "
+                    f"{_date_ml} {_at}{dname} ഡോക്ടറുമായുള്ള നിങ്ങളുടെ appointment "
                     f"ഉറപ്പിക്കാനാണ് വിളിച്ചത്. വരാൻ പറ്റുമോ?"
                 )
+            _aten = f" at {_time_en}" if _time_en else ""
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
-                f"I'm calling to confirm your appointment with Dr. {dname} on {date} at {ttime}. "
+                f"I'm calling to confirm your appointment with Dr. {dname} on {_date_en}{_aten}. "
                 "Can you attend?"
             )
         elif call_type == "reminder":
             if ml:
                 return (
                     f"നമസ്കാരം {pname}, {hosp_name}-ൽ നിന്നാണ്. "
-                    f"{date}-ന് {dname} ഡോക്ടറുമായുള്ള appointment ഓർമിപ്പിക്കാനാണ് വിളിച്ചത്. "
+                    f"{_date_ml} {dname} ഡോക്ടറുമായുള്ള appointment ഓർമിപ്പിക്കാനാണ് വിളിച്ചത്. "
                     f"എന്തെങ്കിലും സംശയം ഉണ്ടോ?"
                 )
             return (
                 f"Hello {pname}, this is {hosp_name} calling. "
-                f"This is a reminder of your appointment with Dr. {dname} on {date}. "
+                f"This is a reminder of your appointment with Dr. {dname} on {_date_en}. "
                 "Do you have any questions?"
             )
         elif call_type == "doctor_availability":
@@ -1801,6 +1812,17 @@ async def entrypoint(ctx: JobContext) -> None:
         patient_profile = None
     except Exception:
         pass
+
+    # Outbound calls: the dialed participant has not joined yet when the loop above
+    # runs (SIP is still ringing) and its identity is only "patient-XXXX", so the
+    # parse above leaves caller_phone empty and the call_log records "unknown".
+    # Fall back to the dialed number that dial_outbound_vobiz stored in the room
+    # metadata so the recipient is attributed correctly.
+    if not caller_phone and outbound_context:
+        _op = (outbound_context.get("patient_phone")
+               or outbound_context.get("phone") or "").strip()
+        if _op:
+            caller_phone = _op if _op.startswith("+") else "+" + _op.lstrip("+")
 
     # Stub call_log row up front so the recording is ALWAYS linkable, even if the
     # end-of-call handler is killed (LLM crash / hard job shutdown). The end
