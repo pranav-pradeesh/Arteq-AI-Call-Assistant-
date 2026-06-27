@@ -1,502 +1,353 @@
-# Arteq Hospital Voice Agent
+# Arteq — Multilingual AI Voice Receptionist for Hospitals
 
-> **Production-grade multilingual AI voice receptionist for Indian hospitals and clinics.**
->
-> One codebase. Multi-tenant. Deploy one VPS for dozens of hospitals — routing is purely data-driven.
+> Production-grade, multi-tenant AI phone receptionist ("Arya") for Indian
+> hospitals and clinics. One self-hosted VPS serves many hospitals; routing is
+> data-driven by hospital slug. The goal is to **replace the IVR menu** with a
+> natural, real-time conversation — no "press 1 for…", no scripts.
 
-**Stack:** LiveKit (WebRTC/SIP) → Sarvam AI STT + TTS → Google Gemini → PostgreSQL  
-**Telephony:** Vobiz SIP trunking (Indian DID, no SMS — WhatsApp for patient messages)  
-**Languages:** Malayalam, Hindi, Tamil, Kannada, Telugu, Bengali, Gujarati, Marathi, Punjabi, Odia, English — auto-detected per caller, no configuration needed
+**Pipeline:** Vobiz SIP → self-hosted LiveKit (WebRTC/SIP) → Sarvam Saarika STT →
+Google Gemini → Sarvam Bulbul v3 TTS → caller.
+**Data:** Supabase PostgreSQL (over a socat IPv4→IPv6 tunnel).
+**Languages:** Malayalam-first; English, Hindi, Tamil, Kannada, Telugu — detected
+per caller and locked for the call.
 
 ---
 
 ## Table of Contents
-
-1. [Architecture](#architecture)
-2. [Quick Start](#quick-start)
-3. [Environment Variables](#environment-variables)
-4. [Database & Migrations](#database--migrations)
-5. [Admin Dashboard](#admin-dashboard)
-6. [Multi-Hospital VPS Setup](#multi-hospital-vps-setup)
-7. [Telephony Setup (Vobiz)](#telephony-setup-vobiz)
-8. [WhatsApp Notifications](#whatsapp-notifications)
-9. [Call Recordings](#call-recordings)
-10. [Cost: Under ₹2/min](#cost-under-₹2min)
-11. [Security](#security)
-12. [Production Deployment](#production-deployment)
-13. [Project Structure](#project-structure)
-14. [Troubleshooting](#troubleshooting)
-
----
-
-## Architecture
-
-```
-Patient dials hospital landline
-  → BSNL/MTNL call forward → Vobiz DID
-  → Vobiz SIP trunk → LiveKit SIP Inbound
-  → Room: "{slug}-call-{uuid}"   ← slug routes to the right hospital
-  → LiveKit Agent Worker (livekit_agent.py)
-        ├── Sarvam STT saarika:v2.5  (speech → text, auto language)
-        ├── Google Gemini 2.0 Flash  (LLM brain, function calls)
-        │     └── Sarvam sarvam-30b  (fallback LLM)
-        └── Sarvam TTS bulbul:v3     (text → speech, caller's language)
-              ↓
-          Patient hears Arya
-              ↓ (side effects)
-        WhatsApp notifications via Meta Cloud API
-        DB writes: appointments, callbacks, call_logs
-```
-
-Two services (can run on the same VPS or split):
-- **API server** — FastAPI (webhooks, admin dashboard, health, scheduler)
-- **Agent worker** — LiveKit agent (Arya, handles all concurrent call rooms)
+1. [Architecture](#1-architecture)
+2. [Repository layout](#2-repository-layout)
+3. [Environments & branches](#3-environments--branches)
+4. [Deployment](#4-deployment)
+5. [Environment variables](#5-environment-variables)
+6. [Database & migrations](#6-database--migrations)
+7. [The AI agent — behaviour](#7-the-ai-agent--behaviour)
+8. [Admin dashboard](#8-admin-dashboard)
+9. [Onboarding a new hospital](#9-onboarding-a-new-hospital)
+10. [Telephony (Vobiz + LiveKit SIP)](#10-telephony-vobiz--livekit-sip)
+11. [Call recordings](#11-call-recordings)
+12. [Outbound calls, reminders & callbacks](#12-outbound-calls-reminders--callbacks)
+13. [Patient messaging (WhatsApp / SMS)](#13-patient-messaging-whatsapp--sms)
+14. [Operations & troubleshooting](#14-operations--troubleshooting)
+15. [Security](#15-security)
 
 ---
 
-## Quick Start
+## 1. Architecture
 
-### Local development (browser testing, no phone needed)
+```
+Caller dials the hospital's Vobiz DID
+  -> Vobiz SIP trunk -> LiveKit SIP (inbound)
+  -> room "{slug}-call-{uuid}"            (slug is the tenant routing key)
+  -> LiveKit Agent worker (livekit_agent.py) is dispatched into the room
+        - DTLN noise suppression (in-process, self-hosted)
+        - Silero VAD (turn detection)
+        - Sarvam Saarika v2.5 STT  (speech -> text, pinned ml-IN)
+        - Google Gemini (gemini-2.5-flash via the OpenAI-compatible plugin)
+        - Sarvam Bulbul v3 TTS    (text -> speech, "priya" voice)
+  -> answers; on booking it writes to PostgreSQL and the dashboard updates live
+```
+
+**Containers** (`docker-compose.selfhost.yml`):
+
+| Service | Role |
+|---------|------|
+| `nginx` | reverse proxy: `/` -> frontend, `/api/v1`,`/ws`,`/rtc`,`/admin/ws` -> app |
+| `app` | FastAPI backend (Uvicorn, 2 workers) — dashboard API, schedulers, SIP setup |
+| `agent` | the LiveKit voice agent worker ("arya") — one worker, all calls/tenants |
+| `frontend` | Next.js admin dashboard (standalone build) |
+| `livekit` | self-hosted LiveKit server (WebRTC + SIP) |
+| `livekit-sip` | bridges Vobiz SIP calls into LiveKit rooms |
+| `egress` | records calls to `/recordings/<call_id>.ogg` |
+| `redis` | live-call event bus (agent -> dashboard WebSocket) + leader election |
+| `postgres` | bundled (unused in prod — Supabase is the live DB) |
+
+**Database:** Supabase Postgres, reached over a host `socat` IPv4->IPv6 tunnel
+(`socat-supabase.service`) because the VPS is IPv4-only and Supabase is IPv6.
+
+**Multi-tenancy:** every call's room is `"{slug}-call-{uuid}"`. The agent splits
+the slug, looks up the hospital row, and loads that tenant's doctors, departments,
+FAQs, hours, holidays, greeting, language, plan and recordings. No per-tenant
+process, port or container.
+
+---
+
+## 2. Repository layout
+
+```
+livekit_agent.py            # the voice agent: pipeline, prompt, tools, watchdogs
+src/
+  ai/groq_brain.py          # system-prompt builder + hospital summary + greeting
+  telephony/livekit_tools.py# agent tools: book, availability, transfer, emergency…
+  db/queries.py             # HospitalContext load, slots, call_log, appointments
+  services/
+    vobiz_sip.py            # inbound/outbound SIP trunk + dispatch-rule setup
+    scheduler.py            # leader-elected background loops (reminders, queue…)
+    appointment_workflow.py # 3x retry calling, calling-hours, reminders
+    staff_alert.py          # duty-manager / emergency SMS
+  config/settings.py        # env + production validators
+dashboard/routes/admin_api.py   # all /admin/* REST + WS endpoints
+additions/                  # live-call WS bus, usage/cost, monitoring
+frontend/                   # Next.js dashboard (app router, src/app/(app)/*)
+migrations/versions/*.sql   # idempotent SQL migrations (run on app boot)
+scripts/
+  add_tenant.sh / .py       # provision a new hospital (one command)
+  update.sh                 # pull + rebuild + restart (deploy)
+  test_outbound.sh / .py    # place a test outbound call
+docker-compose.selfhost.yml # the production stack
+ONBOARDING.md               # new-hospital runbook
+```
+
+---
+
+## 3. Environments & branches
+
+| Branch | Role |
+|--------|------|
+| `main` | **Production** (default). The VPS tracks this; `update.sh` deploys it. |
+| `staging` | pre-production testing |
+| `development` | active development |
+
+Flow: `development` -> `staging` -> `main`. Deploy a release by merging to `main`
+and running `./scripts/update.sh` on the VPS.
+
+Runtime mode is `ENV=production` in `.env`: production secret validators enforce a
+>=12-char dashboard admin password and a non-weak JWT secret, CORS is locked to the
+host, Uvicorn runs without `--reload`, and the frontend is a production build.
+
+---
+
+## 4. Deployment
+
+The whole stack lives at `/root/arteq` on the VPS.
 
 ```bash
-# 1. Clone
-git clone <your-repo-url> && cd Arteq-AI-Call-Assistant-
+# First boot
+cd /root/arteq
+cp .env.example .env          # then fill in the keys (section 5)
+docker compose -f docker-compose.selfhost.yml up -d --build
 
-# 2. Setup — one command does everything
-chmod +x setup.sh && ./setup.sh
-
-# 3. Edit .env with your API keys (minimum required below)
-# 4. Start
-make dev          # terminal 1: FastAPI server → http://localhost:8000
-make agent        # terminal 2: LiveKit agent worker
-
-# Open http://localhost:8000/talk → press Start Call → talk to Arya
+# Deploy an update (pull main, rebuild images, restart)
+./scripts/update.sh
 ```
 
-Or with Docker (includes Postgres + Redis):
+> **Important:** always **rebuild** the `agent` image after agent-side changes
+> (`docker compose -f docker-compose.selfhost.yml build agent`). The running agent
+> uses the built image, not the source on disk — a bare restart will not pick up
+> edits. `update.sh` rebuilds `app`, `agent` and `frontend`.
+
+Migrations run automatically on app boot (idempotent). Health check:
+`curl -s http://localhost/api/v1/health` -> `200`.
+
+---
+
+## 5. Environment variables
+
+`/root/arteq/.env` (gitignored). Key groups:
+
+| Group | Keys |
+|-------|------|
+| Runtime | `ENV=production`, `NODE_IP=<VPS public IP>` |
+| Database | `DATABASE_URL` (Supabase, via socat), `DB_SSL=require` |
+| LiveKit | `LIVEKIT_URL=ws://livekit:7880`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET`, `LIVEKIT_DISPATCH_NAME` |
+| STT/TTS | `SARVAM_API_KEY`, `SARVAM_STT_MODEL=saarika:v2.5`, `SARVAM_STT_LANGUAGE` (blank -> per-tenant `agent_language`), `TTS_PACE` |
+| LLM | `GOOGLE_API_KEY`, `GOOGLE_MODEL=gemini-2.5-flash` |
+| Voice tuning | `VAD_ACTIVATION_THRESHOLD`, `VAD_MIN_SILENCE`, `VAD_MIN_SPEECH`, `DTLN_STRENGTH` (0 = off), `GREETING_COOLDOWN_S`, `INACTIVITY_PROMPT_S`, `INACTIVITY_HANGUP_S`, `MAX_CALL_DURATION_S` |
+| Dashboard auth | `DASHBOARD_ADMIN_PASSWORD` (>=12 in prod), `DASHBOARD_JWT_SECRET`, `SUPERADMIN_EMAIL`, `NEXTAUTH_SECRET`, `NEXTAUTH_URL`, `CORS_ORIGINS` |
+| Vobiz SIP | `VOBIZ_PHONE_NUMBER` (DID, +E.164), `VOBIZ_SIP_USERNAME`, `VOBIZ_SIP_PASSWORD`, `VOBIZ_SIP_OUTBOUND_DOMAIN`, `LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID` |
+| Messaging | `WHATSAPP_ENABLED`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN`; or `SMS_PROVIDER` + provider keys |
+| Outbound | `OUTBOUND_QUEUE_INTERVAL_SECONDS`, `STAFF_ALERT_PHONE` |
+
+A new tenant's `agent_language` / `agent_name` / `greeting` are stored **per
+hospital in the DB** (set from the dashboard), not in `.env`.
+
+---
+
+## 6. Database & migrations
+
+Migrations are plain SQL in `migrations/versions/*.sql`, applied on every app boot
+(idempotent — `ADD COLUMN IF NOT EXISTS`, `CREATE TABLE IF NOT EXISTS`).
+
+Core tables: `hospitals`, `users`, `user_tenants`, `departments`, `doctors`,
+`schedules`, `appointments`, `appointment_events`, `call_logs`, `faqs`,
+`emergency_contacts`, `billing_info`, `callbacks`, `outbound_call_queue`,
+`doctor_patients`, `hospital_holidays`.
+
+Notable columns added this cycle:
+
+| Table | Columns | Purpose |
+|-------|---------|---------|
+| `hospitals` | `plan` (trial\|full), `greeting`, `staff_alert_phone`, `agent_name`, `agent_language` | per-tenant agent config |
+| `departments` | `timings` | what the agent tells callers per department |
+| `appointments` | `patient_age`, `patient_age_unit` (years\|months\|weeks\|days), `patient_gender` | any-age patients |
+| `call_logs` | `recording_url`, `patient_name/age/age_unit/gender`, `direction` | recording link + call-captured details |
+| `hospital_holidays` | `holiday_date`, `reason`, `closed`, `open_time`, `close_time` | closures / special hours |
+
+**`plan`** gates inbound AI answering: `full` = inbound + outbound + dashboard;
+`trial` = outbound reminders + dashboard only (inbound is not AI-answered).
+
+---
+
+## 7. The AI agent — behaviour
+
+The agent is a single LiveKit worker handling every call. Behaviour (system prompt
+in `groq_brain.py` + tools in `livekit_tools.py`):
+
+- **Open-world, not IVR.** Talks like a real receptionist — no menus, no fixed
+  question order, follows the caller. The only hard boundary is the **topic**:
+  this hospital + general medical/health. Genuinely off-topic requests are
+  declined warmly; an *unclear/garbled* word is **not** declined — the agent guesses
+  the closest department/doctor/service and asks "did you mean X?".
+- **Language.** Detects the caller's language from their first message and locks it
+  for the call; switches only on an explicit request. Native, colloquial Malayalam.
+- **Malayalam time.** Clock times are spoken in Malayalam words with part-of-day
+  (e.g. "രാവിലെ ഒമ്പത് മണി മുതൽ … വരെ"), not digits.
+- **Symptom routing.** A described symptom is mapped to the right department
+  (chest pain -> Cardiology, fever -> General Medicine, …); urgent symptoms -> Emergency.
+- **Booking flow.** Natural checklist (department -> who -> name -> age -> gender ->
+  offer a slot). Lists **doctor names first**; a doctor's time slots are given only
+  after the caller picks that doctor. Confirms the full details **once** at the end.
+  Age accepts **any unit** (years default; months/weeks/days for infants). Doctor
+  match works on first **or** last name, and asks "which one?" when a name is shared.
+- **Availability.** Slots are derived from each doctor's `schedules` minus booked
+  appointments, with past times filtered out for today; if today is full it
+  automatically searches the next working days.
+- **Holidays.** On a closed date the agent says the hospital is closed (or gives
+  special hours) instead of offering appointments.
+- **Silence handling.** A watchdog says "are you there?" only after the caller has
+  been silent for `INACTIVITY_PROMPT_S` **while the agent is listening** (never
+  during/right after its own reply), re-prompts on continued silence, and hangs up
+  after `INACTIVITY_HANGUP_S`. A `MAX_CALL_DURATION_S` cap protects cost.
+- **Voicemail.** An outbound call answered by a carrier/iPhone voicemail is detected
+  and ended (counts under the 3x retry rule) — never talks to a machine.
+- **Noise.** DTLN in-process suppression (`DTLN_STRENGTH`, light by default) — works
+  self-hosted, unlike LiveKit Cloud Krisp.
+- **Tools:** `book_appointment`, `check_availability`,
+  `check_department_availability`, `get_doctor_schedule`, `remember_patient`,
+  `reschedule_appointment`, `cancel_appointment`, `request_callback`,
+  `send_location_sms`, `transfer_to_department`, `alert_emergency`, `end_call`.
+
+---
+
+## 8. Admin dashboard
+
+Next.js app served at `http://<vps>/` (login at `/login`). Two roles:
+**super admin** (manages all tenants) and **hospital admin** (one tenant).
+
+Hospital-admin pages: Overview, Calls (+ recordings), Call QA, Analytics, Live
+(real-time active calls over WebSocket), Appointments, Callbacks (re-dial / done /
+cancel), Usage & Cost, Patients, Bookings & Tokens, WhatsApp, Settings (greeting,
+language, hours, staff-alert phone), Departments, Doctors (+ Schedules), FAQs,
+Holidays, Billing, Emergency, Knowledge, Telephony, Setup, HIS, My Account.
+
+Super-admin pages: Hospitals (plan/tier toggle), Onboard hospital, Tenants, Users &
+Roles, Usage (all). **Recordings are hidden from super admin** (patient privacy) —
+only the owning hospital admin can play them.
+
+Auth: NextAuth credentials -> backend `/admin/login` (returns a JWT carrying role +
+tenants). `api.ts` proxies `/admin/api/*` -> backend `/admin/*`.
+
+---
+
+## 9. Onboarding a new hospital
+
+See **`ONBOARDING.md`** for the full runbook. In short, on the VPS:
 
 ```bash
-docker compose up --build
+./scripts/add_tenant.sh \
+  --name "City Clinic" --slug city-clinic \
+  --admin-user cityclinic --admin-pass 'Strong@Pass1' \
+  --did +917900000000 --plan full --language ml-IN
 ```
 
-### Minimum required `.env` keys for local dev
-
-```env
-LIVEKIT_URL=wss://your-project.livekit.cloud
-LIVEKIT_API_KEY=...
-LIVEKIT_API_SECRET=...
-SARVAM_API_KEY=...
-GOOGLE_API_KEY=...
-DATABASE_URL=postgresql://user:pass@host:5432/arteq
-DASHBOARD_ADMIN_PASSWORD=your-strong-password
-DASHBOARD_JWT_SECRET=<run: python -c "import secrets; print(secrets.token_hex(32))">
-```
+Creates the hospital row, a tenant-scoped dashboard admin login, and (with `--did`)
+the LiveKit inbound SIP trunk + dispatch rule. The admin then configures
+departments, doctors + schedules, FAQs, holidays and Settings via the dashboard —
+no code or DB work. Idempotent on `--slug`.
 
 ---
 
-## Environment Variables
+## 10. Telephony (Vobiz + LiveKit SIP)
 
-All variables are documented in `.env.example`. Key groups:
+- **Inbound:** a Vobiz DID routes to LiveKit SIP, which creates the room and
+  dispatches the agent. The inbound trunk registers **every DID format**
+  (`+91…`, `91…`, bare 10-digit, `0…`) so callers reach the agent with or without
+  the country code. The caller's number is parsed from the SIP identity and stored.
+- **Outbound:** uses the Vobiz **per-trunk** SIP domain + SIP credentials (not the
+  REST key), `wait_until_answered=True`.
+- Setup is done by `vobiz_sip.py` (`setup_hospital_inbound_vobiz`,
+  `setup_vobiz_outbound_trunk`) and the `/admin/sip/vobiz/setup` endpoint;
+  `add_tenant.sh --did` wires inbound automatically per hospital.
 
-| Group | Variables | Required |
-|-------|-----------|---------|
-| LiveKit | `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` | Yes |
-| Sarvam AI | `SARVAM_API_KEY` | Yes |
-| Google Gemini | `GOOGLE_API_KEY`, `GOOGLE_MODEL` | Yes |
-| Database | `DATABASE_URL` | Yes |
-| Dashboard auth | `DASHBOARD_ADMIN_PASSWORD`, `DASHBOARD_JWT_SECRET` | Yes |
-| Vobiz SIP | `VOBIZ_API_KEY`, `VOBIZ_API_SECRET`, `VOBIZ_PHONE_NUMBER` | Production |
-| WhatsApp | `WHATSAPP_ENABLED`, `WHATSAPP_PHONE_NUMBER_ID`, `WHATSAPP_ACCESS_TOKEN` | For patient messages |
-| Recording | `VOBIZ_RECORD_CALLS=true` | Optional |
+Firewall (UDP unless noted): 80/443 TCP, 7880/7881 TCP (LiveKit), 5060 UDP (SIP),
+WebRTC + RTP media ranges.
 
 ---
 
-## Database & Migrations
+## 11. Call recordings
 
-Migrations run **automatically on every server startup** (idempotent — safe to re-run). No manual steps needed for Supabase or Docker Postgres.
+LiveKit Egress records each call to `/recordings/<call_id>.ogg`. A `call_log` row
+is written **at call start** (stub) and upserted at end, so a recording is always
+linkable even if the call crashes. The dashboard serves the file via
+`GET /admin/.../calls/{call_id}/recording`, scoped to the owning hospital and
+**denied to super admins**. Downloads are named
+`<patient>_<age><unit>_<gender>_<date>_Dr-<doctor>.ogg`.
 
-To apply manually (Supabase SQL Editor or psql):
+The recordings Docker volume must be writable by the egress user (uid 1001);
+`update.sh` self-heals the permission on deploy.
+
+---
+
+## 12. Outbound calls, reminders & callbacks
+
+Background loops in `scheduler.py` run on a single **leader-elected** worker
+(Postgres advisory lock) so two Uvicorn workers never double-dial:
+confirmation, reminder (~2 h before), doctor-availability, follow-up, and the
+`outbound_call_queue` dispatcher. `appointment_workflow.py` enforces calling hours
+(IST) and a 3x retry rule; an exhausted appointment is marked `missed`.
+Callbacks captured on a call appear in the dashboard and can be re-dialled.
+
+---
+
+## 13. Patient messaging (WhatsApp / SMS)
+
+`whatsapp_service.py` sends confirmations/reminders via the Meta WhatsApp Cloud API
+(approved Utility templates); if WhatsApp is unavailable it falls back to SMS
+(`sms_service.py`, provider-gated). **Not configured by default** — set
+`WHATSAPP_ENABLED` + token, or `SMS_PROVIDER` + keys. Until then the agent does not
+claim a message was sent.
+
+---
+
+## 14. Operations & troubleshooting
 
 ```bash
-for f in migrations/versions/*.sql; do psql "$DATABASE_URL" -f "$f"; done
+# Logs
+docker compose -f docker-compose.selfhost.yml logs agent --since 10m
+docker compose -f docker-compose.selfhost.yml logs app  --since 10m
+docker compose -f docker-compose.selfhost.yml logs livekit-sip --since 10m   # call routing
+
+# Place a test outbound call
+./scripts/test_outbound.sh +9190XXXXXXXX
 ```
 
-Schema seeds a demo hospital: slug `demo`, ID `00000000-0000-0000-0000-000000000001`.
-
-### Adding a new hospital (no code changes, no restart)
-
-```bash
-POST /admin/hospitals/wizard
-Authorization: Bearer <token>
-
-{
-  "name": "Malabar Super Speciality Hospital",
-  "slug": "malabar-hospital",
-  "address": "Kozhikode, Kerala",
-  "phone": "+914952XXXXXX",
-  "tier": "hospital",
-  "departments": [
-    {
-      "name": "Cardiology",
-      "doctors": [{"name": "Dr. Ramesh Kumar", "specialty": "Cardiologist",
-        "schedules": [{"day_of_week": 1, "start_time": "09:00", "end_time": "13:00"}]}]
-    }
-  ]
-}
-```
-
-Each hospital = one slug. The agent loads the right context automatically. No redeployment needed.
+| Symptom | Likely cause |
+|---------|--------------|
+| Silent call / 402 in logs | Sarvam STT/TTS out of credits — top up at dashboard.sarvam.ai |
+| Agent edits not taking effect | rebuild the `agent` image (don't just restart) |
+| Recording "not available" | call_log row missing — fixed by the stub-at-start; older orphans can be backfilled |
+| Inbound call never reaches the server | not in `livekit-sip` logs -> Vobiz routing / DID format / wrong number dialled |
+| Garbled transcription | noisy line; STT is Saarika ml-IN; lower/raise `DTLN_STRENGTH` |
+| Caller shows "unknown" | older call before SIP-identity parsing |
 
 ---
 
-## Admin Dashboard
-
-```
-http://localhost:8000/admin/
-```
-
-Login with `DASHBOARD_ADMIN_PASSWORD`.
-
-| Tab | Purpose |
-|-----|---------|
-| Overview | Live call stats, recent calls, WebSocket URL |
-| Settings | Hospital name, hours, slug, tier |
-| Departments | CRUD for OPD, ICU, Pharmacy, Lab |
-| Doctors | CRUD with weekly schedule slots |
-| Billing | Fee ranges per consultation type |
-| Emergency | Priority-ranked emergency contacts |
-| FAQs | Q&A the AI uses for caller questions |
-| Appointments | View/confirm/cancel bookings |
-| Callbacks | Pending callback requests |
-| Calls | Call history + recordings (if enabled) |
-| Telephony | SIP setup trigger + config status |
-
-### REST API
-
-```bash
-# Auth
-POST /admin/login  {"password": "..."}  → {"access_token": "..."}
-
-# Hospitals
-GET  /admin/hospitals
-POST /admin/hospitals/wizard
-GET  /admin/hospitals/{id}
-PUT  /admin/hospitals/{id}
-
-# Calls + recordings
-GET  /admin/hospitals/{id}/calls?limit=50
-GET  /admin/hospitals/{id}/calls/{call_id}
-GET  /admin/hospitals/{id}/recordings?limit=50
-
-# Telephony
-POST /admin/sip/vobiz/setup
-GET  /admin/telephony/status?hospital_id={id}
-```
-
-Full interactive docs: `http://localhost:8000/docs`
-
----
-
-## Multi-Hospital VPS Setup
-
-One VPS can serve any number of hospitals simultaneously. Routing is by hospital `slug` in the room name — no separate process or port per hospital.
-
-```bash
-# Start the full self-hosted stack (LiveKit + Vobiz SIP + Nginx + DB + Redis)
-docker compose -f docker-compose.selfhost.yml up -d
-```
-
-What it runs:
-- **Nginx** (TLS termination, reverse proxy to the app)
-- **LiveKit server** (self-hosted, no LiveKit Cloud fee)
-- **LiveKit SIP** (bridges Vobiz calls into LiveKit rooms)
-- **App** (FastAPI, 2 Uvicorn workers)
-- **Agent** (Arya, handles all rooms concurrently)
-- **Postgres + Redis** (shared by all hospitals)
-
-### Required env for self-hosting
-
-```env
-NODE_IP=<your VPS public IP>    # for WebRTC media reachability
-POSTGRES_PASSWORD=<strong>
-REDIS_PASSWORD=<strong>         # leave blank to disable Redis auth
-```
-
-### TLS / HTTPS
-
-Place your certificates in the `nginx_certs` Docker volume:
-- `/etc/nginx/certs/fullchain.pem`
-- `/etc/nginx/certs/privkey.pem`
-
-For Let's Encrypt:
-```bash
-# Run certbot on the host, then copy certs into the volume
-certbot certonly --standalone -d arteq.yourdomain.com
-docker cp /etc/letsencrypt/live/arteq.yourdomain.com/fullchain.pem \
-  $(docker volume inspect arteq_nginx_certs -f '{{.Mountpoint}}')/
-```
-
-### Firewall ports to open
-
-| Port | Protocol | Purpose |
-|------|----------|---------|
-| 80, 443 | TCP | HTTP/HTTPS (Nginx) |
-| 7880 | TCP | LiveKit WebSocket (internal) |
-| 7881 | TCP | LiveKit RTC TCP |
-| 5060 | UDP | SIP signaling from Vobiz |
-| 50000–50200 | UDP | WebRTC media |
-| 10000–10100 | UDP | SIP RTP media |
-
----
-
-## Telephony Setup (Vobiz)
-
-### Call flow
-
-```
-Patient → hospital landline → BSNL/MTNL call forward → Vobiz DID
-  → Vobiz SIP trunk → LiveKit SIP Inbound Trunk → room created
-  → agent dispatched → Arya answers
-```
-
-### One-time setup
-
-1. Sign up at [vobiz.ai](https://vobiz.ai) → get API key, secret, phone number
-2. Set `VOBIZ_API_KEY`, `VOBIZ_API_SECRET`, `VOBIZ_PHONE_NUMBER` in `.env`
-3. POST SIP trunk setup:
-   ```bash
-   POST /admin/sip/vobiz/setup
-   Authorization: Bearer <token>
-   # Returns: livekit_sip_vobiz_outbound_trunk_id
-   ```
-4. Copy the returned trunk ID → set `LIVEKIT_SIP_VOBIZ_OUTBOUND_TRUNK_ID` in `.env`
-5. Get your SIP host from LiveKit Cloud → SIP → Inbound Trunks → set `LIVEKIT_SIP_HOST`
-6. Redeploy
-
-### Hospital landline forwarding
-
-```
-BSNL/MTNL forward: dial **21*+918047XXXXXX#  (your Vobiz DID)
-Airtel:             *67*+918047XXXXXX#
-```
-
----
-
-## WhatsApp Notifications
-
-Patient notifications (appointment confirmation, reminder, cancellation, token status, location) are sent via Meta WhatsApp Cloud API using pre-approved Utility templates.
-
-**No SMS** — Vobiz is SIP-only. WhatsApp is the only patient messaging channel.
-
-### Setup
-
-1. Create a WhatsApp Business app at [developers.facebook.com](https://developers.facebook.com)
-2. Get permanent system-user access token + phone number ID
-3. Create Utility templates in Meta Business Manager (names in `.env.example`)
-4. Set in `.env`:
-   ```env
-   WHATSAPP_ENABLED=true
-   WHATSAPP_PHONE_NUMBER_ID=...
-   WHATSAPP_ACCESS_TOKEN=...
-   WHATSAPP_TEMPLATE_LANG=en   # or ml, hi, etc.
-   ```
-
-Template variable order is documented in `src/services/whatsapp_service.py`.
-
----
-
-## Call Recordings
-
-Vobiz provides a full call recording API (MP3/WAV, mono/stereo).
-
-### Enable
-
-```env
-VOBIZ_RECORD_CALLS=true
-VOBIZ_RECORDING_FORMAT=mp3      # mp3 or wav
-VOBIZ_RECORDING_CHANNELS=mono   # mono or stereo
-```
-
-### Access recordings
-
-- **Dashboard:** Admin → Hospital → Calls tab → click any call → play/download
-- **API:** `GET /admin/hospitals/{id}/recordings`
-- **Direct download:** `https://media.vobiz.ai/v1/Account/{api_key}/Recording/{id}.mp3`
-
-Check recording storage pricing in the [Vobiz console](https://console.vobiz.ai) before enabling in production.
-
----
-
-## Cost: Under ₹2/min
-
-| Service | Purpose | Monthly est. (750 min/day) | Per minute |
-|---------|---------|--------------------------|------------|
-| Vobiz SIP | Telephony | ₹9,000 | ₹0.40 |
-| Sarvam AI | STT + TTS | ₹10,000 | ₹0.44 |
-| Google Gemini | LLM brain | ₹1,000 | ₹0.04 |
-| WhatsApp | Patient messages | ₹2,500 | ₹0.11 |
-| **Total** | | **₹22,500/mo** | **₹1.00/min** |
-
-**With 30% buffer: ₹29,500/mo → ₹1.31/min — comfortably under ₹2.00/min.**
-
-Self-hosting LiveKit (included in `docker-compose.selfhost.yml`) eliminates the LiveKit Cloud fee entirely.
-
----
-
-## Security
-
-### Login brute-force protection
-
-Both login endpoints (`POST /admin/login`, `POST /api/v1/auth/login`) are rate-limited to **5 failed attempts per 10-minute window per IP**. Returns HTTP 429 when exceeded.
-
-Nginx adds a second layer of rate limiting at the reverse proxy (10 req/min to auth endpoints).
-
-### JWT
-
-- Algorithm: HS256, signed with `DASHBOARD_JWT_SECRET`
-- TTL: 720 minutes (configurable via `DASHBOARD_JWT_EXPIRE_MINUTES`)
-- Generate a strong secret: `python -c "import secrets; print(secrets.token_hex(32))"`
-
-### Production checklist
-
-- [ ] `DASHBOARD_ADMIN_PASSWORD` ≥ 12 chars, not `admin`
-- [ ] `DASHBOARD_JWT_SECRET` is a random 32-byte hex string
-- [ ] `INTERNAL_API_KEY` is set and rotated quarterly
-- [ ] `DATABASE_URL` uses SSL (`?sslmode=require`) — Supabase enforces this
-- [ ] `CORS_ORIGINS` set to your actual domain(s), not `*`
-- [ ] `ENV=production` set on the server
-- [ ] TLS/HTTPS enabled (Nginx in `docker-compose.selfhost.yml`, or Render auto-TLS)
-- [ ] Firewall open only on ports listed in [Firewall ports](#firewall-ports-to-open)
-- [ ] No API keys in code or git history
-
----
-
-## Production Deployment
-
-### Option A: Render.com (managed, easiest)
-
-1. Push to GitHub
-2. **Render → New → Blueprint** → connect repo → select `render.yaml`
-3. Set secrets in Render Dashboard → Environment for each service
-4. Deploy — auto-deploys on every push
-5. After first deploy: `POST /admin/sip/vobiz/setup` to register SIP trunks
-
-### Option B: Self-hosted VPS (cheapest at scale)
-
-```bash
-# 1. Provision a VPS (Oracle Cloud Free Tier or ₹500/mo DigitalOcean 4GB)
-# 2. Clone repo
-git clone <repo> && cd Arteq-AI-Call-Assistant-
-cp .env.example .env    # fill secrets
-
-# 3. Run one-shot setup (migrations + SIP trunk registration)
-chmod +x setup.sh && ./setup.sh
-
-# 4. Start everything
-docker compose -f docker-compose.selfhost.yml up -d
-
-# 5. Add hospitals via wizard
-curl -X POST https://yourdomain.com/admin/hospitals/wizard \
-  -H "Authorization: Bearer <token>" ...
-```
-
-### Health check
-
-```bash
-curl https://your-service.onrender.com/api/v1/health
-# {"status":"healthy","version":"2.1.0","livekit_configured":true,...}
-```
-
----
-
-## Project Structure
-
-```
-.
-├── livekit_agent.py         LiveKit agent worker (Arya) — runs as separate process
-├── setup.sh                 One-shot setup: migrations + SIP trunks + hospital wizard
-├── Dockerfile               Single image for both API server and agent
-├── docker-compose.yml       Local dev stack (Postgres + Redis + app + agent)
-├── docker-compose.selfhost.yml  Production VPS stack (+ LiveKit + SIP + Nginx)
-├── render.yaml              Render Blueprint (managed cloud deploy)
-├── requirements.txt
-├── .env.example             All env vars documented
-│
-├── src/
-│   ├── main.py              FastAPI entry point + lifespan (migrations, scheduler)
-│   ├── config/settings.py   Pydantic env config with validation
-│   ├── db/queries.py        asyncpg queries + HospitalContext dataclass
-│   ├── ai/                  System prompt builder
-│   ├── telephony/
-│   │   └── livekit_tools.py LLM function tools (book/cancel/callback/emergency)
-│   ├── services/
-│   │   ├── livekit_sip.py       SIP trunk provisioning
-│   │   ├── outbound_calls.py    Reminder / confirmation / callback / followup dialer
-│   │   ├── scheduler.py         Background scheduler loops
-│   │   ├── sms_service.py       No-op base (Vobiz is SIP-only, no SMS)
-│   │   ├── whatsapp_service.py  Meta WhatsApp Cloud API (patient notifications)
-│   │   ├── vobiz_recording.py   Vobiz recording API (list, download, start)
-│   │   └── staff_alert.py       SMS/WhatsApp to duty manager on key events
-│   ├── cache/store.py           In-memory + Redis cache
-│   └── observability/           Structured JSON logging + Prometheus metrics
-│
-├── dashboard/
-│   ├── routes/
-│   │   ├── admin_api.py     Full CRUD REST API (hospitals, doctors, calls, recordings)
-│   │   └── auth.py          JWT auth (/api/v1/auth/login, /api/v1/auth/me)
-│   └── templates/           Alpine.js SPA dashboard
-│
-├── additions/               Analytics, QA review, live monitoring, RBAC users
-│
-├── migrations/versions/     Numbered idempotent SQL migrations (auto-applied)
-│   ├── 001_schema.sql       Full schema + demo hospital
-│   ├── ...
-│   └── 021_vobiz_config.sql Vobiz trunk columns on hospitals/tenants
-│
-├── deploy/
-│   ├── livekit.yaml         LiveKit server config (self-host)
-│   ├── livekit-sip.yaml     LiveKit SIP service config
-│   └── nginx.conf           Nginx reverse proxy config (TLS, rate-limiting)
-│
-└── tests/
-    └── test_smoke.py        Smoke tests (no live API calls)
-```
-
----
-
-## Troubleshooting
-
-### Agent doesn't answer calls
-
-1. Check `LIVEKIT_URL`, `LIVEKIT_API_KEY`, `LIVEKIT_API_SECRET` are set on the **agent** process
-2. Agent logs: `python livekit_agent.py start` → look for `worker_registered`
-3. Self-hosted LiveKit: ensure `NODE_IP` is set to the VPS public IP
-
-### Hospital not found during calls
-
-1. Check slug in room name matches: `SELECT slug FROM hospitals WHERE active=true`
-2. Verify the Vobiz webhook / SIP dispatch rule uses the correct slug pattern
-
-### STT returns empty transcripts
-
-1. Verify `SARVAM_API_KEY` — test at [app.sarvam.ai](https://app.sarvam.ai/playground)
-2. Check VAD triggers: look for `user_speech_finished` in agent logs
-3. Use `SARVAM_STT_LANGUAGE=ml-IN` to pin language if auto-detect is unreliable
-
-### WhatsApp messages not sending
-
-1. `WHATSAPP_ENABLED=true` and `WHATSAPP_PHONE_NUMBER_ID` / `WHATSAPP_ACCESS_TOKEN` must be set
-2. Templates must be approved in Meta Business Manager
-3. Check the `whatsapp_failed` log events for HTTP status codes
-
-### Recordings not appearing
-
-1. `VOBIZ_RECORD_CALLS=true`, `VOBIZ_API_KEY` and `VOBIZ_API_SECRET` must be set
-2. Check `vobiz_recording_start_failed` in logs for Vobiz API errors
-3. Recordings appear in the Vobiz console at [console.vobiz.ai](https://console.vobiz.ai)
-
-### Database timeout on startup
-
-1. `DATABASE_URL` must be: `postgresql://user:pass@host:5432/dbname?sslmode=require`
-2. Supabase free tier pauses after 7 days inactivity — unpause in the dashboard
-3. Docker: ensure `DB_SSL=disable` when connecting to the local postgres container
+## 15. Security
+
+- `ENV=production` enforces a strong dashboard password + non-weak JWT secret and
+  locks CORS to the host.
+- Recordings + transcripts are tenant-scoped and hidden from super admins.
+- Passwords are bcrypt-hashed; tenant admins cannot change plan/tier/slug/active
+  (super-admin only).
+- The SIP inbound trunk only accepts Vobiz's IP ranges.
+- `.env` is gitignored; rotate `DASHBOARD_JWT_SECRET`, `LIVEKIT_API_SECRET` and SIP
+  credentials on any suspected exposure.
