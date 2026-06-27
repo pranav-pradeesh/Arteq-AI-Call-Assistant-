@@ -1314,6 +1314,8 @@ class HospitalVoiceAgent(Agent):
             text = ""
 
         stripped = text.strip()
+        _log.info(f"uotc_in txt={stripped[:60]!r} n={len(stripped)} "
+                  f"outbound={bool(self.session.userdata.get('is_outbound'))}")
 
         # Drop sub-threshold transcripts. VAD's min_speech_duration=0.3s already
         # filters most noise bursts, but occasional artefacts still produce a
@@ -1323,6 +1325,7 @@ class HospitalVoiceAgent(Agent):
         # Malayalam/Indic acknowledgements like "ആ" (yes) or "എ" are a single
         # NON-ASCII char and must get through.
         if stripped and len(stripped) < 2 and stripped not in _DTMF and stripped.isascii():
+            _log.info("uotc_stop why=subthreshold")
             raise agents_llm.StopResponse()
 
         # Post-greeting cooldown: ignore short/ambiguous transcripts in the first
@@ -1339,6 +1342,7 @@ class HospitalVoiceAgent(Agent):
         except Exception:
             pass
         if _cooldown_drop:
+            _log.info(f"uotc_stop why=greeting_cooldown n={len(stripped)}")
             raise agents_llm.StopResponse()
 
         # Voicemail detection (OUTBOUND only): if a carrier/iPhone voicemail picked
@@ -1400,6 +1404,7 @@ class HospitalVoiceAgent(Agent):
         if (last_utterance and stripped and len(stripped) < 60 and
                 any(p in low_stripped for p in _REPEAT_PATTERNS)):
             # Replay last utterance without going to LLM
+            _log.info("uotc_stop why=repeat_replay")
             self.session.say(last_utterance, allow_interruptions=True)
             raise agents_llm.StopResponse()  # genuinely skip the LLM turn
 
@@ -1485,6 +1490,7 @@ class HospitalVoiceAgent(Agent):
             turn_ctx.truncate(max_items=_MAX_CTX + 1)
         except Exception:
             pass
+        _log.info(f"uotc_pass_llm txt={stripped[:60]!r}")
 
     async def tts_node(self, text, model_settings):
         """Streaming tool-syntax stripper — lowest latency for voice.
