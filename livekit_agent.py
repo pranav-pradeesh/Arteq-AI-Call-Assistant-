@@ -1957,6 +1957,26 @@ async def entrypoint(ctx: JobContext) -> None:
     meter = _LatencyMeter()
     session.on("conversation_item_added", meter.on_item)
 
+    # Track whether Arya is currently speaking, and when she last FINISHED speaking
+    # (entered the listening state). The inactivity watchdog uses this so the
+    # "are you there?" nudge starts counting only once she is actually waiting for
+    # the caller — never during or right after her own reply.
+    _speech = {"speaking": False, "since_listening": None}
+
+    def _on_agent_state(ev):
+        try:
+            st = getattr(ev, "new_state", None) or getattr(ev, "state", None) or ""
+            st = str(st).lower()
+            if st == "speaking":
+                _speech["speaking"] = True
+            elif st in ("listening", "idle"):
+                if _speech["speaking"]:
+                    _speech["since_listening"] = datetime.now(timezone.utc)
+                _speech["speaking"] = False
+        except Exception:
+            pass
+    session.on("agent_state_changed", _on_agent_state)
+
     # Immediate-disconnect diagnostics. A caller who drops before any turn
     # completes (turns=0) is either a benign hangup/misdial or a symptom of
     # pre-greeting dead air. Record HOW LONG they stayed and whether the
@@ -2348,10 +2368,18 @@ async def entrypoint(ctx: JobContext) -> None:
             # ASSISTANT turn too means that right after Arya finishes a (possibly long)
             # reply the caller still gets the full think-time window before any
             # "are you there?" nudge — not counted from their previous message.
+            # Never nudge while Arya is speaking.
+            if _speech.get("speaking"):
+                continue
             last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
+            # Start the silence timer from when Arya last FINISHED speaking (not when
+            # she started generating) so a long reply's playout doesn't trip it.
+            _sl = _speech.get("since_listening")
+            if _sl and _sl > last_turn:
+                last_turn = _sl
             try:
                 for _m in session.history.messages():
-                    if getattr(_m, "role", "") not in ("user", "assistant"):
+                    if getattr(_m, "role", "") != "user":   # only the CALLER resets idle
                         continue
                     ts = getattr(_m, "created_at", None) or getattr(_m, "timestamp", None)
                     if isinstance(ts, (int, float)):
