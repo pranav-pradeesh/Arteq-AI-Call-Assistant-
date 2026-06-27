@@ -1990,7 +1990,8 @@ async def entrypoint(ctx: JobContext) -> None:
     # (entered the listening state). The inactivity watchdog uses this so the
     # "are you there?" nudge starts counting only once she is actually waiting for
     # the caller — never during or right after her own reply.
-    _speech = {"speaking": False, "thinking": False, "since_listening": None}
+    _speech = {"speaking": False, "thinking": False, "since_listening": None,
+               "last_user": None, "user_speaking": False}
 
     def _on_agent_state(ev):
         try:
@@ -2017,6 +2018,29 @@ async def entrypoint(ctx: JobContext) -> None:
         except Exception:
             pass
     session.on("agent_state_changed", _on_agent_state)
+
+    # Caller-activity tracking for the inactivity watchdog. The previous approach
+    # scanned session.history for the last user message's created_at, but that
+    # timestamp is stamped when the caller STARTS speaking — which can be EARLIER
+    # than `since_listening` (set when Arya finishes her own reply, including the
+    # "are you there?" nudge). So a real caller reply looked "older" than Arya's
+    # last turn and was ignored, the silence clock never reset, and the nudge
+    # fired again every ~20s, looping and poisoning the LLM context with
+    # "I can't hear you". Tracking the live user-speech events with a wall-clock
+    # `now` is monotonic and always reflects real caller activity.
+    def _mark_user_active(_ev=None):
+        _speech["last_user"] = datetime.now(timezone.utc)
+
+    def _on_user_state(ev):
+        try:
+            st = str(getattr(ev, "new_state", None) or getattr(ev, "state", "")).lower()
+            _speech["user_speaking"] = (st == "speaking")
+            _speech["last_user"] = datetime.now(timezone.utc)
+        except Exception:
+            pass
+
+    session.on("user_state_changed", _on_user_state)
+    session.on("user_input_transcribed", _mark_user_active)
 
     # Immediate-disconnect diagnostics. A caller who drops before any turn
     # completes (turns=0) is either a benign hangup/misdial or a symptom of
@@ -2409,34 +2433,24 @@ async def entrypoint(ctx: JobContext) -> None:
             # ASSISTANT turn too means that right after Arya finishes a (possibly long)
             # reply the caller still gets the full think-time window before any
             # "are you there?" nudge — not counted from their previous message.
-            # Never nudge while Arya is speaking OR thinking (running a tool /
-            # generating her reply) — that processing time is Arya's, not the
-            # caller's silence.
-            if _speech.get("speaking") or _speech.get("thinking"):
+            # Never nudge while Arya is speaking or thinking (her processing time is
+            # not the caller's silence), nor while the CALLER is mid-utterance.
+            if (_speech.get("speaking") or _speech.get("thinking")
+                    or _speech.get("user_speaking")):
                 continue
             last_turn = datetime.fromtimestamp(_greet_at, tz=timezone.utc)
-            # Start the silence timer from when Arya last FINISHED speaking (not when
-            # she started generating) so a long reply's playout doesn't trip it.
-            _sl = _speech.get("since_listening")
-            if _sl and _sl > last_turn:
-                last_turn = _sl
-            try:
-                for _m in session.history.messages():
-                    if getattr(_m, "role", "") != "user":   # only the CALLER resets idle
-                        continue
-                    ts = getattr(_m, "created_at", None) or getattr(_m, "timestamp", None)
-                    if isinstance(ts, (int, float)):
-                        _dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-                    elif isinstance(ts, datetime):
-                        _dt = ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
-                    elif ts is not None and hasattr(ts, "timestamp"):
-                        _dt = datetime.fromtimestamp(ts.timestamp(), tz=timezone.utc)
-                    else:
-                        continue
-                    if _dt > last_turn:
-                        last_turn = _dt
-            except Exception:
-                pass
+            # Idle = time since the latest activity by EITHER side:
+            #   • since_listening — when Arya last FINISHED speaking (so a long reply's
+            #     playout doesn't trip it, and the caller gets full think-time after).
+            #   • last_user — wall-clock time of the caller's most recent speech, set
+            #     from the live user_state_changed / user_input_transcribed events.
+            # last_user is captured with datetime.now() at the moment the caller
+            # speaks, so it is always current and never "older" than since_listening
+            # the way the old history-scan (which used the message's start-of-speech
+            # created_at) could be — that ordering bug let the nudge loop forever.
+            for _cand in (_speech.get("since_listening"), _speech.get("last_user")):
+                if _cand and _cand > last_turn:
+                    last_turn = _cand
 
             silence_s = (datetime.now(timezone.utc) - last_turn).total_seconds()
 
