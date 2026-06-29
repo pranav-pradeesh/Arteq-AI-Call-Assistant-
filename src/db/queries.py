@@ -292,6 +292,40 @@ class HospitalNotFound(Exception):
     """Raised when load_hospital_context can't find the given hospital_id."""
 
 
+async def save_patient(hospital_id: str, name: str, phone: str) -> Optional[str]:
+    """Upsert a patient (by hospital_id + phone) into the `patients` list so callers,
+    bookings and imports show up under Patients. Returns the patient id, or None when
+    there is no usable phone number. Never raises into the caller."""
+    name = (name or "").strip()
+    phone = (phone or "").strip()
+    if not hospital_id or not phone or not any(ch.isdigit() for ch in phone):
+        return None
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            existing = await conn.fetchval(
+                "SELECT id FROM patients WHERE hospital_id=$1 AND phone=$2 LIMIT 1",
+                hospital_id, phone,
+            )
+            if existing:
+                if name:
+                    await conn.execute(
+                        "UPDATE patients SET name=$1 WHERE id=$2 AND (name IS NULL OR name='')",
+                        name, existing,
+                    )
+                return existing
+            import datetime as _dtp, uuid as _up
+            pid = f"P-{_dtp.datetime.utcnow().strftime('%y%m%d')}-{_up.uuid4().hex[:6]}"
+            await conn.execute(
+                "INSERT INTO patients (id, hospital_id, name, phone) VALUES ($1,$2,$3,$4) "
+                "ON CONFLICT (id) DO NOTHING",
+                pid, hospital_id, name or "Unknown", phone,
+            )
+            return pid
+    except Exception:
+        return None
+
+
 async def load_hospital_context(hospital_id: str) -> HospitalContext:
     pool = await get_pool()
     async with pool.acquire() as conn:

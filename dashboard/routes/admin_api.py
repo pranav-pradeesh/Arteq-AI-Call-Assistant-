@@ -3221,6 +3221,7 @@ async def import_appointments(
         slug = hosp["slug"] or "default"
         doctor_name = doctor["name"] or ""
         imported = 0
+        patients_added = 0
         skipped: list[dict] = []
 
         for item in parsed:
@@ -3234,10 +3235,27 @@ async def import_appointments(
             if not phone:
                 skipped.append({"row": rownum, "reason": "invalid phone"})
                 continue
-            if not slot:
-                skipped.append({"row": rownum, "reason": "invalid or missing datetime"})
-                continue
+            # Always save the patient — even with no, or a past, appointment time.
+            _pex = await conn.fetchval(
+                "SELECT id FROM patients WHERE hospital_id=$1 AND phone=$2 LIMIT 1",
+                hospital_id, phone,
+            )
+            if not _pex:
+                _pid = f"P-{datetime.now(timezone.utc).strftime('%y%m%d')}-{uuid.uuid4().hex[:6]}"
+                await conn.execute(
+                    "INSERT INTO patients (id, hospital_id, name, phone) VALUES ($1,$2,$3,$4) "
+                    "ON CONFLICT (id) DO NOTHING",
+                    _pid, hospital_id, name or "Unknown", phone,
+                )
+            patients_added += 1
 
+            # Register an appointment ONLY when the row has an UPCOMING date+time.
+            if not slot:
+                continue  # patient saved; no appointment to register
+            if slot <= datetime.now(_IST):
+                skipped.append({"row": rownum,
+                                "reason": "appointment time is in the past — patient saved, no appointment"})
+                continue
             dup = await conn.fetchval(
                 """SELECT 1 FROM appointments
                    WHERE hospital_id=$1 AND doctor_id=$2
@@ -3245,9 +3263,8 @@ async def import_appointments(
                 hospital_id, doctor_id, phone, slot,
             )
             if dup:
-                skipped.append({"row": rownum, "reason": "duplicate (already imported)"})
+                skipped.append({"row": rownum, "reason": "duplicate appointment (already imported)"})
                 continue
-
             appt_id = str(uuid.uuid4())
             await conn.execute(
                 """INSERT INTO appointments
@@ -3256,16 +3273,14 @@ async def import_appointments(
                    VALUES ($1,$2,$3,$4,$5,$6,'booked','import')""",
                 appt_id, hospital_id, name, phone, doctor_id, slot,
             )
-            # Reminders are handled uniformly by the windowed reminder loop
-            # (3x on the day before: morning/afternoon/evening), so we no longer
-            # enqueue the old 24h/2h queue calls here (would double-remind).
+            # Upcoming imported appointments get the windowed 3x/day reminder loop.
             imported += 1
 
     logger.info(
         "appointments_imported", hospital_id=hospital_id, doctor_id=doctor_id,
         imported=imported, skipped=len(skipped),
     )
-    return {"imported": imported, "skipped": skipped}
+    return {"imported": imported, "patients": patients_added, "skipped": skipped}
 
 
 _REMINDER_SETTING_COLS = (
@@ -3417,6 +3432,37 @@ async def import_doctor_patients(
                 hospital_id, doctor_id, name or "(no name)", phone, last_visit,
             )
             imported += 1
+
+            # Also surface the patient under Patients, and — if the row carries an
+            # UPCOMING date+time — register an appointment (source='import') so it
+            # gets the 3x/day reminder calls.
+            _ph = _normalize_phone(phone)
+            if _ph:
+                _pex = await conn.fetchval(
+                    "SELECT id FROM patients WHERE hospital_id=$1 AND phone=$2 LIMIT 1",
+                    hospital_id, _ph,
+                )
+                if not _pex:
+                    _pid = f"P-{datetime.now(timezone.utc).strftime('%y%m%d')}-{uuid.uuid4().hex[:6]}"
+                    await conn.execute(
+                        "INSERT INTO patients (id, hospital_id, name, phone) VALUES ($1,$2,$3,$4) "
+                        "ON CONFLICT (id) DO NOTHING",
+                        _pid, hospital_id, name or "Unknown", _ph,
+                    )
+                _slot = _parse_import_datetime(lv)
+                if _slot and _slot > datetime.now(_IST):
+                    _dup = await conn.fetchval(
+                        "SELECT 1 FROM appointments WHERE hospital_id=$1 AND doctor_id=$2 "
+                        "AND patient_phone=$3 AND slot_time=$4",
+                        hospital_id, doctor_id, _ph, _slot,
+                    )
+                    if not _dup:
+                        await conn.execute(
+                            "INSERT INTO appointments (id, hospital_id, patient_name, patient_phone, "
+                            "doctor_id, slot_time, status, source) "
+                            "VALUES ($1,$2,$3,$4,$5,$6,'booked','import')",
+                            str(uuid.uuid4()), hospital_id, name or "Unknown", _ph, doctor_id, _slot,
+                        )
     return {"imported": imported, "skipped": skipped, "total": len(rows)}
 
 

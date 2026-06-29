@@ -2204,6 +2204,13 @@ async def entrypoint(ctx: JobContext) -> None:
                         )
                 except Exception as _pm_exc:
                     print(f"[arteq] pmeta update failed: {_pm_exc}", file=sys.stderr)
+                try:
+                    _cp = session_data.get("caller_phone") or ""
+                    if _pm.get("name") and _cp:
+                        from src.db.queries import save_patient as _save_pt
+                        await _save_pt(hospital_id, _pm.get("name"), _cp)
+                except Exception as _sp_exc:
+                    print(f"[arteq] save_patient failed: {_sp_exc}", file=sys.stderr)
 
             # Critical persistence (call_log + recording + patient details) is done;
             # mark complete so a duplicate close/shutdown run no-ops cleanly.

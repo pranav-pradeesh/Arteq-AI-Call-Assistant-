@@ -530,6 +530,13 @@ try:
             logger.error("tool_book_appointment_failed", error=str(exc))
             return "Booking system temporarily unavailable — please call the front desk."
 
+        # Record/refresh the patient so they appear under Patients.
+        try:
+            from src.db.queries import save_patient
+            await save_patient(hospital_id, patient_name, caller_phone)
+        except Exception as _sp_exc:
+            logger.warning("tool_book_save_patient_failed", error=str(_sp_exc))
+
         # Fire-and-forget: patient notification (WhatsApp/SMS) + staff alert
         async def _side_effects():
             try:
