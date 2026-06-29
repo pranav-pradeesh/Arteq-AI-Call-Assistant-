@@ -236,6 +236,7 @@ class HospitalContext:
     agent_language: str = "ml-IN"    # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, te-IN, en-IN
     greeting: str = ""               # custom inbound greeting (overrides default)
     staff_alert_phone: str = ""      # per-hospital duty-manager SMS recipient
+    reception_phone: str = ""        # human/reception transfer number
     holidays: list = field(default_factory=list)  # [{date,reason,closed,open_time,close_time}]
     queue_data: dict = field(default_factory=dict)  # {dept_name: queue_count} — per-call, not cached
     loaded_at: float = 0.0
@@ -402,10 +403,12 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         agent_language = "ml-IN"
         greeting = ""
         staff_alert_phone = ""
+        reception_phone = ""
         try:
             row = await conn.fetchrow(
                 "SELECT knowledge_base, tier, plan, agent_name, agent_language, "
-                "COALESCE(greeting,'') AS greeting, COALESCE(staff_alert_phone,'') AS staff_alert_phone "
+                "COALESCE(greeting,'') AS greeting, COALESCE(staff_alert_phone,'') AS staff_alert_phone, "
+                "COALESCE(reception_phone,'') AS reception_phone "
                 "FROM hospitals WHERE id=$1", hospital_id
             )
             if row:
@@ -416,6 +419,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
                 agent_language = row["agent_language"] or "ml-IN"
                 greeting = row["greeting"] or ""
                 staff_alert_phone = row["staff_alert_phone"] or ""
+                reception_phone = row["reception_phone"] or ""
         except Exception:
             pass
 
@@ -455,6 +459,7 @@ async def load_hospital_context(hospital_id: str) -> HospitalContext:
         agent_language=agent_language,
         greeting=greeting,
         staff_alert_phone=staff_alert_phone,
+        reception_phone=reception_phone,
         holidays=holidays,
         loaded_at=time.time(),
     )

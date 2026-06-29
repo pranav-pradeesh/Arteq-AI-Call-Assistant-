@@ -389,7 +389,9 @@ async def get_hospital(hospital_id: str):
     async with pool.acquire() as conn:
         row = await conn.fetchrow(
             "SELECT id, name, name_ml, address, phone, hours, active, "
-            "slug, plivo_number, knowledge_base, tier, plan, agent_name, agent_language "
+            "slug, plivo_number, knowledge_base, tier, plan, agent_name, agent_language, "
+            "COALESCE(greeting,'') AS greeting, COALESCE(staff_alert_phone,'') AS staff_alert_phone, "
+            "COALESCE(reception_phone,'') AS reception_phone "
             "FROM hospitals WHERE id=$1",
             hospital_id,
         )
@@ -410,6 +412,9 @@ async def get_hospital(hospital_id: str):
         "plan": row["plan"] or "trial",
         "agent_name": row["agent_name"] or "Arya",
         "agent_language": row["agent_language"] or "ml-IN",
+        "greeting": row["greeting"] or "",
+        "staff_alert_phone": row["staff_alert_phone"] or "",
+        "reception_phone": row["reception_phone"] or "",
     }
 
 
@@ -436,6 +441,7 @@ class HospitalUpdate(BaseModel):
     agent_language: Optional[str] = None # BCP-47: ml-IN, hi-IN, ta-IN, kn-IN, en-IN
     greeting: Optional[str] = None       # custom inbound greeting
     staff_alert_phone: Optional[str] = None  # duty-manager SMS recipient
+    reception_phone: Optional[str] = None    # human/reception transfer number
 
 
 @router.post("/hospitals", dependencies=[Depends(_require_super)])
@@ -524,6 +530,10 @@ async def update_hospital(hospital_id: str, body: HospitalUpdate, payload: dict 
         if body.staff_alert_phone is not None:
             fields.append(f"staff_alert_phone=${i}")
             values.append(body.staff_alert_phone)
+            i += 1
+        if body.reception_phone is not None:
+            fields.append(f"reception_phone=${i}")
+            values.append(body.reception_phone)
             i += 1
         if not fields:
             return {"status": "no_changes"}
@@ -3246,9 +3256,9 @@ async def import_appointments(
                    VALUES ($1,$2,$3,$4,$5,$6,'booked','import')""",
                 appt_id, hospital_id, name, phone, doctor_id, slot,
             )
-            await _enqueue_reminder_calls(
-                conn, hospital_id, slug, appt_id, phone, name, slot, hosp, doctor_name,
-            )
+            # Reminders are handled uniformly by the windowed reminder loop
+            # (3x on the day before: morning/afternoon/evening), so we no longer
+            # enqueue the old 24h/2h queue calls here (would double-remind).
             imported += 1
 
     logger.info(

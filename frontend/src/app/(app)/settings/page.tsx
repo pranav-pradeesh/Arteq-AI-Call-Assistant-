@@ -27,6 +27,7 @@ type ProfileForm = {
   agent_language: string;
   greeting: string;
   staff_alert_phone: string;
+  reception_phone: string;
 };
 
 type HoursState = Record<DowKey, { enabled: boolean; open: string; close: string }>;
@@ -60,7 +61,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
   });
 
   const [profile, setProfile] = React.useState<ProfileForm>({
-    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "", agent_language: "ml-IN", greeting: "", staff_alert_phone: "",
+    name: "", name_ml: "", phone: "", address: "", slug: "", tier: "hospital", agent_name: "", agent_language: "ml-IN", greeting: "", staff_alert_phone: "", reception_phone: "",
   });
   const [hours, setHours] = React.useState<HoursState>(buildHoursState(null));
   const [initialized, setInitialized] = React.useState(false);
@@ -78,6 +79,7 @@ function Inner({ hospitalId }: { hospitalId: string }) {
         agent_language: hospital.agent_language ?? "ml-IN",
         greeting: hospital.greeting ?? "",
         staff_alert_phone: hospital.staff_alert_phone ?? "",
+        reception_phone: hospital.reception_phone ?? "",
       });
       setHours(buildHoursState(hospital.hours));
       setInitialized(true);
@@ -163,6 +165,9 @@ function Inner({ hospitalId }: { hospitalId: string }) {
             </Field>
             <Field label="Staff Alert Phone (emergency SMS recipient)">
               <Input value={profile.staff_alert_phone} onChange={setP("staff_alert_phone")} placeholder="+91…" />
+            </Field>
+            <Field label="Reception Phone (transfer caller to a human when asked)">
+              <Input value={profile.reception_phone} onChange={setP("reception_phone")} placeholder="+91…" />
             </Field>
           </form>
         </CardBody>

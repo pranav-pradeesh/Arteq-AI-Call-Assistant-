@@ -20,6 +20,7 @@ export interface Hospital {
   agent_language?: string | null;
   greeting?: string | null;
   staff_alert_phone?: string | null;
+  reception_phone?: string | null;
   active: boolean;
   created_at?: string;
 }

@@ -1370,6 +1370,39 @@ try:
                 "naturally in their language):\n" + "\n".join(_lines))
 
     # Full tool set for hospital tier
+    @function_tool
+    async def connect_to_human(context: RunContext, reason: str = "") -> str:
+        """Connect the caller to a real person / the hospital reception desk. Call
+        this ONLY when the caller explicitly asks to talk to a human, a person,
+        staff, the receptionist, or to be transferred to someone — it bridges the
+        call to the hospital's configured reception number."""
+        _mark_intent(context, "transfer")
+        hospital_ctx = _ud(context, "hospital_ctx")
+        room_name = _ud(context, "room_name", "")
+        try:
+            ud = context.session.userdata if hasattr(context, "session") else getattr(context, "userdata", {})
+            ud["transfer_requested"] = True
+            ud["transfer_destination"] = "reception"
+        except Exception:
+            pass
+        num = (getattr(hospital_ctx, "reception_phone", "") or "").strip() if hospital_ctx else ""
+        _clean = num.replace(" ", "").replace("-", "")
+        if not (num and (_clean.startswith("+") or (_clean.isdigit() and len(_clean) >= 10))):
+            return ("I'm sorry, I can't connect you to a person right now. I've noted your "
+                    "request and our reception will get back to you.")
+        if room_name:
+            try:
+                from src.services.livekit_sip import transfer_call_in_room
+                ok = await transfer_call_in_room(room_name=room_name, to_phone=num,
+                                                 participant_name="Reception")
+                if ok:
+                    logger.info("tool_connect_human_ok", dest=num[-4:])
+                    return "Connecting you to our reception now. Please hold."
+            except Exception as exc:
+                logger.warning("tool_connect_human_failed", error=str(exc))
+        return ("I couldn't connect you directly right now. I've noted your request — "
+                "reception will call you back shortly.")
+
     ALL_TOOLS = [
         book_appointment,
         confirm_appointment,
@@ -1385,6 +1418,7 @@ try:
         send_location_sms,
         alert_emergency,
         transfer_to_department,
+        connect_to_human,
         end_call,
     ]
 
@@ -1402,6 +1436,7 @@ try:
         get_doctor_schedule,
         send_location_sms,
         alert_emergency,
+        connect_to_human,
         end_call,
     ]
 
