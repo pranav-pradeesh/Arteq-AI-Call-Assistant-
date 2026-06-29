@@ -39,6 +39,28 @@ def is_within_calling_hours(now_ist: datetime | None = None) -> bool:
     return CALLING_WINDOW_START <= now <= CALLING_WINDOW_END
 
 
+# Reminder cadence: on the day BEFORE the appointment, call up to 3x — once per
+# window (morning / afternoon / evening), regardless of whether earlier calls were
+# answered, stopping as soon as the patient attends (reminder_sent=true).
+REMINDER_WINDOWS = [
+    ("morning",   time(9, 0),  time(11, 30)),
+    ("afternoon", time(13, 0), time(15, 30)),
+    ("evening",   time(17, 0), time(19, 30)),
+]
+
+
+def _current_reminder_window(now_ist: datetime | None = None):
+    """Return (window_name, window_start_dt) for the current IST time, or
+    (None, None) if not inside any reminder window."""
+    now = now_ist or datetime.now(INDIA_TZ)
+    t = now.time()
+    for name, start, end in REMINDER_WINDOWS:
+        if start <= t <= end:
+            return name, now.replace(hour=start.hour, minute=start.minute,
+                                     second=0, microsecond=0)
+    return None, None
+
+
 async def log_appointment_event(
     conn,
     appointment_id: str,
@@ -263,10 +285,9 @@ async def place_reminder_call(
     appt: dict,
     tenant_slug: str = "default",
 ) -> bool:
-    """Place a reminder call for an appointment within the next 24 hours."""
-    if not is_within_calling_hours():
-        return False
-
+    """Place a reminder call on the day BEFORE the appointment, up to 3x — one
+    call per time-of-day window (morning / afternoon / evening). Independent of
+    whether earlier calls were answered; stops once the patient attends."""
     appt_id = str(appt["id"])
     hospital_id = str(appt.get("hospital_id") or "")
     attempts = appt.get("reminder_attempts", 0)
@@ -276,6 +297,18 @@ async def place_reminder_call(
             await update_workflow_status(conn, appt_id, hospital_id, "missed",
                                          note="max reminder attempts reached")
         return False
+
+    # Fire at most once per window. Skip if outside the 3 windows, or if a
+    # reminder already went out in the current window today.
+    now_ist = datetime.now(INDIA_TZ)
+    win_name, win_start = _current_reminder_window(now_ist)
+    if win_name is None:
+        return False
+    _last = appt.get("last_reminder_at")
+    if _last is not None:
+        _last_ist = _last.astimezone(INDIA_TZ) if _last.tzinfo else INDIA_TZ.localize(_last)
+        if _last_ist >= win_start:
+            return False
 
     slot = appt.get("slot_time")
     slot_local = slot.astimezone(INDIA_TZ) if slot and slot.tzinfo else (
@@ -295,7 +328,8 @@ async def place_reminder_call(
 
     async with pool.acquire() as conn:
         await conn.execute(
-            "UPDATE appointments SET reminder_attempts = reminder_attempts + 1 WHERE id = $1",
+            "UPDATE appointments SET reminder_attempts = reminder_attempts + 1, "
+            "last_reminder_at = now() WHERE id = $1",
             appt_id,
         )
         if room:

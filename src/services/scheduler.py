@@ -87,7 +87,7 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
 
     _PENDING = """
         SELECT a.id, a.patient_phone, a.patient_name, a.slot_time,
-               a.hospital_id, a.reminder_attempts,
+               a.hospital_id, a.reminder_attempts, a.last_reminder_at,
                d.name AS doctor_name, h.slug AS slug, h.name AS hospital_name
         FROM appointments a
         LEFT JOIN doctors  d ON a.doctor_id   = d.id
@@ -97,7 +97,8 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
           AND a.status IN ('booked', 'confirmed')
           AND a.workflow_status NOT IN ('cancelled', 'missed')
           AND a.source <> 'import'
-          AND a.slot_time BETWEEN now() AND now() + interval '24 hours'
+          AND (a.slot_time AT TIME ZONE 'Asia/Kolkata')::date
+              = ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
         ORDER BY a.slot_time
     """
     # Imported (trial) appointments get their 24h + 2h reminders from the
