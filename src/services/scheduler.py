@@ -96,8 +96,9 @@ async def reminder_loop(interval_seconds: int = 900) -> None:
           AND a.reminder_attempts < $1
           AND a.status IN ('booked', 'confirmed')
           AND a.workflow_status NOT IN ('cancelled', 'missed')
+          AND a.slot_time > now()
           AND (a.slot_time AT TIME ZONE 'Asia/Kolkata')::date
-              = ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
+              <= ((now() AT TIME ZONE 'Asia/Kolkata')::date + 1)
         ORDER BY a.slot_time
     """
     # Imported (trial) appointments get their 24h + 2h reminders from the
