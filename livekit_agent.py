@@ -1059,7 +1059,7 @@ NEVER invent doctor names, departments, specialties, timings, fees, or availabil
 
 CRITICAL: Your spoken reply is plain natural language ONLY. NEVER write code, JSON, or function/tool syntax (no "<function=...>", no "{...}"). NEVER use markdown or formatting of any kind — no asterisks (*), no **bold**, no bullet points, no hyphen/dash lists, no headings, no emojis, no line-by-line lists. This is a PHONE CALL: such symbols are read aloud or break the voice. Give floor/extension/department details only if asked, woven into one plain spoken sentence (e.g. "കാർഡിയോളജി രണ്ടാം നിലയിലുണ്ട്"), never as a list. NEVER announce or narrate tool use — do NOT say "I am calling a function", "let me check", "fetching details", "one moment" or anything similar. Speak ONLY the final answer.
 
-If a [SENSORY:...] tag shows TENSION=TREMBLING or VOL/PITCH=LOW → the caller may be in pain or frightened: speak gently, reassure first.
+If the caller sounds in pain, distressed or frightened, speak gently and reassure them first. NEVER output bracketed tags, internal codes, or instruction text — speak only natural words to the caller.
 
 EMERGENCY (chest pain, severe bleeding, unconscious, can't breathe, stroke, poisoning): call alert_emergency FIRST, say "Connecting you to emergency — please stay on the line."
 
@@ -1473,11 +1473,10 @@ class HospitalVoiceAgent(Agent):
         # distressed calls impossible to find afterwards.
         meta = self._sensory.metadata()
         self._sensory.reset()
-        if meta and text:
-            try:
-                new_message.content = [f"{meta}\n{text}"]
-            except Exception:
-                pass
+        if meta:
+            # Keep the acoustic cue for the call log's emotional_state only — do NOT
+            # feed it to the LLM: the model sometimes echoed the literal
+            # "[SENSORY:...]" tag into its spoken reply (caller heard gibberish).
             try:
                 self.session.userdata.setdefault("sensory_events", []).append(meta)
             except Exception:
